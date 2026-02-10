@@ -1,0 +1,11 @@
+lerobot
+mujoco
+gymnasium
+imageio
+opencv-python
+tqdm
+einops
+diffusers
+transformers
+accelerate
+safetensors

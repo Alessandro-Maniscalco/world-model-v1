@@ -1,0 +1,10 @@
+lerobot
+diffusers
+transformers
+accelerate
+safetensors
+einops
+tqdm
+imageio
+opencv-python
+matplotlib

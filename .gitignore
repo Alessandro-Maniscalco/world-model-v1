@@ -15,3 +15,7 @@ wandb/
 *.safetensors
 *.mp4
 *.gif
+
+# Generated assets (scripts write here)
+assets/images/*.png
+assets/videos/
