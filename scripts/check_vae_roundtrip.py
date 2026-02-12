@@ -72,7 +72,7 @@ def denormalize_to_uint8(x: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def main():
-    out_dir = Path("assets/vae_roundtrip")
+    out_dir = Path(__file__).resolve().parent.parent / "assets" / "vae_roundtrip"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,14 +86,14 @@ def main():
     ).to(device)
     vae.eval()
 
-    # LIBERO images are 10 Hz, so 8 frames covers 0.7s of history.
-    clip_len = 8
+    clip_len = 9
     dt = 0.1
     deltas = [-(clip_len - 1 - i) * dt for i in range(clip_len)]  # [-0.7, ..., 0.0]
 
     ds = LeRobotDataset(
         "lerobot/libero",
         delta_timestamps={"observation.images.image": deltas},
+        video_backend="pyav",
     )
 
     idx = random.randint(1000, len(ds) - 1)
