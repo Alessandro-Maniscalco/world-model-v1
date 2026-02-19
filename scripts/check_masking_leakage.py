@@ -12,49 +12,12 @@
 
 import os
 import random
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-
-@dataclass
-class MaskSpec:
-    n_past: int
-    n_current: int
-    n_future: int
-
-
-def build_no_future_leak_mask(spec: MaskSpec, device: torch.device) -> torch.Tensor:
-    """
-    Returns an additive attention mask for nn.MultiheadAttention with shape [L, L],
-    where mask[i, j] = -inf means query position i cannot attend to key position j.
-
-    Allowed:
-      past attends to past
-      current attends to past and current
-      future can attend anywhere (does not matter for leakage check)
-
-    Disallowed:
-      past attends to future
-      current attends to future
-
-    This matches your stated rule:
-      current noisy chunk can attend to clean previous chunks, but must not leak future.
-    """
-    L = spec.n_past + spec.n_current + spec.n_future
-    mask = torch.zeros((L, L), device=device, dtype=torch.float32)
-
-    past_end = spec.n_past
-    cur_end = spec.n_past + spec.n_current
-
-    # Block attending to future columns for past and current query rows
-    if spec.n_future > 0:
-        mask[:cur_end, cur_end:] = float("-inf")
-
-    return mask
+from world_model.masking import MaskSpec, build_no_future_leak_mask
 
 
 class TinyAttnBlock(nn.Module):

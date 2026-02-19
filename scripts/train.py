@@ -13,140 +13,30 @@
 # It does NOT implement diffusion or flow matching yet.
 # This is intentional: the goal is to validate data and wiring, not final objective.
 
-import os
 import random
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from tqdm import tqdm
 
 from diffusers import AutoencoderKLWan
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-
-@dataclass
-class TrainConfig:
-    repo_id: str = "lerobot/libero"
-    video_key: str = "observation.images.image"
-
-    use_proprio: bool = True
-
-    # Windowing at 10 Hz for LIBERO
-    context_len: int = 8   # l
-    horizon_len: int = 8   # H
-    dt: float = 0.1
-
-    # Overfit subset
-    subset_indices: int = 8          # number of samples in tiny dataset
-    batch_size: int = 2
-    num_steps: int = 300
-    lr: float = 2e-3
-
-    # Model size
-    hidden: int = 2048
-
-    # Output
-    out_dir: str = "runs/overfit_test"
-    seed: int = 0
+from world_model.config import TrainConfig
+from world_model.data import (
+    flatten_latents_per_timestep,
+    load_lerobot_dataset,
+    pack_world_model_batch,
+)
+from world_model.latents import encode_window_to_latents
+from world_model.models import TinyLatentWorldModel
+from world_model.training import mse_prediction_loss
 
 
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-
-def normalize_to_minus1_1(x: torch.Tensor) -> torch.Tensor:
-    if x.dtype == torch.uint8:
-        x = x.float() / 255.0
-    else:
-        x = x.float()
-        if float(x.max().cpu()) > 1.5:
-            x = x / 255.0
-    return x * 2.0 - 1.0
-
-
-def to_bcthw(video: torch.Tensor) -> torch.Tensor:
-    # Accept T,C,H,W or T,H,W,C and return B,C,T,H,W
-    if video.ndim != 4:
-        raise ValueError(f"Expected 4D video tensor, got {video.ndim}D {tuple(video.shape)}")
-    if video.shape[1] == 3:
-        tchw = video
-    elif video.shape[-1] == 3:
-        tchw = video.permute(0, 3, 1, 2)
-    else:
-        raise ValueError(f"Unrecognized video shape: {tuple(video.shape)}")
-    return tchw.permute(1, 0, 2, 3).unsqueeze(0)
-
-
-class TinyLatentWorldModel(nn.Module):
-    """
-    A minimal predictor to overfit quickly.
-    It predicts future latents z_future from flattened conditioning:
-    z_past, actions_past, and optionally proprio_last.
-
-    This is not your final DiT or diffusion model.
-    It is a pipeline validator.
-    """
-
-    def __init__(
-        self,
-        z_dim: int,
-        a_dim: int,
-        q_dim: int,
-        context_len: int,
-        horizon_len: int,
-        hidden: int,
-        use_proprio: bool,
-    ):
-        super().__init__()
-        self.use_proprio = use_proprio
-        self.context_len = context_len
-        self.horizon_len = horizon_len
-        self.z_dim = z_dim
-
-        cond_dim = (context_len * z_dim) + (context_len * a_dim)
-        if use_proprio:
-            cond_dim += q_dim
-
-        out_dim = horizon_len * z_dim
-
-        self.net = nn.Sequential(
-            nn.LayerNorm(cond_dim),
-            nn.Linear(cond_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, out_dim),
-        )
-
-    def forward(self, z_past_flat: torch.Tensor, a_past: torch.Tensor, q_last: torch.Tensor | None):
-        # z_past_flat: [B, context_len*z_dim]
-        # a_past: [B, context_len, a_dim]
-        b = z_past_flat.shape[0]
-        a_flat = a_past.reshape(b, -1)
-
-        if self.use_proprio:
-            if q_last is None:
-                raise ValueError("use_proprio=True but q_last is None")
-            x = torch.cat([z_past_flat, a_flat, q_last], dim=1)
-        else:
-            x = torch.cat([z_past_flat, a_flat], dim=1)
-
-        y = self.net(x)
-        return y.reshape(b, self.horizon_len, self.z_dim)
-
-
-def build_deltas(context_len: int, horizon_len: int, dt: float):
-    # We want a contiguous window of length context_len + horizon_len ending at t=0
-    # Example with total_len=16: deltas = [-1.5, ..., -0.1, 0.0]
-    total_len = context_len + horizon_len
-    deltas = [-(total_len - 1 - i) * dt for i in range(total_len)]
-    return deltas
 
 
 def collate_first(batch):
@@ -163,47 +53,6 @@ def collate_first(batch):
     return out
 
 
-@torch.no_grad()
-def encode_window_to_latents(vae: AutoencoderKLWan, video_window_tchw: torch.Tensor, device: torch.device):
-    """
-    video_window_tchw: [B, T, C, H, W] or [B, T, H, W, C] is NOT accepted.
-    We expect the DataLoader output for video key as [B, T, C, H, W] or [B, T, H, W, C].
-    We convert to [B, C, T, H, W], normalize to [-1,1], then encode.
-
-    Returns latents as [B, C_lat, T_lat, H_lat, W_lat] flattened per timestep later.
-    """
-    if video_window_tchw.ndim != 5:
-        raise ValueError(f"Expected 5D batched video, got {video_window_tchw.ndim}D {tuple(video_window_tchw.shape)}")
-
-    # Detect whether input is [B,T,C,H,W] or [B,T,H,W,C]
-    if video_window_tchw.shape[2] == 3:
-        btchw = video_window_tchw
-        bcthw = btchw.permute(0, 2, 1, 3, 4)  # B,C,T,H,W
-    elif video_window_tchw.shape[-1] == 3:
-        bthwc = video_window_tchw
-        btchw = bthwc.permute(0, 1, 4, 2, 3)  # B,T,C,H,W
-        bcthw = btchw.permute(0, 2, 1, 3, 4)
-    else:
-        raise ValueError(f"Unrecognized batched video shape: {tuple(video_window_tchw.shape)}")
-
-    bcthw = normalize_to_minus1_1(bcthw).to(device)
-
-    enc = vae.encode(bcthw)
-    latents = enc.latent_dist.mean  # deterministic for training stability
-    return latents
-
-
-def flatten_latents_per_timestep(latents: torch.Tensor):
-    """
-    latents: [B, C_lat, T_lat, H_lat, W_lat]
-    Return z_tokens: [B, T_lat, z_dim] where z_dim = C_lat*H_lat*W_lat
-    """
-    b, c, t, h, w = latents.shape
-    z = latents.permute(0, 2, 1, 3, 4).contiguous()  # B,T,C,H,W
-    z = z.reshape(b, t, c * h * w)
-    return z
-
-
 def main():
     cfg = TrainConfig()
     set_seed(cfg.seed)
@@ -214,14 +63,7 @@ def main():
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dataset window
-    deltas = build_deltas(cfg.context_len, cfg.horizon_len, cfg.dt)
-
-    ds = LeRobotDataset(
-        cfg.repo_id,
-        delta_timestamps={cfg.video_key: deltas},
-        video_backend="pyav",
-    )
+    ds = load_lerobot_dataset(cfg, video_backend="pyav")
 
     # Build a tiny subset: first N indices
     subset_indices = cfg.batch_size
@@ -323,8 +165,6 @@ def main():
     ).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-    loss_fn = nn.MSELoss()
-
     print("Starting tiny overfit training")
     model.train()
 
@@ -348,27 +188,28 @@ def main():
                 t_ctx = t_lat - 1
                 t_hor = 1
 
-            z_past = z_tokens[:, :t_ctx]                  # [B, t_ctx, z_dim]
-            z_future = z_tokens[:, t_ctx:t_ctx + t_hor]   # [B, t_hor, z_dim]
-
             if action.ndim == 2:
-                a_past = action.to(device).unsqueeze(1).repeat(1, t_ctx, 1)
+                action_seq = action.to(device).unsqueeze(1).repeat(1, t_ctx + t_hor, 1)
             else:
-                a_past = action[:, :t_ctx].to(device)
+                action_seq = action[:, :t_ctx + t_hor].to(device)
 
-            if cfg.use_proprio and proprio is not None:
-                if proprio.ndim == 2:
-                    q_last = proprio.to(device)
-                else:
-                    q_last = proprio[:, t_ctx - 1].to(device)
+            if cfg.use_proprio and proprio is not None and proprio.ndim == 2:
+                proprio_seq = proprio.to(device).unsqueeze(1).repeat(1, t_ctx + t_hor, 1)
+            elif cfg.use_proprio and proprio is not None:
+                proprio_seq = proprio[:, :t_ctx + t_hor].to(device)
             else:
-                q_last = None
+                proprio_seq = None
 
-            z_past_flat = z_past.reshape(z_past.shape[0], -1).to(device)
-            z_future = z_future.to(device)
+            packed = pack_world_model_batch(
+                z_tokens=z_tokens[:, :t_ctx + t_hor].to(device),
+                actions=action_seq,
+                proprio=proprio_seq,
+                context_len=t_ctx,
+                horizon_len=t_hor,
+            )
 
-            pred = model(z_past_flat, a_past, q_last)
-            loss = loss_fn(pred, z_future)
+            pred = model(packed.z_past, packed.a_past, packed.q_last)
+            loss = mse_prediction_loss(pred, packed.z_future.to(device))
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
