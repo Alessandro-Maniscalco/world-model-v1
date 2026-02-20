@@ -2,51 +2,59 @@
 
 This checklist is the operational plan for implementing and validating `world-model-v1`. Each item is designed to be verifiable. Do not advance milestones until the definition of done is satisfied.
 
+## Target hardware for validation
+
+Use this as the default test baseline unless a task explicitly says otherwise.
+
+* OS: Linux
+* GPU: NVIDIA GeForce RTX 3080 (16 GB VRAM)
+* Primary device: CUDA
+
 ## Milestone 0: Tooling, environment, and data sanity
 
 ### Repo and environment
 
-* [ ] Repository has `/docs/` with `scope.md`, `architecture.md`, and this checklist
-* [ ] `.gitignore` excludes cache, checkpoints, runs, and large artifacts
-* [ ] `requirements.txt` installs cleanly in a fresh venv on the target machine
-* [ ] CUDA is visible to PyTorch and basic GPU tensor ops run
+* [x] Repository has `/docs/` with `scope.md`, `architecture.md`, and this checklist
+* [x] `.gitignore` excludes cache, checkpoints, runs, and large artifacts
+* [x] `requirements.txt` installs cleanly in a fresh venv on the target machine
+* [x] CUDA is visible to PyTorch and basic GPU tensor ops run
 
 ### Dataset sanity
 
-* [ ] `scripts/check_dataset.py` loads `lerobot/libero` successfully
-* [ ] `LeRobotDataset(..., video_backend="pyav")` decodes frames successfully
-* [ ] Printed keys include:
+* [x] `scripts/check_dataset.py` loads `lerobot/libero` successfully
+* [x] `LeRobotDataset(..., video_backend="pyav")` decodes frames successfully
+* [x] Printed keys include:
 
-  * [ ] `observation.images.image`
-  * [ ] `action`
-  * [ ] `observation.state` (for proprio ablation)
-* [ ] Confirm 10 Hz alignment:
+  * [x] `observation.images.image`
+  * [x] `action`
+  * [x] `observation.state` (for proprio ablation)
+* [x] Confirm 10 Hz alignment:
 
-  * [ ] timestamps are monotonic
-  * [ ] action and state exist for each sampled timestep
+  * [x] timestamps are monotonic
+  * [x] action and state exist for each sampled timestep
 
 ### VAE and caching sanity
 
-* [ ] `scripts/check_vae_roundtrip.py`:
+* [x] `scripts/check_vae_roundtrip.py`:
 
-  * [ ] prints latent shape, min, max, mean, std
-  * [ ] saves side by side MP4 and PNG frames
-* [ ] `scripts/check_latent_cache.py`:
+  * [x] prints latent shape, min, max, mean, std
+  * [x] saves side by side MP4 and PNG frames
+* [x] `scripts/check_latent_cache.py`:
 
-  * [ ] writes cached latents for a small subset
-  * [ ] reloads latents and verifies exact file integrity
-  * [ ] confirms cached equals direct encoding using deterministic latents
+  * [x] writes cached latents for a small subset
+  * [x] reloads latents and verifies exact file integrity
+  * [x] confirms cached equals direct encoding using deterministic latents
 
 ### Masking sanity
 
-* [ ] `scripts/check_masking_leakage.py`:
+* [x] `scripts/check_masking_leakage.py`:
 
-  * [ ] passes no leak test under the intended mask
-  * [ ] passes negative control test with mask disabled
+  * [x] passes no leak test under the intended mask
+  * [x] passes negative control test with mask disabled
 
 Definition of done:
 
-* [ ] All scripts above run end to end without manual intervention and produce saved artifacts.
+* [x] All scripts above run end to end without manual intervention and produce saved artifacts.
 
 ---
 
@@ -54,11 +62,11 @@ Definition of done:
 
 ### Latent time API
 
-* [ ] Implement `src/world_model/latents/wan_vae.py` with:
+* [x] Implement `src/world_model/latents/vae.py` with:
 
-  * [ ] `encode(video) -> latents`
-  * [ ] `decode(latents) -> video`
-  * [ ] deterministic mode for caching and training
+  * [x] `encode(video) -> latents`
+  * [x] `decode(latents) -> video`
+  * [x] deterministic mode for caching and training
 
 ### Latent time window split
 
