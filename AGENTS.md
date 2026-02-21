@@ -10,4 +10,8 @@
 ## Environment
 - Always run Python and test commands inside the repo virtualenv at `.venv`.
 - Before running Python tools, execute: `source .venv/bin/activate`.
+##Design decisions
+- Every major design choice must be written in the chat (what changed and why).
+##Dependencies
+- If a new library must be installed, add it to requirements.txt in the same change.
 </INSTRUCTIONS>
