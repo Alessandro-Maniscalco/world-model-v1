@@ -26,11 +26,11 @@ def test_pack_latent_window_splits_in_latent_time_and_aligns_actions():
 
     assert packed.z_past.shape == (1, 4, 3)
     assert packed.z_future.shape == (1, 2, 3)
-    assert packed.a_past.shape == (1, 4, 1)
+    assert packed.a_plan.shape == (1, 2, 1)
 
     # nearest-neighbor indices from T_a=3 -> T=6 are [0,0,1,1,2,2]
-    expected_a_past = torch.tensor([[[0.0], [0.0], [10.0], [10.0]]])
-    assert torch.equal(packed.a_past, expected_a_past)
+    expected_a_plan = torch.tensor([[[20.0], [20.0]]])
+    assert torch.equal(packed.a_plan, expected_a_plan)
 
 
 def test_pack_latent_window_optional_proprio_last_and_past():

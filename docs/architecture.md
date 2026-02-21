@@ -2,29 +2,29 @@
 
 ## Overview
 
-The model predicts future visual observations by operating entirely in the latent space of a frozen pretrained video VAE. The backbone is a pretrained diffusion transformer that is fine tuned to predict a flow matching velocity field for future latent chunks, conditioned on past latent context plus action tokens and optional proprio tokens. Conditioning is injected into every transformer block using AdaLN Zero.
+The model predicts future visual observations by operating entirely in the latent space of a frozen pretrained video VAE. The backbone is a pretrained diffusion transformer that is fine tuned to predict a flow matching velocity field for future latent chunks, conditioned on past latent context plus an action plan (for $a_{t:t+H-1}$) and optional proprio. Action/proprio information conditions the network only through AdaLN Zero (and not via attention over action/proprio tokens).
 
 Core objective:
 
 $$
-\pi(o_{l:l+H}\mid o_{0:l}, a_{0:l}, q_l)
+\pi_\theta\!\left(o_{t:t+H}\mid o_{t-\ell:t}, a_{t:t+H-1}, q_t\right)
 $$
 
 Key constraints:
 
 1. LIBERO streams are sampled at 10 Hz.
-2. Context length in frames: (l = 10).
-3. Prediction horizon in frames: (H = 8).
-4. Chunking: (K+1), defined in latent time.
+2. Context length in frames: $\ell = 10$.
+3. Prediction horizon in frames: $H = 8$.
+4. Chunking: $K+1$, defined in latent time.
 5. Latent time is authoritative: the VAE may change effective timestep count, so all splits, masks, and chunk logic happen after encoding.
 
 ## Data flow
 
 ### Inputs
 
-1. RGB frames: (o_{0:l}) and (o_{l:l+H}), sampled at 10 Hz.
-2. Past actions: (a_{0:l}), aligned to the visual context.
-3. Proprio state: (q_l) optional, aligned to the last context step.
+1. RGB frames: $o_{t-\ell:t}$ (context) and $o_{t:t+H}$ (future target), sampled at 10 Hz.
+2. Action plan: $a_{t:t+H-1}$, aligned to the future target window.
+3. Proprio state: $q_t$ optional, aligned to the last context step.
 
 ### Latent encoding
 
@@ -34,14 +34,14 @@ $$
 z = \mathrm{VAEEnc}(o),\quad \hat o = \mathrm{VAEDec}(z)
 $$
 
-All training and masking operate on (z), not on (o).
+All training and masking operate on $z$, not on $o$.
 
 ### Latent time split
 
 After encoding the full window, split by latent indices:
 
-1. (z_{\text{past}}) from the latent timesteps corresponding to the context
-2. (z_{\text{future}}) from the latent timesteps corresponding to the horizon
+1. $z_{\text{past}}$ from the latent timesteps corresponding to the context
+2. $z_{\text{future}}$ from the latent timesteps corresponding to the horizon
 
 This split must be computed after encoding, not assumed from frame counts.
 
@@ -49,29 +49,29 @@ This split must be computed after encoding, not assumed from frame counts.
 
 ### Action encoder
 
-Maps action vectors to conditioning tokens:
+Maps an action plan to an AdaLN conditioning embedding:
 
 $$
-a_{0:l} \mapsto \mathrm{Tok}_a \in \mathbb R^{N_a \times d}
+a_{t:t+H-1} \mapsto c_a \in \mathbb R^{d}
 $$
 
 Design option:
 
-1. One token per action timestep, projected to hidden size (d).
-2. Optional pooling to fewer tokens, controlled by config.
+1. Pool the action plan over time and project to hidden size (d).
+2. If per-timestep action features are computed, they must be pooled before AdaLN so they are not part of the transformer token sequence.
 
 ### Proprio encoder
 
-Maps (q_l) to conditioning tokens:
+Maps (q_t) to an AdaLN conditioning embedding:
 
 $$
-q_l \mapsto \mathrm{Tok}_q \in \mathbb R^{N_q \times d}
+q_t \mapsto c_q \in \mathbb R^{d}
 $$
 
 Ablation:
 
-1. With proprio: include (\mathrm{Tok}_q).
-2. Without proprio: drop or zero (\mathrm{Tok}_q) using a config flag.
+1. With proprio: include $\mathrm{Tok}_q$.
+2. Without proprio: drop or zero $\mathrm{Tok}_q$ using a config flag.
 
 ## Backbone and conditioning injection
 
@@ -85,13 +85,13 @@ Each transformer block receives conditioning through AdaLN Zero, modulating norm
 
 Conditioning sources:
 
-1. timestep embedding for (t)
-2. action tokens (\mathrm{Tok}_a)
-3. optional proprio tokens (\mathrm{Tok}_q)
+1. timestep embedding for $t$
+2. action conditioning embedding $c_a$
+3. optional proprio conditioning embedding $c_q$
 
 ## Chunking and teacher forcing
 
-### Chunking (K+1)
+### Chunking $K+1$
 
 Define chunk boundaries in latent time. Represent the future latent sequence as chunks:
 
@@ -105,7 +105,7 @@ $$
 z^{(1:k-1)}_1
 $$
 
-The additional (+1) chunk is treated as the final autoregressive target stage as defined by the chunking schedule. All chunk indexing is computed in latent time.
+The additional $+1$ chunk is treated as the final autoregressive target stage as defined by the chunking schedule. All chunk indexing is computed in latent time.
 
 ## Attention masking
 
@@ -114,9 +114,11 @@ Requirement:
 1. The current noisy chunk may attend to:
 
    * all past clean chunks
-   * action tokens
-   * proprio tokens if enabled
 2. The current noisy chunk must not attend to any future chunk tokens.
+
+Notes:
+
+1. Actions and proprio do not participate in attention. They condition the network only through AdaLN Zero (and therefore do not appear in the attention mask).
 
 Implement masking as a block causal mask defined by chunk ids, producing an attention mask tensor for the transformer.
 
@@ -129,12 +131,12 @@ Leakage tests must pass by construction:
 
 ### Flow matching setup
 
-For each chunk (k):
+For each chunk $k$:
 
-1. Start from clean latent chunk (z^{(k)}_1).
-2. Sample timestep (t_k \in [0,1]).
-3. Construct noisy latent (z^{(k)}_{t_k}) and target velocity (v_k) using the chosen flow matching path.
-4. Predict velocity (u_\theta) with conditioning and teacher forced context.
+1. Start from clean latent chunk $z^{(k)}_1$.
+2. Sample timestep $t_k \in [0,1]$.
+3. Construct noisy latent $z^{(k)}_{t_k}$ and target velocity $v_k$ using the chosen flow matching path.
+4. Predict velocity $u_\theta$ with conditioning and teacher forced context.
 
 ### Loss
 
@@ -144,8 +146,8 @@ $$
 \left[
 \frac{1}{K}\sum_{k=1}^{K} w(t_k)
 \left|
-u_\theta!\Big(
-z^{(k)}*{t_k}; z^{(1:k-1)}*{1}, a_{0:l}, q_l, t_k
+u_\theta\Big(
+z^{(k)}_{t_k}; z^{(1:k-1)}_{1}, a_{t:t+H-1}, q_t, t_k
 \Big) - v_k
 \right|_2^2
 \right]
@@ -153,7 +155,7 @@ $$
 
 Notes:
 
-1. (w(t_k)) is a timestep weighting function.
+1. $w(t_k)$ is a timestep weighting function.
 2. All variables are in latent space.
 3. Actions and proprio are conditioning only.
 
@@ -161,12 +163,12 @@ Notes:
 
 Open loop rollout:
 
-1. Encode latest observed context frames into latents (z_{\text{past}}).
+1. Encode latest observed context frames into latents $z_{\text{past}}$.
 2. Autoregressively generate future latent chunks by denoising from noisy latents to clean latents, one chunk at a time.
 3. Decode predicted future latents to frames using the frozen VAE decoder.
 
 Optional guidance:
-Classifier free guidance can be applied by dropping conditioning tokens in the unconditional branch and combining predictions with scale (s).
+Classifier free guidance can be applied by dropping conditioning tokens in the unconditional branch and combining predictions with scale $s$.
 
 ## Trainable versus frozen components
 

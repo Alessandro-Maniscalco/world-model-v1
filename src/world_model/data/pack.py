@@ -23,13 +23,13 @@ class PackedLatentWindow:
     Shapes:
     - z_past:   [B, T_ctx, ...]
     - z_future: [B, T_hor, ...]
-    - a_past:   [B, T_ctx, A]
+    - a_plan:   [B, T_hor, A]
     - q_cond:   None, [B, Q], or [B, T_ctx, Q] depending on `proprio_mode`
     """
 
     z_past: torch.Tensor
     z_future: torch.Tensor
-    a_past: torch.Tensor
+    a_plan: torch.Tensor
     q_cond: torch.Tensor | None
 
 
@@ -82,7 +82,7 @@ def pack_latent_window(
     z_future = z_window[:, context_steps:context_steps + horizon_steps]
 
     actions_aligned = _align_time_sequence(actions, target_steps=total_steps)
-    a_past = actions_aligned[:, :context_steps]
+    a_plan = actions_aligned[:, context_steps:context_steps + horizon_steps]
 
     if proprio is None:
         q_cond = None
@@ -93,7 +93,7 @@ def pack_latent_window(
         else:
             q_cond = proprio_aligned[:, :context_steps]
 
-    return PackedLatentWindow(z_past=z_past, z_future=z_future, a_past=a_past, q_cond=q_cond)
+    return PackedLatentWindow(z_past=z_past, z_future=z_future, a_plan=a_plan, q_cond=q_cond)
 
 
 def _align_time_sequence(seq: torch.Tensor, target_steps: int) -> torch.Tensor:

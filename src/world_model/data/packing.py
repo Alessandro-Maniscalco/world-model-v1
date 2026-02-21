@@ -15,7 +15,7 @@ class PackedWorldModelBatch:
 
     z_past: torch.Tensor
     z_future: torch.Tensor
-    a_past: torch.Tensor
+    a_plan: torch.Tensor
     q_last: torch.Tensor | None
 
 
@@ -38,6 +38,6 @@ def pack_world_model_batch(
     return PackedWorldModelBatch(
         z_past=packed.z_past,
         z_future=packed.z_future,
-        a_past=packed.a_past,
+        a_plan=packed.a_plan,
         q_last=packed.q_cond,
     )

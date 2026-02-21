@@ -73,7 +73,7 @@ Definition of done:
 * [x] Implement `src/world_model/data/pack.py` that outputs:
 
   * [x] `z_past` and `z_future` split in latent time after encoding
-  * [x] `a_past` aligned to the latent context window
+  * [x] `a_plan` aligned to the future target window
   * [x] optional `q` conditioning value(s) for proprio toggle
 
 ### Chunking K+1
@@ -86,11 +86,11 @@ Definition of done:
 
 ### Real attention masks
 
-* [ ] Implement `src/world_model/masking/block_causal.py`:
+* [x] Implement `src/world_model/masking/block_causal.py`:
 
-  * [ ] block causal mask forbids attending to future chunks
-  * [ ] supports padding masks
-  * [ ] produces the exact attention mask format expected by the backbone
+  * [x] block causal mask forbids attending to future chunks
+  * [x] supports padding masks
+  * [x] produces the exact attention mask format expected by the backbone
 
 Definition of done:
 
@@ -104,14 +104,14 @@ Definition of done:
 
 * [ ] Implement `src/world_model/conditioning/action_encoder.py`:
 
-  * [ ] maps `a_past` to action tokens or conditioning vector
+  * [ ] maps `a_plan` to an AdaLN conditioning embedding (no action tokens in attention)
   * [ ] hidden size matches DiT hidden size
 
 ### Proprio encoder
 
 * [ ] Implement `src/world_model/conditioning/proprio_encoder.py`:
 
-  * [ ] maps `q_l` to proprio tokens
+  * [ ] maps `q_l` to an AdaLN conditioning embedding (no proprio tokens in attention)
   * [ ] can be toggled on or off through config
 
 ### AdaLN Zero
@@ -139,8 +139,8 @@ Definition of done:
 
     * [ ] noisy future latent chunk
     * [ ] teacher forced past clean chunks
-    * [ ] action tokens
-    * [ ] optional proprio tokens
+    * [ ] action conditioning embedding (from `a_plan`, via AdaLN only)
+    * [ ] optional proprio conditioning embedding (via AdaLN only)
     * [ ] timestep t
     * [ ] block causal attention mask
   * [ ] outputs velocity field `u_theta` matching the noisy chunk shape

@@ -7,7 +7,7 @@ Build a latent space, action conditioned world model for LIBERO that predicts fu
 Target conditional distribution:
 
 $$
-\pi(o_{l+H}\mid o_{0}, a_{0}, q_l)
+\pi_\theta\!\left(o_{t:t+H}\mid o_{t-\ell:t}, a_{t:t+H-1}, q_t\right)
 $$
 
 Key decisions:
@@ -53,7 +53,7 @@ Goal: define all splits, chunking (K+1), and causal masking strictly in latent t
 
 ### Phase 2: Conditioning pathway
 
-Goal: action conditioning and optional proprio conditioning injected into every block via AdaLN Zero, fully configurable.
+Goal: action plan conditioning (future actions over the prediction horizon) and optional proprio conditioning injected into every block via AdaLN Zero, fully configurable.
 
 ### Phase 3: Backbone integration
 
@@ -81,11 +81,3 @@ Goal: open loop rollout evaluation and a clear proprio versus no proprio compari
    Mitigation: latent caching and smaller clips during development.
 3. Leakage through masking: incorrect masks can silently inflate metrics.
    Mitigation: invariance tests that perturb future tokens and verify unchanged outputs on past and current tokens.
-
-## Roadmap summary
-
-1. Stabilize latent time chunking and masking.
-2. Implement AdaLN Zero conditioning modules.
-3. Wrap Wan DiT for world modeling.
-4. Implement flow matching training with teacher forcing across chunks.
-5. Evaluate, ablate proprio, and iterate on capacity and schedules.

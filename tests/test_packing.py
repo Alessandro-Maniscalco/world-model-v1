@@ -20,7 +20,7 @@ def test_pack_world_model_batch_shapes():
     )
 
     assert packed.z_past.shape == (b, context_len, z)
-    assert packed.a_past.shape == (b, context_len, a)
+    assert packed.a_plan.shape == (b, horizon_len, a)
     assert packed.z_future.shape == (b, horizon_len, z)
     assert packed.q_last is not None
     assert packed.q_last.shape == (b, q)
