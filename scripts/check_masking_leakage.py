@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from world_model.chunking import build_full_sequence_chunk_ids
+from world_model.chunking import build_full_sequence_chunk_ids, build_k_plus_one_schedule
 from world_model.masking import build_block_causal_mask
 
 
@@ -90,21 +90,24 @@ def main():
 
     block = TinyAttnBlock(d_model=D, n_heads=8).to(device).eval()
 
+    # Build chunk ids from K+1 scheduler and prepend past ids.
+    # Note: K+1 scheduler with k=1 splits future_steps=96 into two chunks of 48.
+    # We must align keep_len with real chunk boundaries.
+    schedule = build_k_plus_one_schedule(future_steps=n_current + n_future, k=1, device=device)
+    first_chunk_size = schedule.boundaries[0][1]
+    keep_len = n_past + first_chunk_size
+
+    chunk_ids = torch.cat([
+        torch.full((n_past,), -1, dtype=torch.long, device=device),
+        schedule.chunk_ids
+    ])
+
     # Construct two sequences that are identical except for future tokens
     x_base = torch.randn(B, L, D, device=device)
 
     x_future_changed = x_base.clone()
     future_start = keep_len
     x_future_changed[:, future_start:] = torch.randn_like(x_future_changed[:, future_start:])
-
-    # Build chunk ids from K+1 scheduler and prepend past ids.
-    chunk_ids = build_full_sequence_chunk_ids(
-        past_steps=n_past,
-        future_steps=n_current + n_future,
-        k=1,
-        past_chunk_id=-1,
-        device=device,
-    )
 
     # 1) With block-causal mask: outputs for past+current must not change
     attn_mask = build_block_causal_mask(chunk_ids, mask_format="additive")
