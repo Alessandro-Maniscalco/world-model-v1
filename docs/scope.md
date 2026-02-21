@@ -6,9 +6,9 @@ Build a latent space, action conditioned world model for LIBERO that predicts fu
 
 Target conditional distribution:
 
-[
+$$
 \pi(o_{l+H}\mid o_{0}, a_{0}, q_l)
-]
+$$
 
 Key decisions:
 

@@ -3,4 +3,11 @@
 - Every source file must start with a short module docstring (1–3 lines) describing the module’s purpose.
 - The docstring must appear at the top of the file.
 - Exclude vendored, generated, or third-party code.
+## Testing
+- Every new source file containing logic should have a corresponding test file in the `tests/` directory.
+- Use `pytest` for testing.
+- If the logic depends on external models or heavy resources (like VAEs), use mocks to keep tests fast and deterministic.
+## Environment
+- Always run Python and test commands inside the repo virtualenv at `.venv`.
+- Before running Python tools, execute: `source .venv/bin/activate`.
 </INSTRUCTIONS>

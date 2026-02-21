@@ -70,19 +70,19 @@ Definition of done:
 
 ### Latent time window split
 
-* [ ] Implement `src/world_model/data/pack.py` that outputs:
+* [x] Implement `src/world_model/data/pack.py` that outputs:
 
-  * [ ] `z_past` and `z_future` split in latent time after encoding
-  * [ ] `a_past` aligned to the latent context window
-  * [ ] optional `q` conditioning value(s) for proprio toggle
+  * [x] `z_past` and `z_future` split in latent time after encoding
+  * [x] `a_past` aligned to the latent context window
+  * [x] optional `q` conditioning value(s) for proprio toggle
 
 ### Chunking K+1
 
-* [ ] Implement `src/world_model/chunking/schedule.py`:
+* [x] Implement `src/world_model/chunking/schedule.py`:
 
-  * [ ] chunk boundaries defined in latent time
-  * [ ] produces `chunk_id` per token or per timestep for K+1 scheme
-  * [ ] supports K = 1 baseline
+  * [x] chunk boundaries defined in latent time
+  * [x] produces `chunk_id` per token or per timestep for K+1 scheme
+  * [x] supports K = 1 baseline
 
 ### Real attention masks
 

@@ -6,9 +6,9 @@ The model predicts future visual observations by operating entirely in the laten
 
 Core objective:
 
-[
+$$
 \pi(o_{l:l+H}\mid o_{0:l}, a_{0:l}, q_l)
-]
+$$
 
 Key constraints:
 
@@ -30,9 +30,9 @@ Key constraints:
 
 A frozen Wan2.1 video VAE encodes frames to latents:
 
-[
+$$
 z = \mathrm{VAEEnc}(o),\quad \hat o = \mathrm{VAEDec}(z)
-]
+$$
 
 All training and masking operate on (z), not on (o).
 
@@ -51,9 +51,9 @@ This split must be computed after encoding, not assumed from frame counts.
 
 Maps action vectors to conditioning tokens:
 
-[
+$$
 a_{0:l} \mapsto \mathrm{Tok}_a \in \mathbb R^{N_a \times d}
-]
+$$
 
 Design option:
 
@@ -64,9 +64,9 @@ Design option:
 
 Maps (q_l) to conditioning tokens:
 
-[
+$$
 q_l \mapsto \mathrm{Tok}_q \in \mathbb R^{N_q \times d}
-]
+$$
 
 Ablation:
 
@@ -95,15 +95,15 @@ Conditioning sources:
 
 Define chunk boundaries in latent time. Represent the future latent sequence as chunks:
 
-[
+$$
 z_{\text{future}} = \left[z^{(1)}_1, z^{(2)}_1, \dots, z^{(K)}_1\right]
-]
+$$
 
 Teacher forcing uses clean previous chunks:
 
-[
+$$
 z^{(1:k-1)}_1
-]
+$$
 
 The additional (+1) chunk is treated as the final autoregressive target stage as defined by the chunking schedule. All chunk indexing is computed in latent time.
 
@@ -138,7 +138,7 @@ For each chunk (k):
 
 ### Loss
 
-[
+$$
 \mathcal L(\theta)=
 \mathbb E_{z,a,q,{t_k}}
 \left[
@@ -149,7 +149,7 @@ z^{(k)}*{t_k}; z^{(1:k-1)}*{1}, a_{0:l}, q_l, t_k
 \Big) - v_k
 \right|_2^2
 \right]
-]
+$$
 
 Notes:
 
