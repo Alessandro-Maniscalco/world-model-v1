@@ -1,8 +1,9 @@
 <INSTRUCTIONS>
-## Module docstrings
+## Docstrings
 - Every source file must start with a short module docstring (1–3 lines) describing the module’s purpose.
 - The docstring must appear at the top of the file.
 - Exclude vendored, generated, or third-party code.
+- Every function should have a concise docstring describing its purpose.
 ## Testing
 - Every new source file containing logic should have a corresponding test file in the `tests/` directory.
 - Use `pytest` for testing.

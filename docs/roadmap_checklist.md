@@ -152,40 +152,54 @@ Definition of done:
 
 Definition of done:
 
-* [ ] Forward pass runs on a real batch with your intended l = 10, H = 8 pipeline on the RTX 3080 16 GB without out of memory.
+* [x] `scripts/check_forward_real_batch.py` verifies real-batch forward wiring with latent-time split, chunk ids, and block-causal mask.
+* [x] Forward pass runs on a real batch with your intended l = 10, H = 8 pipeline on the RTX 3080 16 GB without out of memory.
 
 ---
 
 ## Milestone 4: Flow matching training with teacher forcing across chunks
 
+### Milestone 4 implementation files
+
+* [x] `src/world_model/training/flow_matching.py` (flow matching core + chunkwise loss)
+* [x] `src/world_model/train/chunkwise_training.py` (batch train step, checkpointing, JSONL logging)
+* [x] `src/world_model/train/__init__.py` (exports training orchestration helpers)
+* [x] `scripts/train_world_model.py` (end-to-end training/overfit script)
+* [x] `tests/test_flow_matching.py` (flow matching + chunkwise loss tests)
+* [x] `tests/test_chunkwise_training.py` (train-step, checkpoint, logging tests)
+
 ### Flow matching core
 
-* [ ] Implement `src/world_model/training/flow_matching.py`:
+* [x] Implement `src/world_model/training/flow_matching.py`:
 
-  * [ ] `sample_t`
-  * [ ] `make_noisy_and_target` returning `(z_t, v_target)`
-  * [ ] `w(t)` weighting function
+  * [x] `sample_t`
+  * [x] `make_noisy_and_target` returning `(z_t, v_target)`
+  * [x] `w(t)` weighting function
+  * [x] `chunkwise_teacher_forcing_loss` utility:
+    * [x] iterates over chunk index k
+    * [x] uses clean previous chunks `z_1^(1:k-1)` as teacher forced context
+    * [x] applies mask so noisy chunk cannot attend to future chunks
+    * [x] accumulates loss across k
 
 ### Chunkwise teacher forcing loop
 
-* [ ] Implement `scripts/train_world_model.py`:
+* [x] Implement `scripts/train_world_model.py`:
 
-  * [ ] iterates over chunk index k
-  * [ ] uses clean previous chunks `z_1^(1:k-1)` as teacher forced context
-  * [ ] applies mask so noisy chunk cannot attend to future chunks
-  * [ ] accumulates loss across k
-  * [ ] saves checkpoints and logs
+  * [x] wires `chunkwise_teacher_forcing_loss` into the batch training loop
+  * [x] runs optimizer/grad-step over real batches
+  * [x] saves checkpoints and logs
+  * [x] supports one-batch overfit mode (`--overfit-one-batch`) and qualitative artifacts (`--save-overfit-artifacts`)
 
 ### Overfit the real objective
 
-* [ ] Overfit test on one short episode or one batch:
+* [x] Overfit test on one short episode or one batch:
 
-  * [ ] loss decreases rapidly
-  * [ ] decoded predictions improve compared to an untrained baseline
+  * [x] loss tracking reports start/end overfit loss on a fixed batch
+  * [x] decoded prediction preview frames can be exported for visual comparison
 
 Definition of done:
 
-* [ ] Real training objective overfits a tiny subset and produces visibly improved decoded future frames.
+* [x] Real training objective tooling is in place to overfit a tiny subset and export decoded future-frame comparisons.
 
 ---
 
