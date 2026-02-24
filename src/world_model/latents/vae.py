@@ -43,6 +43,7 @@ class WanVAE:
     """
 
     def __init__(self, vae: Any, config: WanVAEConfig | None = None):
+        """Store VAE handle and immutable encode/decode behavior config."""
         self.vae = vae
         self.config = config or WanVAEConfig()
 
@@ -55,6 +56,7 @@ class WanVAE:
         device: torch.device | str | None = None,
         deterministic: bool = True,
     ) -> "WanVAE":
+        """Load and freeze pretrained Wan VAE weights."""
         try:
             from diffusers import AutoencoderKLWan
         except ImportError as exc:
@@ -128,6 +130,7 @@ class WanVAE:
 
 
 def _to_bcthw(video: torch.Tensor, layout: VideoLayout) -> torch.Tensor:
+    """Convert configured input layout to VAE-native `[B,C,T,H,W]`."""
     if video.ndim != 5:
         raise ValueError(f"Expected video with 5 dims, got shape {tuple(video.shape)}")
 
@@ -146,6 +149,7 @@ def _to_bcthw(video: torch.Tensor, layout: VideoLayout) -> torch.Tensor:
 
 
 def _from_bcthw(video_bcthw: torch.Tensor, output_layout: VideoLayout) -> torch.Tensor:
+    """Convert decoded VAE-native `[B,C,T,H,W]` to target output layout."""
     if video_bcthw.ndim != 5:
         raise ValueError(f"Expected decoded video [B,C,T,H,W], got shape {tuple(video_bcthw.shape)}")
 
@@ -158,6 +162,7 @@ def _from_bcthw(video_bcthw: torch.Tensor, output_layout: VideoLayout) -> torch.
 
 
 def _normalize_video(video_bcthw: torch.Tensor, input_range: VideoRange) -> torch.Tensor:
+    """Normalize video tensor to `[-1,1]` for VAE encode input."""
     x = video_bcthw
     if input_range == "minus_one_to_one":
         return x.float()
@@ -174,10 +179,10 @@ def _normalize_video(video_bcthw: torch.Tensor, input_range: VideoRange) -> torc
     max_val = float(x.detach().max().cpu()) if x.numel() > 0 else 1.0
     min_val = float(x.detach().min().cpu()) if x.numel() > 0 else -1.0
 
-    if min_val >= -1.1 and max_val <= 1.1:
-        return x
     if min_val >= -0.1 and max_val <= 1.1:
         return x * 2.0 - 1.0
+    if min_val >= -1.1 and max_val <= 1.1:
+        return x
     if min_val >= 0.0 and max_val <= 255.0:
         return x / 255.0 * 2.0 - 1.0
 
@@ -187,6 +192,7 @@ def _normalize_video(video_bcthw: torch.Tensor, input_range: VideoRange) -> torc
 
 
 def _extract_decoded_sample(decoded: Any) -> torch.Tensor:
+    """Extract decoded tensor from diffusers-style output payload."""
     if torch.is_tensor(decoded):
         return decoded
 
@@ -198,6 +204,7 @@ def _extract_decoded_sample(decoded: Any) -> torch.Tensor:
 
 
 def _format_output_range(video: torch.Tensor, output_range: OutputRange) -> torch.Tensor:
+    """Map decoded video from `[-1,1]` into the configured output range."""
     if output_range == "minus_one_to_one":
         return video
 

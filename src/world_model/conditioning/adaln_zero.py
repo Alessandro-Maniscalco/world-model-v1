@@ -17,6 +17,7 @@ class AdaLNZero(nn.Module):
     """
 
     def __init__(self, hidden_dim: int, cond_dim: int | None = None, *, eps: float = 1e-6) -> None:
+        """Initialize normalization and zero-initialized modulation layers."""
         super().__init__()
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")

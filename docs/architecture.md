@@ -22,7 +22,7 @@ Key constraints:
 
 ### Inputs
 
-1. RGB frames: $o_{t-\ell:t}$ (context) and $o_{t:t+H}$ (future target), sampled at 10 Hz.
+1. RGB frames: $o_{t-\ell:t}$ (context) and $o_{t:t+H}$ (future target), sampled at 10 Hz. Note the overlap at frame $t$.
 2. Action plan: $a_{t:t+H-1}$, aligned to the future target window.
 3. Proprio state: $q_t$ optional, aligned to the last context step.
 
@@ -89,23 +89,15 @@ Conditioning sources:
 2. action conditioning embedding $c_a$
 3. optional proprio conditioning embedding $c_q$
 
-## Chunking and teacher forcing
+## Temporal Chunking Logic ($K+1$)
 
-### Chunking $K+1$
+To prevent error drift over long horizons, the future latent window is split into $K+1$ segments and predicted sequentially (autoregressively):
 
-Define chunk boundaries in latent time. Represent the future latent sequence as chunks:
-
-$$
-z_{\text{future}} = \left[z^{(1)}_1, z^{(2)}_1, \dots, z^{(K)}_1\right]
-$$
-
-Teacher forcing uses clean previous chunks:
-
-$$
-z^{(1:k-1)}_1
-$$
-
-The additional $+1$ chunk is treated as the final autoregressive target stage as defined by the chunking schedule. All chunk indexing is computed in latent time.
+1. **The Anchor (Chunk 0)**: Reconstructs the current observation (frame $t$) and begins the rollout. This ensures the prediction is perfectly "stitched" to the ground-truth history.
+2. **Sequential Prediction**: The model loops through every chunk ($0, 1, \dots, K$).
+3. **Teacher Forcing (Training)**: To learn stable transitions, the model uses clean ground-truth for all chunks *before* the current target.
+4. **Causal Masking**: The model is blocked from seeing any chunks *after* the current target to prevent temporal leakage.
+5. **The $+1$ Requirement**: We enforce $k \ge 1$ so there are always at least 2 chunks, forcing the model to learn autoregressive "handoffs" between segments of time.
 
 ## Attention masking
 

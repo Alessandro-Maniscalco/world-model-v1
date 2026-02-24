@@ -59,6 +59,7 @@ def build_block_causal_mask(
 
 
 def _bool_to_additive(disallow: torch.Tensor) -> torch.Tensor:
+    """Convert boolean disallow mask into additive 0/-inf attention mask."""
     mask = torch.zeros(disallow.shape, dtype=torch.float32, device=disallow.device)
     mask[disallow] = float("-inf")
     return mask

@@ -1,6 +1,7 @@
-"""Chunkwise flow-matching training helpers for world-model optimization.
+"""Chunkwise flow-matching train-step and persistence helpers.
 
-Provides a single-batch train step, JSONL logging, and checkpoint persistence.
+This module contains optimizer-step orchestration, metrics shaping, JSONL
+logging, and checkpoint save utilities.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from world_model.training import chunkwise_teacher_forcing_loss
+from world_model.training.flow_matching import chunkwise_teacher_forcing_loss
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ class ChunkwiseStepMetrics:
     per_chunk_lengths: tuple[int, ...]
 
     def to_log_dict(self, *, step: int) -> dict[str, Any]:
-        """Convert metrics to a JSON-serializable log payload."""
+        """Convert metrics to a JSON-serializable payload."""
         return {
             "step": int(step),
             "loss": float(self.loss),
@@ -113,7 +114,7 @@ def save_checkpoint(
     proprio_encoder: nn.Module | None = None,
     extra_state: dict[str, Any] | None = None,
 ) -> Path:
-    """Persist a training checkpoint and return the path."""
+    """Persist a training checkpoint and return its path."""
     ckpt_dir = Path(output_dir) / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     path = ckpt_dir / f"step_{int(step):07d}.pt"
@@ -135,11 +136,12 @@ def append_jsonl(path: str | Path, payload: dict[str, Any]) -> None:
     """Append one JSON object line to a metrics log file."""
     log_path = Path(path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, sort_keys=True) + "\n")
+    with log_path.open("a", encoding="utf-8") as file_obj:
+        file_obj.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def _compute_grad_norm(parameters: Any) -> float:
+    """Compute L2 norm over gradients for a parameter iterable."""
     total_sq = 0.0
     for param in parameters:
         if param.grad is None:

@@ -1,8 +1,4 @@
-"""Utilities for real-batch forward-pass smoke checks on the world model.
-
-These helpers keep the l/H configuration, latent-time split, and sequence
-alignment deterministic for quick OOM validation runs.
-"""
+"""Temporal alignment helpers for frame-time and latent-time windows."""
 
 from __future__ import annotations
 
@@ -27,7 +23,7 @@ def latent_split_from_frame_ratio(
     context_frames: int,
     horizon_frames: int,
 ) -> tuple[int, int]:
-    """Map frame-time l/H ratio onto latent timesteps with at least one future step."""
+    """Map frame-time context/horizon ratio to latent timesteps."""
     if total_latent_steps < 2:
         raise ValueError(
             f"total_latent_steps must be >= 2 for a context/future split, got {total_latent_steps}"
@@ -46,6 +42,24 @@ def latent_split_from_frame_ratio(
     return context_steps, horizon_steps
 
 
+def align_time_sequence(seq: torch.Tensor, target_steps: int) -> torch.Tensor:
+    """Align a `[B,T,D]` tensor to `[B,target_steps,D]` via nearest resampling."""
+    if target_steps <= 0:
+        raise ValueError(f"target_steps must be positive, got {target_steps}")
+    if seq.ndim != 3:
+        raise ValueError(f"seq must be [B,T,D], got {tuple(seq.shape)}")
+
+    t_src = seq.shape[1]
+    if t_src <= 0:
+        raise ValueError("seq must have a positive source time dimension")
+    if t_src == target_steps:
+        return seq
+
+    idx = torch.linspace(0, t_src - 1, steps=target_steps, device=seq.device)
+    idx = idx.round().long().clamp(0, t_src - 1)
+    return seq.index_select(dim=1, index=idx)
+
+
 def expand_to_latent_steps(seq: torch.Tensor, target_steps: int) -> torch.Tensor:
     """Expand `[B,D]` or align `[B,T,D]` inputs to `[B,target_steps,D]`."""
     if target_steps <= 0:
@@ -53,14 +67,7 @@ def expand_to_latent_steps(seq: torch.Tensor, target_steps: int) -> torch.Tensor
 
     if seq.ndim == 2:
         return seq.unsqueeze(1).repeat(1, target_steps, 1)
-
     if seq.ndim != 3:
         raise ValueError(f"seq must be [B,D] or [B,T,D], got {tuple(seq.shape)}")
 
-    t_src = seq.shape[1]
-    if t_src == target_steps:
-        return seq
-
-    idx = torch.linspace(0, t_src - 1, steps=target_steps, device=seq.device)
-    idx = idx.round().long().clamp(0, t_src - 1)
-    return seq.index_select(dim=1, index=idx)
+    return align_time_sequence(seq, target_steps=target_steps)

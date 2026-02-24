@@ -6,6 +6,7 @@ Builds a DiT-like latent transformer that predicts velocity on the noisy future 
 from __future__ import annotations
 
 from contextlib import nullcontext
+import math
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ class _DiTBlock(nn.Module):
     """Minimal DiT-style block with AdaLN conditioning."""
 
     def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float = 4.0) -> None:
+        """Initialize one DiT-style self-attention + MLP residual block."""
         super().__init__()
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
@@ -46,6 +48,7 @@ class _DiTBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor, attn_mask: torch.Tensor | None) -> torch.Tensor:
+        """Apply conditioned attention/MLP residual updates to token features."""
         h = self.ada_attn(x, cond)
         attn_out, _ = self.attn(
             h,
@@ -65,6 +68,7 @@ def _prepare_attn_mask(
     batch_size: int,
     num_heads: int,
 ) -> torch.Tensor | None:
+    """Normalize 2D/3D attention masks to PyTorch MHA expected layout."""
     if attn_mask is None:
         return None
     if attn_mask.ndim == 2:
@@ -94,6 +98,7 @@ class WanDiTWrapper(nn.Module):
         gradient_checkpointing: bool = False,
         amp_dtype: torch.dtype = torch.float16,
     ) -> None:
+        """Initialize latent-token projections, DiT blocks, and velocity head."""
         super().__init__()
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
@@ -130,15 +135,19 @@ class WanDiTWrapper(nn.Module):
         self.action_proj = nn.Linear(self.cond_dim, self.hidden_dim, bias=False)
         self.proprio_proj = nn.Linear(self.cond_dim, self.hidden_dim, bias=False)
         self.timestep_proj = nn.Sequential(
-            nn.Linear(self.timestep_dim, self.hidden_dim),
+            nn.Linear(256, self.hidden_dim),
             nn.SiLU(),
             nn.Linear(self.hidden_dim, self.hidden_dim),
         )
+        self.pos_emb = nn.Parameter(torch.zeros(1, 4096, self.hidden_dim))
+        nn.init.normal_(self.pos_emb, std=0.02)
         self.blocks = nn.ModuleList(
             [_DiTBlock(hidden_dim=self.hidden_dim, num_heads=num_heads) for _ in range(num_layers)]
         )
-        self.final_norm = nn.LayerNorm(self.hidden_dim)
-        self.velocity_head = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.final_norm = AdaLNZero(hidden_dim=self.hidden_dim, cond_dim=self.cond_dim)
+        self.velocity_head = nn.Linear(self.hidden_dim, self.latent_dim)
+        nn.init.zeros_(self.velocity_head.weight)
+        nn.init.zeros_(self.velocity_head.bias)
 
     @classmethod
     def from_pretrained_state(
@@ -219,6 +228,9 @@ class WanDiTWrapper(nn.Module):
         with amp_ctx:
             x_full = torch.cat([past_clean_chunks, noisy_future_chunk], dim=1)
             x_full = self.latent_to_hidden(x_full)
+            t_len = x_full.shape[1]
+            x_full = x_full + self.pos_emb[:, :t_len, :]
+
             cond = self._build_conditioning(
                 action_conditioning=action_conditioning,
                 proprio_conditioning=proprio_conditioning,
@@ -233,8 +245,8 @@ class WanDiTWrapper(nn.Module):
 
             future_len = noisy_future_chunk.shape[1]
             pred_future = x_full[:, -future_len:, :]
-            pred_hidden = self.velocity_head(self.final_norm(pred_future))
-            return self.hidden_to_latent(pred_hidden) #prediction of velocity
+            pred_hidden = self.final_norm(pred_future, cond)
+            return self.velocity_head(pred_hidden)
 
     def _run_backbone(
         self,
@@ -243,6 +255,7 @@ class WanDiTWrapper(nn.Module):
         cond: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        """Run transformer block stack with optional gradient checkpointing."""
         x = x_full
         for block in self.blocks:
             if self.gradient_checkpointing and self.training and x.requires_grad:
@@ -264,13 +277,33 @@ class WanDiTWrapper(nn.Module):
         proprio_conditioning: torch.Tensor | None,
         timestep_t: torch.Tensor,
     ) -> torch.Tensor:
+        """Combine action/proprio/timestep inputs into one conditioning embedding."""
         action_emb = self.action_proj(action_conditioning)
-        cond = action_emb + self.timestep_proj(self._normalize_timestep(timestep_t))
+        t_emb = self._sinusoidal_timestep(timestep_t, dim=256)
+        cond = action_emb + self.timestep_proj(t_emb)
         if proprio_conditioning is not None:
             cond = cond + self.proprio_proj(proprio_conditioning)
         return cond
 
+    def _sinusoidal_timestep(self, t: torch.Tensor, dim: int = 256, max_period: float = 10000.0) -> torch.Tensor:
+        """Compute sinusoidal embeddings for flow timesteps in `[0,1]`."""
+        if t.ndim > 1:
+            t = t.squeeze()
+        if t.ndim == 0:
+            t = t.unsqueeze(0)
+        t = t * 1000.0  # Scale [0, 1] t up to [0, 1000] typical of diffusion
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half
+        )
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
+
     def _normalize_timestep(self, timestep_t: torch.Tensor) -> torch.Tensor:
+        """Normalize timestep tensors to `[B,timestep_dim]` float layout."""
         if timestep_t.ndim == 1:
             return timestep_t.unsqueeze(-1).to(dtype=torch.float32)
         if timestep_t.ndim == 2 and timestep_t.shape[1] == self.timestep_dim:
@@ -289,6 +322,7 @@ class WanDiTWrapper(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
     ) -> None:
+        """Validate model input tensor shapes and mask dimensions."""
         if noisy_future_chunk.ndim != 3:
             raise ValueError(
                 f"noisy_future_chunk must be [B,T_future,D], got {tuple(noisy_future_chunk.shape)}"

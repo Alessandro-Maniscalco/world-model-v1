@@ -32,6 +32,7 @@ class ActionEncoder(nn.Module):
         mlp_dim: int | None = None,
         dropout: float = 0.0,
     ) -> None:
+        """Initialize pooling/projection stack for action-plan conditioning."""
         super().__init__()
         if action_dim <= 0:
             raise ValueError(f"action_dim must be positive, got {action_dim}")
@@ -111,6 +112,7 @@ def _pool_action_plan(
     horizon_steps: int | None,
     valid_mask: torch.Tensor | None,
 ) -> torch.Tensor:
+    """Pool a `[B,T,A]` action plan into one vector per batch item."""
     if pool == "mean":
         if valid_mask is None:
             return a_plan.mean(dim=1)

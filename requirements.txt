@@ -8,4 +8,5 @@ tqdm
 imageio
 opencv-python
 matplotlib
+PyYAML
 pytest

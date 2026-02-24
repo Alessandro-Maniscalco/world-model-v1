@@ -76,6 +76,7 @@ def build_full_sequence_chunk_ids(
 
 
 def _validate_schedule_args(future_steps: int, k: int) -> None:
+    """Validate `build_k_plus_one_schedule` argument constraints."""
     if future_steps <= 0:
         raise ValueError(f"future_steps must be positive, got {future_steps}")
     if k < 1:

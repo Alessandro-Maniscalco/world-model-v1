@@ -17,6 +17,7 @@ class MaskSpec:
 
     @property
     def total_len(self) -> int:
+        """Return total token count across past/current/future partitions."""
         return self.n_past + self.n_current + self.n_future
 
 
@@ -35,6 +36,7 @@ def build_no_future_leak_mask(spec: MaskSpec, device: torch.device | None = None
 
 
 def _validate_mask_spec(spec: MaskSpec) -> None:
+    """Validate non-negative partition sizes and non-empty total length."""
     if spec.n_past < 0 or spec.n_current < 0 or spec.n_future < 0:
         raise ValueError(
             "MaskSpec counts must be non-negative "

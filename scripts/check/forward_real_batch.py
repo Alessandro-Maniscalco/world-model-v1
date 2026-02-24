@@ -1,31 +1,32 @@
-"""Run a real-batch world-model forward-pass smoke test for OOM validation.
-
-Builds masks from chunk ids, applies action/proprio conditioning via AdaLN paths,
-and checks a single WanDiTWrapper forward pass for l=10, H=8 by default.
-"""
+"""Run a real-batch world-model forward-pass smoke test for OOM validation."""
 
 from __future__ import annotations
 
 import argparse
 import random
+from pathlib import Path
+import sys
 
 import torch
 
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+# Ensure local `src/` package imports work when run as `python scripts/check/forward_real_batch.py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 from world_model.chunking import build_full_sequence_chunk_ids
 from world_model.conditioning import ActionEncoder, ProprioEncoder
-from world_model.data import flatten_latents_per_timestep, pack_world_model_batch
-from world_model.eval.forward_pass import (
-    build_frame_deltas,
-    expand_to_latent_steps,
-    latent_split_from_frame_ratio,
-)
+from world_model.data import build_lerobot_dataloader, prepare_packed_batch
 from world_model.latents import WanVAE
 from world_model.masking import build_block_causal_mask
 from world_model.models import WanDiTWrapper
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the forward-pass smoke test."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-id", default="lerobot/libero")
     parser.add_argument("--video-key", default="observation.images.image")
@@ -45,36 +46,16 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _set_seed(seed: int) -> None:
+    """Set Python and torch RNG seeds."""
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def _collate_dict(batch: list[dict]) -> dict:
-    out: dict = {}
-    for key in batch[0].keys():
-        first_value = batch[0][key]
-        if torch.is_tensor(first_value):
-            out[key] = torch.stack([sample[key] for sample in batch], dim=0)
-        else:
-            out[key] = [sample[key] for sample in batch]
-    return out
-
-
-def _prepare_conditioning_sequences(
-    *,
-    action: torch.Tensor,
-    proprio: torch.Tensor | None,
-    total_latent_steps: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    action_seq = expand_to_latent_steps(action, total_latent_steps)
-    proprio_seq = None if proprio is None else expand_to_latent_steps(proprio, total_latent_steps)
-    return action_seq, proprio_seq
-
-
 @torch.no_grad()
 def main() -> None:
+    """Run one forward pass and report shape/memory diagnostics."""
     args = _parse_args()
     _set_seed(args.seed)
 
@@ -88,66 +69,37 @@ def main() -> None:
         f"batch_size={args.batch_size}, heads={args.num_heads}"
     )
 
-    deltas = build_frame_deltas(args.context_len, args.horizon_len, args.dt)
-    dataset = LeRobotDataset(
-        args.repo_id,
-        delta_timestamps={args.video_key: deltas},
-        video_backend="pyav",
-    )
-
-    loader = torch.utils.data.DataLoader(
-        torch.utils.data.Subset(dataset, range(args.batch_size)),
+    loader = build_lerobot_dataloader(
+        repo_id=args.repo_id,
+        video_key=args.video_key,
+        context_len=args.context_len,
+        horizon_len=args.horizon_len,
+        dt=args.dt,
         batch_size=args.batch_size,
+        subset_size=args.batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=_collate_dict,
         drop_last=True,
     )
     batch = next(iter(loader))
 
     vae = WanVAE.from_pretrained(device=device, deterministic=True)
-
-    video = batch[args.video_key].to(device)
-    action = batch["action"].to(device)
-    proprio = batch.get("observation.state")
-    if proprio is not None:
-        proprio = proprio.to(device)
-
-    latents = vae.encode(video)
-    z_tokens = flatten_latents_per_timestep(latents)
-
-    total_latent_steps = z_tokens.shape[1]
-    t_ctx, t_hor = latent_split_from_frame_ratio(
-        total_latent_steps,
-        context_frames=args.context_len,
-        horizon_frames=args.horizon_len,
+    prepared = prepare_packed_batch(
+        batch=batch,
+        encoder=vae,
+        device=device,
+        video_key=args.video_key,
+        context_len=args.context_len,
+        horizon_len=args.horizon_len,
+        proprio_mode="last",
     )
 
-    action_seq, proprio_seq = _prepare_conditioning_sequences(
-        action=action,
-        proprio=proprio,
-        total_latent_steps=t_ctx + t_hor,
-    )
-
-    packed = pack_world_model_batch(
-        z_tokens=z_tokens,
-        actions=action_seq,
-        proprio=proprio_seq,
-        context_len=t_ctx,
-        horizon_len=t_hor,
-    )
-
-    z_past = packed.z_past
-    z_future = packed.z_future
-    a_plan = packed.a_plan
-    q_last = packed.q_last
-
-    latent_dim = z_future.shape[-1]
-    action_dim = a_plan.shape[-1]
+    latent_dim = prepared.z_future.shape[-1]
+    action_dim = prepared.a_plan.shape[-1]
 
     chunk_ids = build_full_sequence_chunk_ids(
-        past_steps=z_past.shape[1],
-        future_steps=z_future.shape[1],
+        past_steps=prepared.z_past.shape[1],
+        future_steps=prepared.z_future.shape[1],
         k=args.k,
         device=device,
     )
@@ -155,11 +107,11 @@ def main() -> None:
 
     action_encoder = ActionEncoder(action_dim=action_dim, hidden_dim=args.hidden_dim, pool="mean").to(device)
     proprio_encoder = None
-    if not args.disable_proprio and q_last is not None:
-        proprio_encoder = ProprioEncoder(proprio_dim=q_last.shape[-1], hidden_dim=args.hidden_dim).to(device)
+    if not args.disable_proprio and prepared.q_last is not None:
+        proprio_encoder = ProprioEncoder(proprio_dim=prepared.q_last.shape[-1], hidden_dim=args.hidden_dim).to(device)
 
-    action_conditioning = action_encoder(a_plan)
-    proprio_conditioning = None if proprio_encoder is None else proprio_encoder(q_last)
+    action_conditioning = action_encoder(prepared.a_plan)
+    proprio_conditioning = None if proprio_encoder is None else proprio_encoder(prepared.q_last)
 
     model = WanDiTWrapper(
         hidden_dim=args.hidden_dim,
@@ -172,13 +124,13 @@ def main() -> None:
     ).to(device)
     model.eval()
 
-    timestep_t = torch.rand(z_future.shape[0], device=device)
+    timestep_t = torch.rand(prepared.z_future.shape[0], device=device)
 
     torch.cuda.reset_peak_memory_stats(device)
     try:
         out = model(
-            noisy_future_chunk=z_future,
-            past_clean_chunks=z_past,
+            noisy_future_chunk=prepared.z_future,
+            past_clean_chunks=prepared.z_past,
             action_conditioning=action_conditioning,
             timestep_t=timestep_t,
             block_causal_attention_mask=mask,
@@ -197,8 +149,18 @@ def main() -> None:
     allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
     reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
 
-    print(f"Latent tokens: total={total_latent_steps}, context={t_ctx}, horizon={t_hor}")
-    print(f"Tensor shapes: z_past={tuple(z_past.shape)} z_future={tuple(z_future.shape)} out={tuple(out.shape)}")
+    print(
+        "Latent tokens: "
+        f"total={prepared.total_latent_steps}, "
+        f"context={prepared.context_latent_steps}, "
+        f"horizon={prepared.horizon_latent_steps}"
+    )
+    print(
+        "Tensor shapes: "
+        f"z_past={tuple(prepared.z_past.shape)} "
+        f"z_future={tuple(prepared.z_future.shape)} "
+        f"out={tuple(out.shape)}"
+    )
     print(f"CUDA peak memory: allocated={allocated:.2f}GB reserved={reserved:.2f}GB")
     print("PASS: forward pass completed without OOM")
 

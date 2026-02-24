@@ -15,5 +15,5 @@ wandb/
 *.safetensors
 *.mp4
 *.gif
-assets/images/*.png
-assets/videos/
+assets/**
+!assets/**/.keep

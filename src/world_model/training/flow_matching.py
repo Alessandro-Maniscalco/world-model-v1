@@ -275,6 +275,7 @@ def _validate_chunkwise_inputs(
     proprio_conditioning: torch.Tensor | None,
     k: int,
 ) -> None:
+    """Validate tensor ranks, batch alignment, and chunk hyperparameters."""
     if z_past.ndim != 3:
         raise ValueError(f"z_past must be [B,T,D], got {tuple(z_past.shape)}")
     if z_future.ndim != 3:

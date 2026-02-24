@@ -21,6 +21,7 @@ class ProprioEncoder(nn.Module):
         mlp_dim: int | None = None,
         dropout: float = 0.0,
     ) -> None:
+        """Initialize projection stack for proprio-state conditioning."""
         super().__init__()
         if proprio_dim <= 0:
             raise ValueError(f"proprio_dim must be positive, got {proprio_dim}")

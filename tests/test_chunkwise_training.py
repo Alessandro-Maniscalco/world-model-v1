@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from world_model.conditioning import ActionEncoder
-from world_model.train import append_jsonl, save_checkpoint, train_chunkwise_batch
+from world_model.training import append_jsonl, save_checkpoint, train_chunkwise_batch
 
 
 class _TinyChunkModel(nn.Module):

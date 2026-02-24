@@ -1,3 +1,6 @@
+"""Inspect LIBERO dataset samples and save a quick visualization image."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -6,9 +9,9 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
-def main():
+def main() -> None:
+    """Load sample timesteps, print schema stats, and save image grid."""
     repo_id = "lerobot/libero"
-    # Use pyav to avoid torchcodec/FFmpeg shared-library issues
     ds = LeRobotDataset(repo_id, video_backend="pyav")
 
     print("len(ds):", len(ds))
@@ -17,14 +20,13 @@ def main():
 
     sample = samples[0]
     print("keys:", list(sample.keys()))
-    for k, v in sample.items():
+    for key, value in sample.items():
         try:
-            print(k, getattr(v, "shape", None), getattr(v, "dtype", None))
+            print(key, getattr(value, "shape", None), getattr(value, "dtype", None))
         except Exception:
-            print(k, type(v))
+            print(key, type(value))
 
-    # Image keys: observation.images.* (tensors CHW, float32)
-    image_keys = [k for k in sample if k.startswith("observation.images.")]
+    image_keys = [key for key in sample if key.startswith("observation.images.")]
     if not image_keys:
         return
 
@@ -32,29 +34,25 @@ def main():
     fig, axes = plt.subplots(num_timesteps, n_cams, figsize=(5 * n_cams, 5 * num_timesteps))
     axes = np.atleast_2d(axes)
     if axes.shape[0] == 1 and axes.shape[1] == num_timesteps:
-        axes = axes.T  # (num_timesteps, 1) from subplots(num_timesteps, 1)
+        axes = axes.T
 
-    for t, sample_t in enumerate(samples):
+    for timestep, sample_t in enumerate(samples):
         state = sample_t["observation.state"]
         action = sample_t["action"]
         state_str = ", ".join(f"{x:.3f}" for x in state.tolist())
         action_str = ", ".join(f"{x:.3f}" for x in action.tolist())
-        print(f"t={t}  state: [{state_str}]  action: [{action_str}]")
-        row_title = f"t={t}  state: [{state_str}]  action: [{action_str}]"
-        for c, key in enumerate(image_keys):
-            ax = axes[t, c]
-            img = sample_t[key]  # (C, H, W)
-            img = img.permute(1, 2, 0).clamp(0, 1).numpy()
-            ax.imshow(img)
-            if c == 0:
-                ax.set_title(row_title, fontsize=8)
-            else:
-                ax.set_title(key if t == 0 else "")
-            ax.axis("off")
+        print(f"t={timestep}  state: [{state_str}]  action: [{action_str}]")
+        row_title = f"t={timestep}  state: [{state_str}]  action: [{action_str}]"
+        for col, key in enumerate(image_keys):
+            axis = axes[timestep, col]
+            img = sample_t[key].permute(1, 2, 0).clamp(0, 1).numpy()
+            axis.imshow(img)
+            axis.set_title(row_title if col == 0 else (key if timestep == 0 else ""), fontsize=8)
+            axis.axis("off")
 
     plt.tight_layout()
 
-    out_dir = Path(__file__).resolve().parent.parent / "assets" / "images"
+    out_dir = Path(__file__).resolve().parents[2] / "assets" / "images"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "check_dataset_sample.png"
     plt.savefig(out_path, dpi=120, bbox_inches="tight")

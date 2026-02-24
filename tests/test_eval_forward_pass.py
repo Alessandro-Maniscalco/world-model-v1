@@ -3,7 +3,7 @@
 import torch
 import pytest
 
-from world_model.eval.forward_pass import (
+from world_model.data.temporal import (
     build_frame_deltas,
     expand_to_latent_steps,
     latent_split_from_frame_ratio,

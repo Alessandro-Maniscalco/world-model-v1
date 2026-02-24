@@ -12,6 +12,8 @@ from typing import Literal
 
 import torch
 
+from world_model.data.temporal import align_time_sequence
+
 
 ProprioMode = Literal["last", "past"]
 
@@ -81,40 +83,19 @@ def pack_latent_window(
     z_past = z_window[:, :context_steps]
     z_future = z_window[:, context_steps:context_steps + horizon_steps]
 
-    actions_aligned = _align_time_sequence(actions, target_steps=total_steps)
+    actions_aligned = align_time_sequence(actions, target_steps=total_steps)
     a_plan = actions_aligned[:, context_steps:context_steps + horizon_steps]
 
     if proprio is None:
         q_cond = None
     else:
-        proprio_aligned = _align_time_sequence(proprio, target_steps=total_steps)
+        proprio_aligned = align_time_sequence(proprio, target_steps=total_steps)
         if proprio_mode == "last":
             q_cond = proprio_aligned[:, context_steps - 1]
         else:
             q_cond = proprio_aligned[:, :context_steps]
 
     return PackedLatentWindow(z_past=z_past, z_future=z_future, a_plan=a_plan, q_cond=q_cond)
-
-
-def _align_time_sequence(seq: torch.Tensor, target_steps: int) -> torch.Tensor:
-    """Align [B, T_src, D] to [B, target_steps, D] using nearest-neighbor resampling.
-
-    If T_src == target_steps, returns the input unchanged.
-    """
-    if seq.ndim != 3:
-        raise ValueError(f"Expected sequence [B,T,D], got {tuple(seq.shape)}")
-
-    t_src = seq.shape[1]
-    if t_src == target_steps:
-        return seq
-    if t_src <= 0:
-        raise ValueError("Source sequence must have positive time dimension")
-
-    idx = torch.linspace(0, t_src - 1, steps=target_steps, device=seq.device)
-    idx = idx.round().long().clamp(0, t_src - 1)
-    return seq.index_select(dim=1, index=idx)
-
-
 def _validate_inputs(
     z_tokens: torch.Tensor,
     actions: torch.Tensor,
@@ -123,6 +104,7 @@ def _validate_inputs(
     horizon_steps: int,
     proprio_mode: ProprioMode,
 ) -> None:
+    """Validate latent-window packing arguments and tensor ranks."""
     if z_tokens.ndim != 3:
         raise ValueError(f"z_tokens must be [B,T,Z], got {tuple(z_tokens.shape)}")
     if actions.ndim != 3:
