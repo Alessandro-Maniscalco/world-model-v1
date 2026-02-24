@@ -1,5 +1,7 @@
 # Repo Structure Ownership
 
+**Documentation Rule**: Every time a code change is made, `docs/repo_structure.md` and `docs/architecture.md` must be checked and updated if necessary to reflect the changes.
+
 ## Source Packages
 
 - `src/world_model/config.py`
@@ -20,17 +22,18 @@ Owns Wan VAE encode/decode interfaces and range/layout normalization.
 - `src/world_model/chunking/schedule.py`
 Owns K+1 latent-time chunk schedules and chunk-id generation.
 
-- `src/world_model/masking/`
-Owns no-leak/block-causal attention mask construction.
+- `src/world_model/masking/block_causal.py`
+Owns block-causal attention mask construction.
 
 - `src/world_model/conditioning/`
 Owns action/proprio encoders and AdaLN-Zero modulation primitives.
 
-- `src/world_model/models/`
+- `src/world_model/models/wan_dit_wrapper.py`
 Owns model wrappers used for flow-matching velocity prediction.
 
 - `src/world_model/training/`
-Owns flow-matching objective and batch training/checkpoint orchestration.
+  - `flow_matching.py`: Owns the core math for straight-line flow matching (timestep sampling, noisy state generation, weighting) and computing the chunkwise teacher-forced MSE loss.
+  - `chunkwise_training.py`: Orchestrates a single optimizer step (forward, backward passes, grad clipping) and handles metrics logging and checkpoint saving.
 
 - `src/world_model/eval/`
 Owns inference-time token sampling and token-to-latent conversion.

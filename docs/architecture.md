@@ -55,23 +55,25 @@ $$
 a_{t:t+H-1} \mapsto c_a \in \mathbb R^{d}
 $$
 
-Design option:
+Structure:
 
-1. Pool the action plan over time and project to hidden size (d).
-2. If per-timestep action features are computed, they must be pooled before AdaLN so they are not part of the transformer token sequence.
+1. Pool over time first (`mean`, `last`, or `flatten`) to get a single vector per batch item.
+2. If `mlp_dim is None`: `nn.Sequential(LayerNorm(in_dim), Linear(in_dim, d), Dropout(p))`.
+3. If `mlp_dim is set`: `nn.Sequential(LayerNorm(in_dim), Linear(in_dim, mlp_dim), GELU(), Dropout(p), Linear(mlp_dim, d), Dropout(p))`.
 
 ### Proprio encoder
 
-Maps (q_t) to an AdaLN conditioning embedding:
+Maps $q_t$ to an AdaLN conditioning embedding:
 
 $$
 q_t \mapsto c_q \in \mathbb R^{d}
 $$
 
-Ablation:
+Structure:
 
-1. With proprio: include $\mathrm{Tok}_q$.
-2. Without proprio: drop or zero $\mathrm{Tok}_q$ using a config flag.
+1. If `mlp_dim is None`: `nn.Sequential(LayerNorm(Q), Linear(Q, d), Dropout(p))`.
+2. If `mlp_dim is set`: `nn.Sequential(LayerNorm(Q), Linear(Q, mlp_dim), GELU(), Dropout(p), Linear(mlp_dim, d), Dropout(p))`.
+3. If `enabled=False`, output zeros of shape `[B, d]` (no proprio signal).
 
 ## Backbone and conditioning injection
 
@@ -79,15 +81,37 @@ Ablation:
 
 Start from Wan2.1 1.3B DiT pretrained weights. Fine tune to output a velocity field for noisy future latent chunks.
 
-### AdaLN Zero injection
+The pretrained DiT already knows a lot about:
+- spatial coherence: edges, textures, object like structure in latent space
+- temporal coherence: smooth motion patterns, persistence of objects over time
+- denoising dynamics: how to move from noisy latents back toward clean latents across timestep conditions
 
-Each transformer block receives conditioning through AdaLN Zero, modulating normalized activations using scale and shift derived from conditioning embeddings, with zero initialization so the block is initially close to identity.
+### DiT block architecture
 
-Conditioning sources:
+Each transformer block follows the Peebles & Xie (2022) DiT design, using residual connections and AdaLN-Zero conditioning:
 
-1. timestep embedding for $t$
-2. action conditioning embedding $c_a$
-3. optional proprio conditioning embedding $c_q$
+$$
+\begin{aligned}
+x_{attn} &\gets x + \alpha \cdot \text{Attn}(\text{AdaLN}(x \mid c)) \\
+x_{out} &\gets x_{attn} + \beta \cdot \text{MLP}(\text{AdaLN}(x_{attn} \mid c))
+\end{aligned}
+$$
+
+where:
+- $c = \text{ActionProj}(c_a) + \text{TimestepProj}(t_{emb}) + \text{ProprioProj}(c_q)$
+- $\alpha, \beta$ are per-block learnable scale parameters initialized to zero.
+- AdaLN modulates LayerNorm using $(\text{scale}, \text{shift})$ vectors regressed from $c$.
+
+### Timestep embedding
+
+Timesteps $t \in [0, 1]$ are mapped to a sinusoidal embedding $t_{emb} \in \mathbb R^{256}$. The scalar $t$ is scaled by 1000 to match standard diffusion frequency ranges:
+
+$$
+\text{freq}_i = \exp\left( -\frac{i}{128} \ln(10000) \right)
+$$
+$$
+t_{emb} = [\cos(1000t \cdot \text{freq}), \sin(1000t \cdot \text{freq})]
+$$
 
 ## Temporal Chunking Logic ($K+1$)
 
@@ -101,23 +125,27 @@ To prevent error drift over long horizons, the future latent window is split int
 
 ## Attention masking
 
-Requirement:
+## Attention mechanics
+
+### Scaled Dot-Product Attention
+
+The model uses standard multi-head attention over the context and noisy future tokens:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left( \frac{QK^\top}{\sqrt{d_h}} + \text{mask} \right) V
+$$
+
+where $Q, K, V$ are linear projections of the block input $h = \text{AdaLN}(x \mid c)$.
+
+### Block-Causal Masking
+
+The additive `mask` tensor $(0 / -\infty)$ ensures validity across the teacher-forced rollout:
 
 1. The current noisy chunk may attend to:
+   * **Teacher-forced history**: all past clean chunks ($k_{context} < k_{target}$).
+   * **Self**: tokens within the current noisy chunk.
+2. **Blocked Future**: Any chunk index $k > k_{target}$ is masked with $-\infty$.
 
-   * all past clean chunks
-2. The current noisy chunk must not attend to any future chunk tokens.
-
-Notes:
-
-1. Actions and proprio do not participate in attention. They condition the network only through AdaLN Zero (and therefore do not appear in the attention mask).
-
-Implement masking as a block causal mask defined by chunk ids, producing an attention mask tensor for the transformer.
-
-Leakage tests must pass by construction:
-
-1. Modify future tokens while holding past and current fixed.
-2. Verify outputs for past and current tokens do not change under the mask.
 
 ## Training objective
 
@@ -145,6 +173,10 @@ z^{(k)}_{t_k}; z^{(1:k-1)}_{1}, a_{t:t+H-1}, q_t, t_k
 \right]
 $$
 
+### Optimization
+
+The model is optimized using **AdamW**. It provides robust gradient updates and decouples weight decay, which is critical for stabilizing the training of large Diffusion Transformers (DiT).
+
 Notes:
 
 1. $w(t_k)$ is a timestep weighting function.
@@ -156,7 +188,11 @@ Notes:
 Open loop rollout:
 
 1. Encode latest observed context frames into latents $z_{\text{past}}$.
-2. Autoregressively generate future latent chunks by denoising from noisy latents to clean latents, one chunk at a time.
+2. Autoregressively generate future latent chunks from standard Gaussian noise, one chunk at a time, using Euler integration:
+   * **Context**: Condition on $z_{\text{past}}$ and all previously generated future chunks.
+   * **Steps**: Divide $t \in [0, 1]$ into $N$ steps of size $dt = 1/N$.
+   * **Predict**: At step $i$, evaluate velocity $v = u_\theta(\text{noise}_i, \dots, t_{\text{mid}})$ where $t_{\text{mid}} = (i + 0.5) dt$.
+   * **Update**: Remove noise via $z \gets z + dt \cdot v$.
 3. Decode predicted future latents to frames using the frozen VAE decoder.
 
 Optional guidance:
