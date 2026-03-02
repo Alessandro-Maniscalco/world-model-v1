@@ -65,6 +65,9 @@ def train_chunkwise_batch(
         proprio_encoder.train()
 
     optimizer.zero_grad(set_to_none=True)
+    trainable_params = list(model.parameters()) + list(action_encoder.parameters())
+    if proprio_encoder is not None:
+        trainable_params.extend(proprio_encoder.parameters())
 
     if z_past_video is not None or z_future_video is not None:
         if z_past_video is None or z_future_video is None:
@@ -114,10 +117,10 @@ def train_chunkwise_batch(
     info.loss.backward()
 
     if grad_clip_norm is None:
-        grad_norm = _compute_grad_norm(model.parameters())
+        grad_norm = _compute_grad_norm(trainable_params)
     else:
         grad_norm = float(
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm).detach().cpu().item()
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm).detach().cpu().item()
         )
     optimizer.step()
 

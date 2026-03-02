@@ -103,3 +103,53 @@ def test_train_chunkwise_batch_supports_structured_latent_videos() -> None:
     assert metrics.grad_norm > 0.0
     assert metrics.per_chunk_lengths == (4, 4)
     assert len(model.calls) == 2
+
+
+class _ActionTokenOnlyVideoModel(nn.Module):
+    """Drive the structured video loss entirely from action tokens."""
+
+    def forward(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Project time-aligned action tokens back into the latent video shape."""
+        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        channels = noisy_future_video.shape[1]
+        timesteps = noisy_future_video.shape[2]
+        return (
+            action_tokens[:, :timesteps, :channels]
+            .permute(0, 2, 1)
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand_as(noisy_future_video)
+        )
+
+
+def test_train_chunkwise_batch_structured_video_grad_norm_includes_action_encoder() -> None:
+    """Include action-token encoder gradients in structured-video grad accounting."""
+    torch.manual_seed(0)
+    model = _ActionTokenOnlyVideoModel()
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16)
+    optimizer = torch.optim.AdamW(action_encoder.parameters(), lr=1e-2)
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 8, 8, 8),
+        a_plan=torch.randn(2, 8, 6),
+        k=1,
+        t_min=0.5,
+        t_max=0.5,
+    )
+
+    assert metrics.loss > 0.0
+    assert metrics.grad_norm > 0.0

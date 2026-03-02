@@ -53,6 +53,17 @@ def test_infer_script_builds_wan_vace_runtime_modules_without_checkpoint() -> No
     assert proprio_encoder is None
 
 
+def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
+    """Avoid exposing unused legacy DiT width/depth CLI flags on the VACE path."""
+    infer_script = _load_infer_script_module()
+    parser = infer_script._build_parser(InferScriptConfig())
+    option_strings = {option for action in parser._actions for option in action.option_strings}
+
+    assert "--hidden-dim" not in option_strings
+    assert "--num-layers" not in option_strings
+    assert "--num-heads" not in option_strings
+
+
 def _load_infer_script_module():
     """Load the infer script module without executing the CLI entrypoint."""
     path = Path(__file__).resolve().parents[1] / "scripts" / "train" / "infer_world_model.py"

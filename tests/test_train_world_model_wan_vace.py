@@ -56,6 +56,17 @@ def test_train_script_builds_wan_vace_world_model_from_config() -> None:
     assert action_encoder.hidden_dim == 16
 
 
+def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
+    """Avoid exposing unused legacy DiT width/depth CLI flags on the VACE path."""
+    train_script = _load_train_script_module()
+    parser = train_script._build_parser(TrainScriptConfig())
+    option_strings = {option for action in parser._actions for option in action.option_strings}
+
+    assert "--hidden-dim" not in option_strings
+    assert "--num-layers" not in option_strings
+    assert "--num-heads" not in option_strings
+
+
 def _load_train_script_module():
     """Load the train script module without executing the CLI entrypoint."""
     path = Path(__file__).resolve().parents[1] / "scripts" / "train" / "world_model.py"

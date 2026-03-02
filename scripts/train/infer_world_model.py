@@ -74,9 +74,6 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--k", type=int, default=defaults.k)
     parser.add_argument("--integration-steps", type=int, default=defaults.integration_steps)
     parser.add_argument("--num-vis-frames", type=int, default=defaults.num_vis_frames)
-    parser.add_argument("--hidden-dim", type=int, default=defaults.hidden_dim)
-    parser.add_argument("--num-layers", type=int, default=defaults.num_layers)
-    parser.add_argument("--num-heads", type=int, default=defaults.num_heads)
     parser.add_argument(
         "--load-pretrained-backbone",
         action="store_true",

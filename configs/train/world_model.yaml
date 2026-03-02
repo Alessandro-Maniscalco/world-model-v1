@@ -13,9 +13,6 @@ grad_clip_norm: 1.0
 weight_mode: uniform
 t_min: 0.0
 t_max: 1.0
-num_layers: 6
-num_heads: 8
-hidden_dim: 1024
 disable_proprio: true
 disable_amp: false
 gradient_checkpointing: false

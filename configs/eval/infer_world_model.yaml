@@ -12,9 +12,6 @@ subset_size: 1
 k: 1
 integration_steps: 20
 num_vis_frames: 5
-hidden_dim: 1024
-num_layers: 6
-num_heads: 8
 load_pretrained_backbone: true
 wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
 wan_vace_subfolder: transformer

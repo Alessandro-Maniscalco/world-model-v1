@@ -28,9 +28,6 @@ class TrainScriptConfig:
     weight_mode: str = "uniform"
     t_min: float = 0.0
     t_max: float = 1.0
-    num_layers: int = 6
-    num_heads: int = 8
-    hidden_dim: int = 1024
     disable_proprio: bool = True
     disable_amp: bool = False
     gradient_checkpointing: bool = False
@@ -72,9 +69,6 @@ class InferScriptConfig:
     k: int = 1
     integration_steps: int = 20
     num_vis_frames: int = 5
-    hidden_dim: int = 1024
-    num_layers: int = 6
-    num_heads: int = 8
     load_pretrained_backbone: bool = True
     wan_vace_model_id: str = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
     wan_vace_subfolder: str = "transformer"
