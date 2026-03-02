@@ -22,7 +22,7 @@ from world_model.conditioning import ActionEncoder, ProprioEncoder
 from world_model.data import build_lerobot_dataloader, prepare_packed_batch
 from world_model.latents import WanVAE
 from world_model.masking import build_block_causal_mask
-from world_model.models import WanDiTWrapper
+from world_model.models.wan_dit_wrapper import WanDiTWrapper
 
 
 def _parse_args() -> argparse.Namespace:

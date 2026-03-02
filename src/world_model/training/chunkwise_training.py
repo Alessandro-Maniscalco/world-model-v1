@@ -42,8 +42,10 @@ def train_chunkwise_batch(
     model: nn.Module,
     action_encoder: nn.Module,
     optimizer: torch.optim.Optimizer,
-    z_past: torch.Tensor,
-    z_future: torch.Tensor,
+    z_past: torch.Tensor | None = None,
+    z_future: torch.Tensor | None = None,
+    z_past_video: torch.Tensor | None = None,
+    z_future_video: torch.Tensor | None = None,
     a_plan: torch.Tensor,
     k: int,
     proprio_encoder: nn.Module | None = None,
@@ -64,28 +66,51 @@ def train_chunkwise_batch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    action_conditioning = action_encoder(a_plan)
-    proprio_conditioning = None
-    if proprio_encoder is not None:
-        if q_last is None:
-            raise ValueError("q_last must be provided when proprio_encoder is enabled")
-        proprio_conditioning = proprio_encoder(q_last)
+    if z_past_video is not None or z_future_video is not None:
+        if z_past_video is None or z_future_video is None:
+            raise ValueError("z_past_video and z_future_video must be provided together")
+        if proprio_encoder is not None:
+            raise ValueError("proprio_encoder is not yet supported for structured latent-video training")
+        action_tokens = action_encoder(a_plan)
+        info = chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=z_past_video,
+            z_future_video=z_future_video,
+            action_tokens=action_tokens,
+            k=k,
+            t_min=t_min,
+            t_max=t_max,
+            weight_mode=weight_mode,
+            snr_clip_max=snr_clip_max,
+            eps=eps,
+            generator=generator,
+            return_info=True,
+        )
+    else:
+        if z_past is None or z_future is None:
+            raise ValueError("z_past and z_future must be provided for token-path training")
+        action_conditioning = action_encoder(a_plan)
+        proprio_conditioning = None
+        if proprio_encoder is not None:
+            if q_last is None:
+                raise ValueError("q_last must be provided when proprio_encoder is enabled")
+            proprio_conditioning = proprio_encoder(q_last)
 
-    info = chunkwise_teacher_forcing_loss(
-        model,
-        z_past=z_past,
-        z_future=z_future,
-        action_conditioning=action_conditioning,
-        proprio_conditioning=proprio_conditioning,
-        k=k,
-        t_min=t_min,
-        t_max=t_max,
-        weight_mode=weight_mode,
-        snr_clip_max=snr_clip_max,
-        eps=eps,
-        generator=generator,
-        return_info=True,
-    )
+        info = chunkwise_teacher_forcing_loss(
+            model,
+            z_past=z_past,
+            z_future=z_future,
+            action_conditioning=action_conditioning,
+            proprio_conditioning=proprio_conditioning,
+            k=k,
+            t_min=t_min,
+            t_max=t_max,
+            weight_mode=weight_mode,
+            snr_clip_max=snr_clip_max,
+            eps=eps,
+            generator=generator,
+            return_info=True,
+        )
     info.loss.backward()
 
     if grad_clip_norm is None:

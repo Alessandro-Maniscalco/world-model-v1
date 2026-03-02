@@ -1,4 +1,4 @@
-"""Run checkpointed world-model inference and export GT-vs-generated grids.
+"""Run Wan VACE world-model inference and export GT-vs-generated grids.
 
 This entrypoint uses typed YAML-backed config plus CLI overrides and shared
 batch preparation utilities.
@@ -32,12 +32,14 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     # Drop incorrectly loaded module objects so package import can succeed.
     sys.modules.pop("world_model", None)
 
-from world_model.conditioning import ActionEncoder, ProprioEncoder
 from world_model.config import InferScriptConfig, apply_namespace_overrides, load_infer_config
 from world_model.data import build_lerobot_dataloader, prepare_packed_batch
-from world_model.eval import infer_future_tokens_chunkwise, tokens_to_latents
+from world_model.data.schema import PreparedPackedBatch
+from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
-from world_model.models import WanDiTWrapper
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_factory import build_wan_vace_runtime_modules
+from world_model.models.wan_vace_world_model import WanVACEWorldModel
 
 
 def _config_parser() -> argparse.ArgumentParser:
@@ -50,7 +52,11 @@ def _config_parser() -> argparse.ArgumentParser:
 def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     """Create full CLI parser using dataclass defaults."""
     parser = argparse.ArgumentParser(description=__doc__, parents=[_config_parser()])
-    parser.add_argument("--checkpoint", default=defaults.checkpoint, help="Path to training checkpoint .pt")
+    parser.add_argument(
+        "--checkpoint",
+        default=defaults.checkpoint,
+        help="Optional local fine-tune checkpoint .pt to overlay on the pretrained Wan VACE transformer.",
+    )
     parser.add_argument(
         "--video-path",
         default=defaults.video_path,
@@ -71,6 +77,23 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--hidden-dim", type=int, default=defaults.hidden_dim)
     parser.add_argument("--num-layers", type=int, default=defaults.num_layers)
     parser.add_argument("--num-heads", type=int, default=defaults.num_heads)
+    parser.add_argument(
+        "--load-pretrained-backbone",
+        action="store_true",
+        default=defaults.load_pretrained_backbone,
+    )
+    parser.add_argument("--no-load-pretrained-backbone", dest="load_pretrained_backbone", action="store_false")
+    parser.add_argument("--wan-vace-model-id", default=defaults.wan_vace_model_id)
+    parser.add_argument("--wan-vace-subfolder", default=defaults.wan_vace_subfolder)
+    parser.add_argument("--wan-num-attention-heads", type=int, default=defaults.wan_num_attention_heads)
+    parser.add_argument("--wan-attention-head-dim", type=int, default=defaults.wan_attention_head_dim)
+    parser.add_argument("--wan-text-dim", type=int, default=defaults.wan_text_dim)
+    parser.add_argument("--wan-freq-dim", type=int, default=defaults.wan_freq_dim)
+    parser.add_argument("--wan-ffn-dim", type=int, default=defaults.wan_ffn_dim)
+    parser.add_argument("--wan-num-layers", type=int, default=defaults.wan_num_layers)
+    parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
+    parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
+    parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
     parser.add_argument(
         "--action-path",
         default=defaults.action_path,
@@ -203,7 +226,7 @@ def _load_action_tensor(
 def _prepare_from_local_video(
     *,
     cfg: InferScriptConfig,
-    ckpt: dict[str, object],
+    ckpt: dict[str, object] | None,
     vae: WanVAE,
     device: torch.device,
 ) -> Any:
@@ -211,7 +234,12 @@ def _prepare_from_local_video(
     total_frames = cfg.context_len + cfg.horizon_len
     video_btchw = _load_video_clip(cfg.video_path, cfg.start_frame, total_frames).to(device)
 
-    action_dim = cfg.action_dim if cfg.action_dim > 0 else _infer_action_dim_from_checkpoint(ckpt)
+    if cfg.action_dim > 0:
+        action_dim = cfg.action_dim
+    elif ckpt is not None:
+        action_dim = _infer_action_dim_from_checkpoint(ckpt)
+    else:
+        action_dim = 0
     action = _load_action_tensor(
         action_path=cfg.action_path,
         action_dim=action_dim,
@@ -230,6 +258,22 @@ def _prepare_from_local_video(
         context_len=cfg.context_len,
         horizon_len=cfg.horizon_len,
         proprio_mode="last",
+    )
+
+
+def build_runtime_modules(
+    *,
+    cfg: InferScriptConfig,
+    prepared: PreparedPackedBatch,
+    device: torch.device,
+    checkpoint: dict[str, object] | None,
+) -> tuple[WanVACEWorldModel, ActionTokenEncoder, None]:
+    """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
+    return build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=device,
+        checkpoint=checkpoint,
     )
 
 
@@ -282,17 +326,14 @@ def _save_grid(
 
 @torch.no_grad()
 def main() -> None:
-    """Run chunkwise autoregressive inference from a saved checkpoint."""
+    """Run chunkwise autoregressive inference from pretrained Wan VACE weights."""
     cfg = _load_args()
     _set_seed(cfg.seed)
-
-    if not cfg.checkpoint:
-        raise ValueError("--checkpoint is required unless set in --config")
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = _load_checkpoint(cfg.checkpoint, device=device)
+    ckpt = _load_checkpoint(cfg.checkpoint, device=device) if cfg.checkpoint else None
 
     vae = WanVAE.from_pretrained(device=device, deterministic=True)
     if cfg.video_path:
@@ -326,54 +367,30 @@ def main() -> None:
             proprio_mode="last",
         )
 
-    model = WanDiTWrapper(
-        hidden_dim=cfg.hidden_dim,
-        latent_dim=prepared.z_future.shape[-1],
-        cond_dim=cfg.hidden_dim,
-        num_layers=cfg.num_layers,
-        num_heads=cfg.num_heads,
-        mixed_precision=not cfg.disable_amp,
-        gradient_checkpointing=False,
-    ).to(device)
-    action_encoder = ActionEncoder(
-        action_dim=prepared.a_plan.shape[-1],
-        hidden_dim=cfg.hidden_dim,
-        pool="mean",
-    ).to(device)
-    proprio_encoder = None
-    if not cfg.disable_proprio and prepared.q_last is not None:
-        proprio_encoder = ProprioEncoder(
-            proprio_dim=prepared.q_last.shape[-1],
-            hidden_dim=cfg.hidden_dim,
-            enabled=True,
-        ).to(device)
-
-    model.load_state_dict(ckpt["model_state_dict"])
-    action_encoder.load_state_dict(ckpt["action_encoder_state_dict"])
-    if proprio_encoder is not None and "proprio_encoder_state_dict" in ckpt:
-        proprio_encoder.load_state_dict(ckpt["proprio_encoder_state_dict"])
+    model, action_encoder, proprio_encoder = build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=device,
+        checkpoint=ckpt,
+    )
 
     model.eval()
     action_encoder.eval()
     if proprio_encoder is not None:
         proprio_encoder.eval()
 
-    action_conditioning = action_encoder(prepared.a_plan)
-    proprio_conditioning = None if proprio_encoder is None else proprio_encoder(prepared.q_last)
-    pred_future_tokens = infer_future_tokens_chunkwise(
+    action_tokens = action_encoder(prepared.a_plan)
+    pred_future_video = infer_future_videos_chunkwise(
         model,
-        z_past=prepared.z_past,
-        future_steps=prepared.z_future.shape[1],
-        action_conditioning=action_conditioning,
-        proprio_conditioning=proprio_conditioning,
+        z_past_video=prepared.z_past_video,
+        future_steps=prepared.z_future_video.shape[2],
+        action_tokens=action_tokens,
         k=cfg.k,
         integration_steps=cfg.integration_steps,
     )
 
-    pred_latents = tokens_to_latents(pred_future_tokens, latent_shape=prepared.latent_shape)
-    target_latents = tokens_to_latents(prepared.z_future, latent_shape=prepared.latent_shape)
-    pred_video = vae.decode(pred_latents, output_layout="BTCHW", output_range="zero_to_one")
-    target_video = vae.decode(target_latents, output_layout="BTCHW", output_range="zero_to_one")
+    pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
+    target_video = vae.decode(prepared.z_future_video, output_layout="BTCHW", output_range="zero_to_one")
 
     grid_path = output_dir / "comparison_grid.png"
     _save_grid(

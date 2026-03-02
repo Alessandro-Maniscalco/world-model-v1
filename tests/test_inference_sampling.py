@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from world_model.eval import infer_future_tokens_chunkwise, tokens_to_latents
+from world_model.eval import infer_future_tokens_chunkwise, infer_future_videos_chunkwise, tokens_to_latents
 
 
 class _RecordingInferenceModel(nn.Module):
@@ -34,6 +34,38 @@ class _RecordingInferenceModel(nn.Module):
         )
         del action_conditioning, timestep_t, proprio_conditioning
         return -noisy_future_chunk
+
+
+class _RecordingVideoInferenceModel(nn.Module):
+    """Record structured Wan VACE inference calls and denoise by negation."""
+
+    def __init__(self):
+        """Initialize call storage."""
+        super().__init__()
+        self.calls: list[dict[str, int | tuple[int, ...]]] = []
+
+    def forward(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Record active chunk shapes and return a simple velocity field."""
+        del timestep_t, observed_mask, control_hidden_states_scale
+        self.calls.append(
+            {
+                "future_frames": noisy_future_video.shape[2],
+                "observed_frames": observed_video.shape[2],
+                "action_frames": action_tokens.shape[1],
+                "mask_shape": tuple(block_causal_attention_mask.shape),
+            }
+        )
+        return -noisy_future_video
 
 
 def test_infer_future_tokens_chunkwise_shapes_and_calls():
@@ -68,6 +100,32 @@ def test_infer_future_tokens_chunkwise_validates_inputs():
             k=1,
             integration_steps=0,
         )
+
+
+def test_infer_future_videos_chunkwise_shapes_and_calls():
+    """Sample future latent videos chunkwise with the Wan VACE inference contract."""
+    torch.manual_seed(0)
+    model = _RecordingVideoInferenceModel()
+    z_past_video = torch.randn(2, 16, 3, 8, 8)
+    action_tokens = torch.randn(2, 8, 16)
+
+    out = infer_future_videos_chunkwise(
+        model,
+        z_past_video=z_past_video,
+        future_steps=8,
+        action_tokens=action_tokens,
+        k=1,
+        integration_steps=5,
+    )
+
+    assert out.shape == (2, 16, 8, 8, 8)
+    assert len(model.calls) == 10
+    assert model.calls[0]["observed_frames"] == 3
+    assert model.calls[0]["future_frames"] == 4
+    assert model.calls[0]["action_frames"] == 4
+    assert model.calls[5]["observed_frames"] == 7
+    assert model.calls[5]["future_frames"] == 4
+    assert model.calls[5]["action_frames"] == 4
 
 
 def test_tokens_to_latents_reshapes_correctly():

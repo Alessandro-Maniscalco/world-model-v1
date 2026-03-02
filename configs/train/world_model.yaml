@@ -16,9 +16,29 @@ t_max: 1.0
 num_layers: 6
 num_heads: 8
 hidden_dim: 1024
-disable_proprio: false
+disable_proprio: true
 disable_amp: false
 gradient_checkpointing: false
+load_pretrained_backbone: true
+wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
+wan_vace_subfolder: transformer
+wan_num_attention_heads: 40
+wan_attention_head_dim: 128
+wan_text_dim: 4096
+wan_freq_dim: 256
+wan_ffn_dim: 13824
+wan_num_layers: 40
+vace_layers:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 25
+  - 30
+  - 35
+control_scale: 1.0
+mask_channels: 64
 num_workers: 0
 log_every: 10
 checkpoint_every: 100

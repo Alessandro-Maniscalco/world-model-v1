@@ -17,6 +17,9 @@ from torch.utils.checkpoint import checkpoint
 from world_model.conditioning import AdaLNZero
 
 
+LEGACY_ONLY = True
+
+
 class _DiTBlock(nn.Module):
     """Minimal DiT-style block with AdaLN conditioning."""
 

@@ -49,6 +49,9 @@ def prepare_packed_batch(
     target_steps = context_latent_steps + horizon_latent_steps
     action_seq = expand_to_latent_steps(action, target_steps=target_steps)
     proprio_seq = None if proprio is None else expand_to_latent_steps(proprio, target_steps=target_steps)
+    z_window_video = latents[:, :, :target_steps]
+    z_past_video = z_window_video[:, :, :context_latent_steps]
+    z_future_video = z_window_video[:, :, context_latent_steps:context_latent_steps + horizon_latent_steps]
 
     packed = pack_latent_window(
         z_tokens=z_tokens,
@@ -61,6 +64,8 @@ def prepare_packed_batch(
     q_last = packed.q_cond if proprio_mode == "last" else None
     latent_shape = (int(latents.shape[1]), int(latents.shape[3]), int(latents.shape[4]))
     return PreparedPackedBatch(
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
         z_past=packed.z_past,
         z_future=packed.z_future,
         a_plan=packed.a_plan,
