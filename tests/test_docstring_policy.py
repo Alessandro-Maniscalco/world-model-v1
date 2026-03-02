@@ -11,7 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _iter_policy_files() -> list[Path]:
     """Collect files covered by the docstring policy test."""
-    return sorted((ROOT / "src").rglob("*.py")) + sorted((ROOT / "scripts").rglob("*.py"))
+    src_files = [
+        path
+        for path in sorted((ROOT / "src").rglob("*.py"))
+        if "src/world_model/vendor/" not in path.as_posix()
+    ]
+    return src_files + sorted((ROOT / "scripts").rglob("*.py"))
 
 
 def test_module_docstrings_present_for_src_and_scripts() -> None:

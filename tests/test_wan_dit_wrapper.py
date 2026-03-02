@@ -6,7 +6,14 @@ import torch
 
 from world_model.chunking import build_full_sequence_chunk_ids
 from world_model.masking import build_block_causal_mask
-from world_model.models import WanDiTWrapper
+import world_model.models as model_namespace
+from world_model.models.wan_dit_wrapper import LEGACY_ONLY, WanDiTWrapper
+
+
+def test_legacy_wan_dit_wrapper_is_quarantined_from_default_model_namespace():
+    """Keep the legacy wrapper importable by module path, not as the default namespace export."""
+    assert LEGACY_ONLY is True
+    assert "WanDiTWrapper" not in model_namespace.__all__
 
 
 def test_wan_dit_wrapper_forward_returns_future_velocity_shape():

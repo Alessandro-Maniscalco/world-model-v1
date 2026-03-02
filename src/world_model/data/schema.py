@@ -12,6 +12,8 @@ class PreparedPackedBatch:
     """Canonical prepared batch emitted by `prepare_packed_batch`.
 
     Attributes:
+    - z_past_video: Latent context video `[B, C, T_ctx, H, W]`.
+    - z_future_video: Latent future video `[B, C, T_hor, H, W]`.
     - z_past: Latent context tokens `[B, T_ctx, D]`.
     - z_future: Latent future tokens `[B, T_hor, D]`.
     - a_plan: Action plan aligned to future latent window `[B, T_hor, A]`.
@@ -22,6 +24,8 @@ class PreparedPackedBatch:
     - horizon_latent_steps: Latent future steps after split.
     """
 
+    z_past_video: torch.Tensor
+    z_future_video: torch.Tensor
     z_past: torch.Tensor
     z_future: torch.Tensor
     a_plan: torch.Tensor

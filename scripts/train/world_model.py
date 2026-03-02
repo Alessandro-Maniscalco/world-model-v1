@@ -33,11 +33,17 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     # Drop incorrectly loaded module objects so package import can succeed.
     sys.modules.pop("world_model", None)
 
-from world_model.conditioning import ActionEncoder, ProprioEncoder
 from world_model.config import TrainScriptConfig, apply_namespace_overrides, load_train_config
 from world_model.data import build_lerobot_dataloader, prepare_packed_batch
+from world_model.data.schema import PreparedPackedBatch
 from world_model.latents import WanVAE
-from world_model.models import WanDiTWrapper
+from world_model.models import WanVACEWorldModel
+from world_model.models.wan_vace_factory import (
+    build_action_token_encoder_for_model,
+    build_wan_vace_model_from_config,
+    validate_wan_vace_proprio_disabled,
+)
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder
 from world_model.training import (
     append_jsonl,
     chunkwise_teacher_forcing_loss,
@@ -80,6 +86,23 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--enable-amp", dest="disable_amp", action="store_false")
     parser.add_argument("--gradient-checkpointing", action="store_true", default=defaults.gradient_checkpointing)
     parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing", action="store_false")
+    parser.add_argument(
+        "--load-pretrained-backbone",
+        action="store_true",
+        default=defaults.load_pretrained_backbone,
+    )
+    parser.add_argument("--no-load-pretrained-backbone", dest="load_pretrained_backbone", action="store_false")
+    parser.add_argument("--wan-vace-model-id", default=defaults.wan_vace_model_id)
+    parser.add_argument("--wan-vace-subfolder", default=defaults.wan_vace_subfolder)
+    parser.add_argument("--wan-num-attention-heads", type=int, default=defaults.wan_num_attention_heads)
+    parser.add_argument("--wan-attention-head-dim", type=int, default=defaults.wan_attention_head_dim)
+    parser.add_argument("--wan-text-dim", type=int, default=defaults.wan_text_dim)
+    parser.add_argument("--wan-freq-dim", type=int, default=defaults.wan_freq_dim)
+    parser.add_argument("--wan-ffn-dim", type=int, default=defaults.wan_ffn_dim)
+    parser.add_argument("--wan-num-layers", type=int, default=defaults.wan_num_layers)
+    parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
+    parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
+    parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
     parser.add_argument("--log-every", type=int, default=defaults.log_every)
     parser.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
@@ -107,16 +130,38 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def build_model_from_config(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> WanVACEWorldModel:
+    """Build the Wan VACE world-model adapter for training."""
+    return build_wan_vace_model_from_config(cfg, prepared_batch)
+
+
+def build_action_encoder_from_config(
+    cfg: TrainScriptConfig,
+    prepared_batch: PreparedPackedBatch,
+    model: WanVACEWorldModel,
+) -> ActionTokenEncoder:
+    """Build the Wan action-token encoder matching the backbone text width."""
+    del cfg
+    return build_action_token_encoder_for_model(prepared_batch, model)
+
+
+def build_proprio_encoder_from_config(
+    cfg: TrainScriptConfig,
+    prepared_batch: PreparedPackedBatch,
+) -> None:
+    """Validate the current proprio config for the Wan VACE training path."""
+    validate_wan_vace_proprio_disabled(cfg, prepared_batch)
+    return None
+
+
 @torch.no_grad()
 def _evaluate_loss(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
-    proprio_encoder: nn.Module | None,
-    z_past: torch.Tensor,
-    z_future: torch.Tensor,
+    z_past_video: torch.Tensor,
+    z_future_video: torch.Tensor,
     a_plan: torch.Tensor,
-    q_last: torch.Tensor | None,
     k: int,
     t_min: float,
     t_max: float,
@@ -125,17 +170,13 @@ def _evaluate_loss(
     """Compute one eval-mode chunkwise loss for overfit diagnostics."""
     model.eval()
     action_encoder.eval()
-    if proprio_encoder is not None:
-        proprio_encoder.eval()
 
-    action_conditioning = action_encoder(a_plan)
-    proprio_conditioning = None if proprio_encoder is None else proprio_encoder(q_last)
+    action_tokens = action_encoder(a_plan)
     loss = chunkwise_teacher_forcing_loss(
         model,
-        z_past=z_past,
-        z_future=z_future,
-        action_conditioning=action_conditioning,
-        proprio_conditioning=proprio_conditioning,
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        action_tokens=action_tokens,
         k=k,
         t_min=t_min,
         t_max=t_max,
@@ -186,31 +227,9 @@ def main() -> None:
         proprio_mode="last",
     )
 
-    latent_dim = prepared.z_future.shape[-1]
-    action_dim = prepared.a_plan.shape[-1]
-    model = WanDiTWrapper(
-        hidden_dim=cfg.hidden_dim,
-        latent_dim=latent_dim,
-        cond_dim=cfg.hidden_dim,
-        num_layers=cfg.num_layers,
-        num_heads=cfg.num_heads,
-        mixed_precision=not cfg.disable_amp,
-        gradient_checkpointing=cfg.gradient_checkpointing,
-    ).to(device)
-
-    action_encoder = ActionEncoder(
-        action_dim=action_dim,
-        hidden_dim=cfg.hidden_dim,
-        pool="mean",
-    ).to(device)
-
-    proprio_encoder = None
-    if not cfg.disable_proprio and prepared.q_last is not None:
-        proprio_encoder = ProprioEncoder(
-            proprio_dim=prepared.q_last.shape[-1],
-            hidden_dim=cfg.hidden_dim,
-            enabled=True,
-        ).to(device)
+    model = build_model_from_config(cfg, prepared).to(device)
+    action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
+    proprio_encoder = build_proprio_encoder_from_config(cfg, prepared)
 
     parameter_groups = list(model.parameters()) + list(action_encoder.parameters())
     if proprio_encoder is not None:
@@ -224,11 +243,9 @@ def main() -> None:
         overfit_start_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
-            proprio_encoder=proprio_encoder,
-            z_past=prepared.z_past,
-            z_future=prepared.z_future,
+            z_past_video=prepared.z_past_video,
+            z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
-            q_last=prepared.q_last,
             k=cfg.k,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -264,10 +281,9 @@ def main() -> None:
             model=model,
             action_encoder=action_encoder,
             optimizer=optimizer,
-            z_past=prepared.z_past,
-            z_future=prepared.z_future,
+            z_past_video=prepared.z_past_video,
+            z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
-            q_last=prepared.q_last,
             proprio_encoder=proprio_encoder,
             k=cfg.k,
             t_min=cfg.t_min,
@@ -315,11 +331,9 @@ def main() -> None:
         overfit_end_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
-            proprio_encoder=proprio_encoder,
-            z_past=prepared.z_past,
-            z_future=prepared.z_future,
+            z_past_video=prepared.z_past_video,
+            z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
-            q_last=prepared.q_last,
             k=cfg.k,
             t_min=cfg.t_min,
             t_max=cfg.t_max,

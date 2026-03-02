@@ -29,6 +29,23 @@ class VelocityModel(Protocol):
         """Predict velocity on a noisy future chunk."""
 
 
+class VideoVelocityModel(Protocol):
+    """Protocol for Wan VACE-style latent-video velocity predictors."""
+
+    def __call__(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Predict velocity on a noisy future latent-video chunk."""
+
+
 @torch.no_grad()
 def infer_future_tokens_chunkwise(
     model: VelocityModel,
@@ -103,6 +120,100 @@ def infer_future_tokens_chunkwise(
     return pred_future
 
 
+@torch.no_grad()
+def infer_future_videos_chunkwise(
+    model: VideoVelocityModel,
+    *,
+    z_past_video: torch.Tensor,
+    future_steps: int,
+    action_tokens: torch.Tensor,
+    k: int,
+    integration_steps: int = 20,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample future latent videos with chunkwise autoregressive Euler integration."""
+    _validate_video_infer_inputs(
+        z_past_video=z_past_video,
+        future_steps=future_steps,
+        action_tokens=action_tokens,
+        integration_steps=integration_steps,
+    )
+
+    batch_size = z_past_video.shape[0]
+    channels = z_past_video.shape[1]
+    height = z_past_video.shape[3]
+    width = z_past_video.shape[4]
+    schedule = build_k_plus_one_schedule(future_steps=future_steps, k=k, device=z_past_video.device)
+    pred_future = torch.zeros(
+        batch_size,
+        channels,
+        future_steps,
+        height,
+        width,
+        device=z_past_video.device,
+        dtype=z_past_video.dtype,
+    )
+
+    dt = 1.0 / float(integration_steps)
+    for start, end in schedule.boundaries:
+        chunk_len = end - start
+        chunk_state = torch.randn(
+            batch_size,
+            channels,
+            chunk_len,
+            height,
+            width,
+            device=z_past_video.device,
+            dtype=z_past_video.dtype,
+            generator=generator,
+        )
+        observed_video = torch.cat([z_past_video, pred_future[:, :, :start, :, :]], dim=2)
+        observed_mask = torch.zeros(
+            observed_video.shape[0],
+            1,
+            observed_video.shape[2],
+            observed_video.shape[3],
+            observed_video.shape[4],
+            device=observed_video.device,
+            dtype=observed_video.dtype,
+        )
+        full_chunk_ids = torch.cat(
+            [
+                torch.full(
+                    (observed_video.shape[2],),
+                    fill_value=-1,
+                    device=z_past_video.device,
+                    dtype=torch.long,
+                ),
+                torch.zeros(chunk_len, device=z_past_video.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
+        mask = build_block_causal_mask(full_chunk_ids, mask_format="additive")
+
+        for step in range(integration_steps):
+            t = torch.full(
+                (batch_size,),
+                fill_value=(step + 0.5) * dt,
+                device=z_past_video.device,
+                dtype=z_past_video.dtype,
+            )
+            velocity = model(
+                noisy_future_video=chunk_state,
+                observed_video=observed_video,
+                action_tokens=action_tokens[:, start:end],
+                timestep_t=t,
+                block_causal_attention_mask=mask,
+                observed_mask=observed_mask,
+                control_hidden_states_scale=None,
+            )
+            chunk_state = chunk_state + dt * velocity
+
+        pred_future[:, :, start:end, :, :] = chunk_state
+
+    return pred_future
+
+
 def tokens_to_latents(
     tokens: torch.Tensor,
     *,
@@ -152,3 +263,27 @@ def _validate_infer_inputs(
             )
         if proprio_conditioning.shape[0] != z_past.shape[0]:
             raise ValueError("proprio_conditioning batch size must match z_past")
+
+
+def _validate_video_infer_inputs(
+    *,
+    z_past_video: torch.Tensor,
+    future_steps: int,
+    action_tokens: torch.Tensor,
+    integration_steps: int,
+) -> None:
+    """Validate structured latent-video inputs for Wan VACE inference sampling."""
+    if z_past_video.ndim != 5:
+        raise ValueError(f"z_past_video must be [B,C,T,H,W], got {tuple(z_past_video.shape)}")
+    if z_past_video.shape[2] <= 0:
+        raise ValueError("z_past_video must have positive context length")
+    if future_steps <= 0:
+        raise ValueError(f"future_steps must be positive, got {future_steps}")
+    if integration_steps <= 0:
+        raise ValueError(f"integration_steps must be positive, got {integration_steps}")
+    if action_tokens.ndim != 3:
+        raise ValueError(f"action_tokens must be [B,T,D], got {tuple(action_tokens.shape)}")
+    if action_tokens.shape[0] != z_past_video.shape[0]:
+        raise ValueError("action_tokens batch size must match z_past_video")
+    if action_tokens.shape[1] != future_steps:
+        raise ValueError("action_tokens time length must match requested future_steps")

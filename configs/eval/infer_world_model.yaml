@@ -15,9 +15,29 @@ num_vis_frames: 5
 hidden_dim: 1024
 num_layers: 6
 num_heads: 8
+load_pretrained_backbone: true
+wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
+wan_vace_subfolder: transformer
+wan_num_attention_heads: 40
+wan_attention_head_dim: 128
+wan_text_dim: 4096
+wan_freq_dim: 256
+wan_ffn_dim: 13824
+wan_num_layers: 40
+vace_layers:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 25
+  - 30
+  - 35
+control_scale: 1.0
+mask_channels: 64
 action_path: ""
 action_dim: 0
 action_value: 0.0
-disable_proprio: false
+disable_proprio: true
 disable_amp: false
 seed: 0
