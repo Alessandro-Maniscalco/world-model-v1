@@ -41,7 +41,6 @@ from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
     build_action_token_encoder_for_model,
     build_wan_vace_model_from_config,
-    validate_wan_vace_proprio_disabled,
 )
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder
 from world_model.training import (
@@ -55,7 +54,12 @@ from world_model.training import (
 def _config_parser() -> argparse.ArgumentParser:
     """Create parser for config-file bootstrap args."""
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--config", type=str, default=None, help="Optional YAML config path")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional YAML config path; defaults to configs/train/world_model.yaml.",
+    )
     return parser
 
 
@@ -77,8 +81,6 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--weight-mode", choices=["uniform", "snr", "clipped_snr"], default=defaults.weight_mode)
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
-    parser.add_argument("--disable-proprio", action="store_true", default=defaults.disable_proprio)
-    parser.add_argument("--enable-proprio", dest="disable_proprio", action="store_false")
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
     parser.add_argument("--enable-amp", dest="disable_amp", action="store_false")
     parser.add_argument("--gradient-checkpointing", action="store_true", default=defaults.gradient_checkpointing)
@@ -140,15 +142,6 @@ def build_action_encoder_from_config(
     """Build the Wan action-token encoder matching the backbone text width."""
     del cfg
     return build_action_token_encoder_for_model(prepared_batch, model)
-
-
-def build_proprio_encoder_from_config(
-    cfg: TrainScriptConfig,
-    prepared_batch: PreparedPackedBatch,
-) -> None:
-    """Validate the current proprio config for the Wan VACE training path."""
-    validate_wan_vace_proprio_disabled(cfg, prepared_batch)
-    return None
 
 
 @torch.no_grad()
@@ -221,16 +214,12 @@ def main() -> None:
         video_key=cfg.video_key,
         context_len=cfg.context_len,
         horizon_len=cfg.horizon_len,
-        proprio_mode="last",
     )
 
     model = build_model_from_config(cfg, prepared).to(device)
     action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
-    proprio_encoder = build_proprio_encoder_from_config(cfg, prepared)
 
     parameter_groups = list(model.parameters()) + list(action_encoder.parameters())
-    if proprio_encoder is not None:
-        parameter_groups.extend(proprio_encoder.parameters())
     optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     cached_batch = first_batch if cfg.overfit_one_batch else None
@@ -271,7 +260,6 @@ def main() -> None:
             video_key=cfg.video_key,
             context_len=cfg.context_len,
             horizon_len=cfg.horizon_len,
-            proprio_mode="last",
         )
 
         metrics = train_chunkwise_batch(
@@ -281,7 +269,6 @@ def main() -> None:
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
-            proprio_encoder=proprio_encoder,
             k=cfg.k,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -308,7 +295,6 @@ def main() -> None:
                 model=model,
                 action_encoder=action_encoder,
                 optimizer=optimizer,
-                proprio_encoder=proprio_encoder,
                 extra_state={"config": asdict(cfg)},
             )
             print(f"checkpoint={path}")
@@ -319,7 +305,6 @@ def main() -> None:
         model=model,
         action_encoder=action_encoder,
         optimizer=optimizer,
-        proprio_encoder=proprio_encoder,
         extra_state={"config": asdict(cfg)},
     )
     print(f"final_checkpoint={final_ckpt}")

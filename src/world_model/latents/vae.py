@@ -18,6 +18,7 @@ Conventions:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any, Literal
 
 import torch
@@ -26,13 +27,17 @@ import torch
 VideoLayout = Literal["BTCHW", "BTHWC"]
 VideoRange = Literal["auto", "minus_one_to_one", "zero_to_one", "uint8"]
 OutputRange = Literal["minus_one_to_one", "zero_to_one", "uint8"]
+LatentFormat = Literal["wan", "raw"]
 
 
 @dataclass(frozen=True)
 class WanVAEConfig:
+    """Immutable configuration for Wan VAE I/O behavior."""
+
     deterministic: bool = True
     input_layout: VideoLayout = "BTCHW"
     input_range: VideoRange = "auto"
+    latent_format: LatentFormat = "wan"
 
 
 class WanVAE:
@@ -55,6 +60,7 @@ class WanVAE:
         torch_dtype: torch.dtype = torch.float32,
         device: torch.device | str | None = None,
         deterministic: bool = True,
+        latent_format: LatentFormat = "wan",
     ) -> "WanVAE":
         """Load and freeze pretrained Wan VAE weights."""
         try:
@@ -66,6 +72,7 @@ class WanVAE:
             model_id,
             subfolder=subfolder,
             torch_dtype=torch_dtype,
+            local_files_only=_offline_mode_enabled(),
         )
         if device is not None:
             vae = vae.to(device)
@@ -73,7 +80,7 @@ class WanVAE:
         for p in vae.parameters():
             p.requires_grad_(False)
 
-        return cls(vae=vae, config=WanVAEConfig(deterministic=deterministic))
+        return cls(vae=vae, config=WanVAEConfig(deterministic=deterministic, latent_format=latent_format))
 
     @torch.no_grad()
     def encode(self, video: torch.Tensor) -> torch.Tensor:
@@ -89,6 +96,7 @@ class WanVAE:
         """
         bcthw = _to_bcthw(video, self.config.input_layout)
         bcthw = _normalize_video(bcthw, self.config.input_range)
+        bcthw = _cast_to_vae_runtime(bcthw, self.vae)
 
         encoded = self.vae.encode(bcthw)
 
@@ -100,8 +108,10 @@ class WanVAE:
             return latents
 
         if self.config.deterministic:
-            return latent_dist.mean
-        return latent_dist.sample()
+            latents = _latent_dist_mode(latent_dist)
+        else:
+            latents = latent_dist.sample()
+        return _normalize_latents(latents, self.vae, self.config.latent_format)
 
     @torch.no_grad()
     def decode(
@@ -123,7 +133,9 @@ class WanVAE:
         if latents.ndim != 5:
             raise ValueError(f"Expected latents [B,C,T,H,W], got shape {tuple(latents.shape)}")
 
-        decoded = self.vae.decode(latents)
+        raw_latents = _denormalize_latents(latents, self.vae, self.config.latent_format)
+        raw_latents = _cast_to_vae_runtime(raw_latents, self.vae)
+        decoded = self.vae.decode(raw_latents)
         video_bcthw = _extract_decoded_sample(decoded)
         video = _from_bcthw(video_bcthw, output_layout)
         return _format_output_range(video, output_range)
@@ -201,6 +213,77 @@ def _extract_decoded_sample(decoded: Any) -> torch.Tensor:
         return sample
 
     raise ValueError("VAE decode output missing tensor/sample")
+
+
+def _cast_to_vae_runtime(tensor: torch.Tensor, vae: Any) -> torch.Tensor:
+    """Align tensor device and floating dtype with the loaded VAE runtime."""
+    device, dtype = _vae_runtime_device_dtype(vae, tensor)
+    if tensor.is_floating_point():
+        return tensor.to(device=device, dtype=dtype)
+    return tensor.to(device=device)
+
+
+def _vae_runtime_device_dtype(vae: Any, fallback: torch.Tensor) -> tuple[torch.device, torch.dtype]:
+    """Read the active VAE parameter device and dtype, falling back to the input tensor."""
+    parameters = getattr(vae, "parameters", None)
+    if callable(parameters):
+        first_param = next(iter(parameters()), None)
+        if first_param is not None:
+            return first_param.device, first_param.dtype
+    return fallback.device, fallback.dtype
+
+
+def _offline_mode_enabled() -> bool:
+    """Mirror Hugging Face offline env handling for local-cache-only loading."""
+    return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+def _latent_dist_mode(latent_dist: Any) -> torch.Tensor:
+    """Return the deterministic latent sample for a VAE posterior."""
+    mode = getattr(latent_dist, "mode", None)
+    if callable(mode):
+        return mode()
+    mean = getattr(latent_dist, "mean", None)
+    if mean is not None:
+        return mean
+    raise ValueError("VAE latent distribution missing both `mode()` and `mean`")
+
+
+def _normalize_latents(latents: torch.Tensor, vae: Any, latent_format: LatentFormat) -> torch.Tensor:
+    """Convert raw VAE latents into the configured external latent format."""
+    if latent_format == "raw":
+        return latents
+    if latent_format != "wan":
+        raise ValueError(f"Unsupported latent format: {latent_format}")
+    mean, inv_std = _latent_stats(vae, latents)
+    return (latents - mean) * inv_std
+
+
+def _denormalize_latents(latents: torch.Tensor, vae: Any, latent_format: LatentFormat) -> torch.Tensor:
+    """Convert configured external latents back into raw VAE decode latents."""
+    if latent_format == "raw":
+        return latents
+    if latent_format != "wan":
+        raise ValueError(f"Unsupported latent format: {latent_format}")
+    mean, inv_std = _latent_stats(vae, latents)
+    return latents / inv_std + mean
+
+
+def _latent_stats(vae: Any, latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Read Wan latent normalization stats from the VAE config."""
+    config = getattr(vae, "config", None)
+    if config is None:
+        raise ValueError("VAE is missing `config`, cannot apply Wan latent normalization")
+
+    latents_mean = getattr(config, "latents_mean", None)
+    latents_std = getattr(config, "latents_std", None)
+    z_dim = getattr(config, "z_dim", latents.shape[1])
+    if latents_mean is None or latents_std is None:
+        raise ValueError("VAE config is missing `latents_mean`/`latents_std`, cannot apply Wan latent normalization")
+
+    mean = torch.tensor(latents_mean, device=latents.device, dtype=latents.dtype).view(1, z_dim, 1, 1, 1)
+    inv_std = 1.0 / torch.tensor(latents_std, device=latents.device, dtype=latents.dtype).view(1, z_dim, 1, 1, 1)
+    return mean, inv_std
 
 
 def _format_output_range(video: torch.Tensor, output_range: OutputRange) -> torch.Tensor:

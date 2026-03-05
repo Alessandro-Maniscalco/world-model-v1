@@ -32,9 +32,14 @@ vace_layers:
   - 35
 control_scale: 1.0
 mask_channels: 64
+conditioning_mode: action
+prompt: ""
+negative_prompt: ""
+guidance_scale: 5.0
+max_sequence_length: 512
+single_chunk_rollout: false
 action_path: ""
 action_dim: 0
 action_value: 0.0
-disable_proprio: true
 disable_amp: false
 seed: 0

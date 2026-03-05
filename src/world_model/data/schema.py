@@ -14,11 +14,8 @@ class PreparedPackedBatch:
     Attributes:
     - z_past_video: Latent context video `[B, C, T_ctx, H, W]`.
     - z_future_video: Latent future video `[B, C, T_hor, H, W]`.
-    - z_past: Latent context tokens `[B, T_ctx, D]`.
-    - z_future: Latent future tokens `[B, T_hor, D]`.
     - a_plan: Action plan aligned to future latent window `[B, T_hor, A]`.
-    - q_last: Optional proprio snapshot `[B, Q]`.
-    - latent_shape: `(C_lat, H_lat, W_lat)` for token->latent reshaping.
+    - latent_shape: `(C_lat, H_lat, W_lat)` for the latent-video layout.
     - total_latent_steps: Encoded total latent timesteps before split.
     - context_latent_steps: Latent context steps after split.
     - horizon_latent_steps: Latent future steps after split.
@@ -26,10 +23,7 @@ class PreparedPackedBatch:
 
     z_past_video: torch.Tensor
     z_future_video: torch.Tensor
-    z_past: torch.Tensor
-    z_future: torch.Tensor
     a_plan: torch.Tensor
-    q_last: torch.Tensor | None
     latent_shape: tuple[int, int, int]
     total_latent_steps: int
     context_latent_steps: int

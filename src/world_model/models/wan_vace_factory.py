@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -20,6 +21,7 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
         backbone = WanVACETransformer3DModel.from_pretrained(
             cfg.wan_vace_model_id,
             subfolder=cfg.wan_vace_subfolder or None,
+            local_files_only=_offline_mode_enabled(),
         )
     else:
         backbone = WanVACETransformer3DModel(
@@ -68,12 +70,6 @@ def build_action_token_encoder_for_model(
     )
 
 
-def validate_wan_vace_proprio_disabled(cfg: Any, prepared_batch: PreparedPackedBatch) -> None:
-    """Reject proprio usage until the Wan VACE migration adds that conditioning path."""
-    if not cfg.disable_proprio and prepared_batch.q_last is not None:
-        raise ValueError("Proprio conditioning is not yet supported for Wan VACE paths; set disable_proprio=true")
-
-
 def apply_wan_vace_checkpoint_overlay(
     *,
     model: WanVACEWorldModel,
@@ -97,9 +93,8 @@ def build_wan_vace_runtime_modules(
     *,
     device: torch.device,
     checkpoint: dict[str, object] | None,
-) -> tuple[WanVACEWorldModel, ActionTokenEncoder, None]:
+) -> tuple[WanVACEWorldModel, ActionTokenEncoder]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
-    validate_wan_vace_proprio_disabled(cfg, prepared_batch)
     model = build_wan_vace_model_from_config(cfg, prepared_batch).to(device)
     action_encoder = build_action_token_encoder_for_model(prepared_batch, model).to(device)
     if checkpoint is not None:
@@ -108,9 +103,14 @@ def build_wan_vace_runtime_modules(
             action_encoder=action_encoder,
             checkpoint=checkpoint,
         )
-    return model, action_encoder, None
+    return model, action_encoder
 
 
 def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> int:
     """Compute the `[inactive; reactive; mask]` control-stream channel count."""
     return (2 * int(latent_channels)) + int(mask_channels)
+
+
+def _offline_mode_enabled() -> bool:
+    """Mirror Hugging Face offline env handling for local-cache-only loading."""
+    return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"

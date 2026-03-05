@@ -17,6 +17,7 @@ class _FakeEncoder:
 
 
 def test_prepare_packed_batch_shapes_and_metadata() -> None:
+    """Prepare a structured latent-video batch with aligned action/proprio metadata."""
     batch_size = 2
     latents = torch.randn(batch_size, 4, 6, 2, 2)
     encoder = _FakeEncoder(latents)
@@ -33,20 +34,18 @@ def test_prepare_packed_batch_shapes_and_metadata() -> None:
         video_key="observation.images.image",
         context_len=10,
         horizon_len=8,
-        proprio_mode="last",
     )
 
     assert prepared.total_latent_steps == 6
     assert prepared.context_latent_steps + prepared.horizon_latent_steps == 6
-    assert prepared.z_past.shape[0] == batch_size
-    assert prepared.z_future.shape[0] == batch_size
+    assert prepared.z_past_video.shape == (batch_size, 4, prepared.context_latent_steps, 2, 2)
+    assert prepared.z_future_video.shape == (batch_size, 4, prepared.horizon_latent_steps, 2, 2)
     assert prepared.a_plan.shape[1] == prepared.horizon_latent_steps
-    assert prepared.q_last is not None
-    assert prepared.q_last.shape == (batch_size, 5)
     assert prepared.latent_shape == (4, 2, 2)
 
 
 def test_prepare_packed_batch_handles_missing_proprio() -> None:
+    """Allow missing proprio while still preparing the latent-video batch."""
     latents = torch.randn(1, 2, 4, 1, 1)
     encoder = _FakeEncoder(latents)
     batch = {
@@ -61,7 +60,5 @@ def test_prepare_packed_batch_handles_missing_proprio() -> None:
         video_key="observation.images.image",
         context_len=10,
         horizon_len=8,
-        proprio_mode="last",
     )
-
-    assert prepared.q_last is None
+    assert prepared.a_plan.shape[0] == 1

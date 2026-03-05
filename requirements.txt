@@ -5,6 +5,7 @@ accelerate
 safetensors
 einops
 tqdm
+ftfy
 imageio
 opencv-python
 matplotlib

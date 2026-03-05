@@ -3,6 +3,7 @@ __pycache__/
 *.so
 .venv/
 venv/
+.worktrees/
 .env
 .DS_Store
 .ipynb_checkpoints/
@@ -17,3 +18,7 @@ wandb/
 *.gif
 assets/**
 !assets/**/.keep
+
+.envrc
+.hf_datasets/
+.hf_home/

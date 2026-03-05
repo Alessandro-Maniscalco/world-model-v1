@@ -7,6 +7,8 @@ batch preparation utilities.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
+import os
 import random
 from pathlib import Path
 import sys
@@ -15,6 +17,9 @@ from typing import Any
 import imageio.v3 as iio
 import numpy as np
 import torch
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from diffusers.pipelines.wan.pipeline_wan_vace import prompt_clean
+from transformers import AutoTokenizer, UMT5EncoderModel
 
 # Ensure local `src/` package imports work when run as `python scripts/train/infer_world_model.py`.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,7 +50,12 @@ from world_model.models.wan_vace_world_model import WanVACEWorldModel
 def _config_parser() -> argparse.ArgumentParser:
     """Create parser for bootstrap config argument."""
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--config", type=str, default=None, help="Optional YAML config path")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional YAML config path; defaults to configs/eval/infer_world_model.yaml.",
+    )
     return parser
 
 
@@ -92,6 +102,45 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
     parser.add_argument(
+        "--conditioning-mode",
+        choices=("action", "prompt"),
+        default=defaults.conditioning_mode,
+        help="Use action-plan tokens for scope-aligned evaluation or prompt tokens for upstream-style smoke tests.",
+    )
+    parser.add_argument(
+        "--prompt",
+        default=defaults.prompt,
+        help="Prompt text used when --conditioning-mode prompt.",
+    )
+    parser.add_argument(
+        "--negative-prompt",
+        default=defaults.negative_prompt,
+        help="Negative prompt used for classifier-free guidance when --conditioning-mode prompt.",
+    )
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=defaults.guidance_scale,
+        help="Classifier-free guidance scale for prompt conditioning.",
+    )
+    parser.add_argument(
+        "--max-sequence-length",
+        type=int,
+        default=defaults.max_sequence_length,
+        help="Maximum tokenizer sequence length for prompt conditioning.",
+    )
+    parser.add_argument(
+        "--single-chunk-rollout",
+        action="store_true",
+        default=defaults.single_chunk_rollout,
+        help="Roll out the entire future window as one chunk while keeping the chunked inference path.",
+    )
+    parser.add_argument(
+        "--multi-chunk-rollout",
+        dest="single_chunk_rollout",
+        action="store_false",
+    )
+    parser.add_argument(
         "--action-path",
         default=defaults.action_path,
         help="Optional .npy action tensor with shape [A], [T,A], or [1,T,A].",
@@ -108,8 +157,6 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         default=defaults.action_value,
         help="Fill value for synthetic actions when --action-path is not set.",
     )
-    parser.add_argument("--disable-proprio", action="store_true", default=defaults.disable_proprio)
-    parser.add_argument("--enable-proprio", dest="disable_proprio", action="store_false")
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
     parser.add_argument("--enable-amp", dest="disable_amp", action="store_false")
     parser.add_argument("--seed", type=int, default=defaults.seed)
@@ -131,6 +178,22 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _select_runtime_dtype(*, device: torch.device, disable_amp: bool) -> torch.dtype:
+    """Choose an inference dtype that fits the active device and AMP setting."""
+    if device.type != "cuda" or disable_amp:
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def _autocast_context(*, device: torch.device, disable_amp: bool, dtype: torch.dtype):
+    """Build the appropriate autocast context for inference on the active device."""
+    if device.type != "cuda" or disable_amp:
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=dtype)
 
 
 def _load_checkpoint(path: str | Path, device: torch.device) -> dict[str, object]:
@@ -235,6 +298,8 @@ def _prepare_from_local_video(
         action_dim = cfg.action_dim
     elif ckpt is not None:
         action_dim = _infer_action_dim_from_checkpoint(ckpt)
+    elif cfg.conditioning_mode == "prompt":
+        action_dim = 1
     else:
         action_dim = 0
     action = _load_action_tensor(
@@ -254,7 +319,6 @@ def _prepare_from_local_video(
         video_key=cfg.video_key,
         context_len=cfg.context_len,
         horizon_len=cfg.horizon_len,
-        proprio_mode="last",
     )
 
 
@@ -264,7 +328,7 @@ def build_runtime_modules(
     prepared: PreparedPackedBatch,
     device: torch.device,
     checkpoint: dict[str, object] | None,
-) -> tuple[WanVACEWorldModel, ActionTokenEncoder, None]:
+) -> tuple[WanVACEWorldModel, ActionTokenEncoder]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
     return build_wan_vace_runtime_modules(
         cfg,
@@ -272,6 +336,109 @@ def build_runtime_modules(
         device=device,
         checkpoint=checkpoint,
     )
+
+
+def _load_flow_match_scheduler(cfg: InferScriptConfig) -> FlowMatchEulerDiscreteScheduler:
+    """Load the upstream Wan flow-matching scheduler config."""
+    return FlowMatchEulerDiscreteScheduler.from_pretrained(
+        cfg.wan_vace_model_id,
+        subfolder="scheduler",
+        local_files_only=_offline_mode_enabled(),
+    )
+
+
+def _load_prompt_encoder(cfg: InferScriptConfig) -> tuple[Any, UMT5EncoderModel]:
+    """Load the upstream tokenizer and UMT5 text encoder for prompt conditioning."""
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.wan_vace_model_id,
+        subfolder="tokenizer",
+        local_files_only=_offline_mode_enabled(),
+    )
+    text_encoder = UMT5EncoderModel.from_pretrained(
+        cfg.wan_vace_model_id,
+        subfolder="text_encoder",
+        local_files_only=_offline_mode_enabled(),
+    )
+    text_encoder.eval()
+    return tokenizer, text_encoder
+
+
+@torch.no_grad()
+def build_prompt_conditioning_tokens(
+    *,
+    prompt: str,
+    negative_prompt: str,
+    batch_size: int,
+    tokenizer: Any,
+    text_encoder: UMT5EncoderModel,
+    encoder_device: torch.device,
+    output_device: torch.device,
+    dtype: torch.dtype,
+    guidance_scale: float,
+    max_sequence_length: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Encode upstream-style prompt embeddings for Wan cross-attention."""
+    prompt_embeds = _get_t5_prompt_embeds(
+        prompt=[prompt] * batch_size,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        encoder_device=encoder_device,
+        output_device=output_device,
+        dtype=dtype,
+        max_sequence_length=max_sequence_length,
+    )
+    negative_prompt_embeds = None
+    if guidance_scale > 1.0:
+        negative_prompt_embeds = _get_t5_prompt_embeds(
+            prompt=[negative_prompt] * batch_size,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            encoder_device=encoder_device,
+            output_device=output_device,
+            dtype=dtype,
+            max_sequence_length=max_sequence_length,
+        )
+    return prompt_embeds, negative_prompt_embeds
+
+
+@torch.no_grad()
+def _get_t5_prompt_embeds(
+    *,
+    prompt: list[str],
+    tokenizer: Any,
+    text_encoder: UMT5EncoderModel,
+    encoder_device: torch.device,
+    output_device: torch.device,
+    dtype: torch.dtype,
+    max_sequence_length: int,
+) -> torch.Tensor:
+    """Mirror the diffusers Wan prompt-embedding path for inference-time prompts."""
+    cleaned_prompt = [prompt_clean(text) for text in prompt]
+    text_inputs = tokenizer(
+        cleaned_prompt,
+        padding="max_length",
+        max_length=max_sequence_length,
+        truncation=True,
+        add_special_tokens=True,
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    text_input_ids = text_inputs.input_ids.to(encoder_device)
+    attention_mask = text_inputs.attention_mask.to(encoder_device)
+    seq_lens = attention_mask.gt(0).sum(dim=1).long()
+
+    prompt_embeds = text_encoder(text_input_ids, attention_mask).last_hidden_state
+    prompt_embeds = prompt_embeds.to(device=output_device, dtype=dtype)
+    trimmed = [hidden[:seq_len] for hidden, seq_len in zip(prompt_embeds, seq_lens)]
+    return torch.stack(
+        [torch.cat([hidden, hidden.new_zeros(max_sequence_length - hidden.size(0), hidden.size(1))]) for hidden in trimmed],
+        dim=0,
+    )
+
+
+def _offline_mode_enabled() -> bool:
+    """Mirror Hugging Face offline env handling for local-cache-only loading."""
+    return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
 
 
 def _save_grid(
@@ -282,8 +449,8 @@ def _save_grid(
     num_frames: int,
 ) -> None:
     """Save a two-row ground-truth vs generated frame grid to disk."""
-    pred_frames = pred_video[0].detach().cpu()
-    target_frames = target_video[0].detach().cpu()
+    pred_frames = pred_video[0].detach().float().cpu()
+    target_frames = target_video[0].detach().float().cpu()
     vis_frames = min(num_frames, pred_frames.shape[0], target_frames.shape[0])
     if vis_frames <= 0:
         raise ValueError("No frames available for visualization")
@@ -330,9 +497,14 @@ def main() -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    runtime_dtype = _select_runtime_dtype(device=device, disable_amp=cfg.disable_amp)
     ckpt = _load_checkpoint(cfg.checkpoint, device=device) if cfg.checkpoint else None
 
-    vae = WanVAE.from_pretrained(device=device, deterministic=True)
+    vae = WanVAE.from_pretrained(
+        device=device,
+        deterministic=True,
+        torch_dtype=runtime_dtype,
+    )
     if cfg.video_path:
         prepared = _prepare_from_local_video(
             cfg=cfg,
@@ -361,33 +533,64 @@ def main() -> None:
             video_key=cfg.video_key,
             context_len=cfg.context_len,
             horizon_len=cfg.horizon_len,
-            proprio_mode="last",
         )
 
-    model, action_encoder, proprio_encoder = build_runtime_modules(
+    model, action_encoder = build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=device,
         checkpoint=ckpt,
     )
+    if device.type == "cuda" and not cfg.disable_amp:
+        model = model.to(device=device, dtype=runtime_dtype)
+        action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
+    scheduler = _load_flow_match_scheduler(cfg)
 
     model.eval()
     action_encoder.eval()
-    if proprio_encoder is not None:
-        proprio_encoder.eval()
 
-    action_tokens = action_encoder(prepared.a_plan)
-    pred_future_video = infer_future_videos_chunkwise(
-        model,
-        z_past_video=prepared.z_past_video,
-        future_steps=prepared.z_future_video.shape[2],
-        action_tokens=action_tokens,
-        k=cfg.k,
-        integration_steps=cfg.integration_steps,
-    )
+    if cfg.conditioning_mode == "prompt":
+        tokenizer, text_encoder = _load_prompt_encoder(cfg)
+        backbone_dtype = next(model.backbone.parameters()).dtype
+        prompt_encoder_device = torch.device("cpu")
+        with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
+            cross_attention_tokens, negative_cross_attention_tokens = build_prompt_conditioning_tokens(
+                prompt=cfg.prompt,
+                negative_prompt=cfg.negative_prompt,
+                batch_size=prepared.z_past_video.shape[0],
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                encoder_device=prompt_encoder_device,
+                output_device=device,
+                dtype=backbone_dtype,
+                guidance_scale=cfg.guidance_scale,
+                max_sequence_length=cfg.max_sequence_length,
+            )
+        del text_encoder
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
+            cross_attention_tokens = action_encoder(prepared.a_plan)
+        negative_cross_attention_tokens = None
 
-    pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
-    target_video = vae.decode(prepared.z_future_video, output_layout="BTCHW", output_range="zero_to_one")
+    with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
+        pred_future_video = infer_future_videos_chunkwise(
+            model,
+            z_past_video=prepared.z_past_video,
+            future_steps=prepared.z_future_video.shape[2],
+            cross_attention_tokens=cross_attention_tokens,
+            k=cfg.k,
+            integration_steps=cfg.integration_steps,
+            negative_cross_attention_tokens=negative_cross_attention_tokens,
+            guidance_scale=cfg.guidance_scale,
+            chunk_conditioning=(cfg.conditioning_mode == "action"),
+            single_chunk_rollout=cfg.single_chunk_rollout,
+            scheduler=scheduler,
+        )
+
+        pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
+        target_video = vae.decode(prepared.z_future_video, output_layout="BTCHW", output_range="zero_to_one")
 
     grid_path = output_dir / "comparison_grid.png"
     _save_grid(

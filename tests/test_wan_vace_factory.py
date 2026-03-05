@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import torch
 
-from world_model.config import InferScriptConfig, TrainScriptConfig
+from world_model.config import InferScriptConfig, load_infer_config, load_train_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
@@ -35,11 +35,17 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
 
     monkeypatch.setattr(wan_vace_factory.WanVACETransformer3DModel, "from_pretrained", _fake_from_pretrained)
 
-    assert TrainScriptConfig().load_pretrained_backbone is True
-    assert InferScriptConfig().load_pretrained_backbone is True
+    assert load_train_config().load_pretrained_backbone is True
+    defaults = load_infer_config()
+    assert defaults.load_pretrained_backbone is True
 
-    model, action_encoder, proprio_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
-        InferScriptConfig(mask_channels=4),
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        InferScriptConfig(
+            load_pretrained_backbone=defaults.load_pretrained_backbone,
+            wan_vace_model_id=defaults.wan_vace_model_id,
+            wan_vace_subfolder=defaults.wan_vace_subfolder,
+            mask_channels=4,
+        ),
         prepared,
         device=torch.device("cpu"),
         checkpoint=None,
@@ -47,7 +53,6 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, ActionTokenEncoder)
-    assert proprio_encoder is None
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer")]
 
 
@@ -56,7 +61,6 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     prepared = _make_prepared_batch()
     cfg = InferScriptConfig(
         load_pretrained_backbone=False,
-        disable_proprio=True,
         wan_num_attention_heads=2,
         wan_attention_head_dim=8,
         wan_text_dim=16,
@@ -66,13 +70,12 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
         vace_layers=(0, 1),
         mask_channels=4,
     )
-    model, action_encoder, proprio_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
         checkpoint=None,
     )
-    assert proprio_encoder is None
 
     model_state = {key: torch.full_like(value, 0.25) for key, value in model.state_dict().items()}
     action_state = {key: torch.full_like(value, -0.5) for key, value in action_encoder.state_dict().items()}
@@ -81,14 +84,13 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
         "action_encoder_state_dict": action_state,
     }
 
-    loaded_model, loaded_action_encoder, loaded_proprio_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+    loaded_model, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
         checkpoint=checkpoint,
     )
 
-    assert loaded_proprio_encoder is None
     first_model_key = next(iter(model_state))
     first_action_key = next(iter(action_state))
     assert torch.allclose(loaded_model.state_dict()[first_model_key], model_state[first_model_key])
@@ -100,10 +102,7 @@ def _make_prepared_batch() -> PreparedPackedBatch:
     return PreparedPackedBatch(
         z_past_video=torch.randn(2, 16, 2, 8, 8),
         z_future_video=torch.randn(2, 16, 4, 8, 8),
-        z_past=torch.randn(2, 2, 16 * 8 * 8),
-        z_future=torch.randn(2, 4, 16 * 8 * 8),
         a_plan=torch.randn(2, 4, 6),
-        q_last=None,
         latent_shape=(16, 8, 8),
         total_latent_steps=6,
         context_latent_steps=2,

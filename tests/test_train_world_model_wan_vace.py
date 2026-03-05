@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from world_model.config import TrainScriptConfig
+from world_model.config import TrainScriptConfig, load_train_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder
@@ -19,17 +19,13 @@ def test_train_script_builds_wan_vace_world_model_from_config() -> None:
     prepared = PreparedPackedBatch(
         z_past_video=torch.randn(2, 16, 2, 8, 8),
         z_future_video=torch.randn(2, 16, 4, 8, 8),
-        z_past=torch.randn(2, 2, 16 * 8 * 8),
-        z_future=torch.randn(2, 4, 16 * 8 * 8),
         a_plan=torch.randn(2, 4, 6),
-        q_last=None,
         latent_shape=(16, 8, 8),
         total_latent_steps=6,
         context_latent_steps=2,
         horizon_latent_steps=4,
     )
     cfg = TrainScriptConfig(
-        disable_proprio=True,
         load_pretrained_backbone=False,
         wan_num_attention_heads=2,
         wan_attention_head_dim=8,
@@ -57,9 +53,9 @@ def test_train_script_builds_wan_vace_world_model_from_config() -> None:
 
 
 def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
-    """Avoid exposing unused legacy DiT width/depth CLI flags on the VACE path."""
+    """Avoid exposing removed non-VACE backbone shape flags."""
     train_script = _load_train_script_module()
-    parser = train_script._build_parser(TrainScriptConfig())
+    parser = train_script._build_parser(load_train_config())
     option_strings = {option for action in parser._actions for option in action.option_strings}
 
     assert "--hidden-dim" not in option_strings

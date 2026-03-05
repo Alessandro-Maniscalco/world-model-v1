@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRAIN_CONFIG_PATH = REPO_ROOT / "configs" / "train" / "world_model.yaml"
+DEFAULT_INFER_CONFIG_PATH = REPO_ROOT / "configs" / "eval" / "infer_world_model.yaml"
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,6 @@ class TrainScriptConfig:
     weight_mode: str = "uniform"
     t_min: float = 0.0
     t_max: float = 1.0
-    disable_proprio: bool = True
     disable_amp: bool = False
     gradient_checkpointing: bool = False
     load_pretrained_backbone: bool = True
@@ -81,22 +83,27 @@ class InferScriptConfig:
     vace_layers: tuple[int, ...] = (0, 5, 10, 15, 20, 25, 30, 35)
     control_scale: float = 1.0
     mask_channels: int = 64
+    conditioning_mode: str = "action"
+    prompt: str = ""
+    negative_prompt: str = ""
+    guidance_scale: float = 5.0
+    max_sequence_length: int = 512
+    single_chunk_rollout: bool = False
     action_path: str = ""
     action_dim: int = 0
     action_value: float = 0.0
-    disable_proprio: bool = True
     disable_amp: bool = False
     seed: int = 0
 
 
 def load_train_config(path: str | Path | None = None) -> TrainScriptConfig:
-    """Load a training config dataclass from YAML, or defaults when path is None."""
-    return _load_config(TrainScriptConfig, path)
+    """Load train config from YAML, defaulting to the canonical train preset."""
+    return _load_config(TrainScriptConfig, path, DEFAULT_TRAIN_CONFIG_PATH)
 
 
 def load_infer_config(path: str | Path | None = None) -> InferScriptConfig:
-    """Load an inference config dataclass from YAML, or defaults when path is None."""
-    return _load_config(InferScriptConfig, path)
+    """Load infer config from YAML, defaulting to the canonical eval preset."""
+    return _load_config(InferScriptConfig, path, DEFAULT_INFER_CONFIG_PATH)
 
 
 def apply_namespace_overrides(config: T, namespace: Any) -> T:
@@ -114,12 +121,9 @@ def to_parser_defaults(config: Any) -> dict[str, Any]:
     return asdict(config)
 
 
-def _load_config(cls: type[T], path: str | Path | None) -> T:
-    """Load dataclass `cls` from YAML at `path`, or return default instance."""
-    if path is None:
-        return cls()
-
-    path_obj = Path(path)
+def _load_config(cls: type[T], path: str | Path | None, default_path: Path) -> T:
+    """Load dataclass `cls` from YAML at `path` or the canonical preset file."""
+    path_obj = default_path if path is None else Path(path)
     if not path_obj.exists():
         raise FileNotFoundError(f"Config file not found: {path_obj}")
     payload = _load_yaml(path_obj)

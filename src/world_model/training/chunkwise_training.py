@@ -42,14 +42,10 @@ def train_chunkwise_batch(
     model: nn.Module,
     action_encoder: nn.Module,
     optimizer: torch.optim.Optimizer,
-    z_past: torch.Tensor | None = None,
-    z_future: torch.Tensor | None = None,
-    z_past_video: torch.Tensor | None = None,
-    z_future_video: torch.Tensor | None = None,
+    z_past_video: torch.Tensor,
+    z_future_video: torch.Tensor,
     a_plan: torch.Tensor,
     k: int,
-    proprio_encoder: nn.Module | None = None,
-    q_last: torch.Tensor | None = None,
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: str = "uniform",
@@ -61,59 +57,24 @@ def train_chunkwise_batch(
     """Run one optimizer step using chunkwise teacher-forced flow matching."""
     model.train()
     action_encoder.train()
-    if proprio_encoder is not None:
-        proprio_encoder.train()
 
     optimizer.zero_grad(set_to_none=True)
     trainable_params = list(model.parameters()) + list(action_encoder.parameters())
-    if proprio_encoder is not None:
-        trainable_params.extend(proprio_encoder.parameters())
-
-    if z_past_video is not None or z_future_video is not None:
-        if z_past_video is None or z_future_video is None:
-            raise ValueError("z_past_video and z_future_video must be provided together")
-        if proprio_encoder is not None:
-            raise ValueError("proprio_encoder is not yet supported for structured latent-video training")
-        action_tokens = action_encoder(a_plan)
-        info = chunkwise_teacher_forcing_loss(
-            model,
-            z_past_video=z_past_video,
-            z_future_video=z_future_video,
-            action_tokens=action_tokens,
-            k=k,
-            t_min=t_min,
-            t_max=t_max,
-            weight_mode=weight_mode,
-            snr_clip_max=snr_clip_max,
-            eps=eps,
-            generator=generator,
-            return_info=True,
-        )
-    else:
-        if z_past is None or z_future is None:
-            raise ValueError("z_past and z_future must be provided for token-path training")
-        action_conditioning = action_encoder(a_plan)
-        proprio_conditioning = None
-        if proprio_encoder is not None:
-            if q_last is None:
-                raise ValueError("q_last must be provided when proprio_encoder is enabled")
-            proprio_conditioning = proprio_encoder(q_last)
-
-        info = chunkwise_teacher_forcing_loss(
-            model,
-            z_past=z_past,
-            z_future=z_future,
-            action_conditioning=action_conditioning,
-            proprio_conditioning=proprio_conditioning,
-            k=k,
-            t_min=t_min,
-            t_max=t_max,
-            weight_mode=weight_mode,
-            snr_clip_max=snr_clip_max,
-            eps=eps,
-            generator=generator,
-            return_info=True,
-        )
+    action_tokens = action_encoder(a_plan)
+    info = chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        action_tokens=action_tokens,
+        k=k,
+        t_min=t_min,
+        t_max=t_max,
+        weight_mode=weight_mode,
+        snr_clip_max=snr_clip_max,
+        eps=eps,
+        generator=generator,
+        return_info=True,
+    )
     info.loss.backward()
 
     if grad_clip_norm is None:
@@ -139,7 +100,6 @@ def save_checkpoint(
     model: nn.Module,
     action_encoder: nn.Module,
     optimizer: torch.optim.Optimizer,
-    proprio_encoder: nn.Module | None = None,
     extra_state: dict[str, Any] | None = None,
 ) -> Path:
     """Persist a training checkpoint and return its path."""
@@ -152,8 +112,6 @@ def save_checkpoint(
         "action_encoder_state_dict": action_encoder.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
     }
-    if proprio_encoder is not None:
-        payload["proprio_encoder_state_dict"] = proprio_encoder.state_dict()
     if extra_state:
         payload["extra_state"] = extra_state
     torch.save(payload, path)

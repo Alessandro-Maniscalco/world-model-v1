@@ -21,7 +21,7 @@ class _FakeEncoder:
 
 
 def test_prepare_packed_batch_preserves_structured_latent_videos() -> None:
-    """Expose structured latent-video fields alongside existing metadata."""
+    """Expose the structured latent-video fields used by the Wan VACE runtime."""
     batch_size = 2
     latents = torch.randn(batch_size, 4, 6, 2, 2)
     encoder = _FakeEncoder(latents)
@@ -38,7 +38,6 @@ def test_prepare_packed_batch_preserves_structured_latent_videos() -> None:
         video_key="observation.images.image",
         context_len=10,
         horizon_len=8,
-        proprio_mode="last",
     )
 
     assert prepared.z_past_video.ndim == 5
