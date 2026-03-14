@@ -2,11 +2,15 @@ lerobot
 diffusers
 transformers
 accelerate
+peft
 safetensors
 einops
 tqdm
 ftfy
 imageio
+gdown
+openai
+huggingface-hub>=0.34.2,<0.36.0
 opencv-python
 matplotlib
 PyYAML

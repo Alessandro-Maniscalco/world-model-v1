@@ -11,23 +11,22 @@ from world_model.data.temporal import (
 
 
 def test_build_frame_deltas_matches_window_length_and_spacing():
-    deltas = build_frame_deltas(context_len=10, horizon_len=8, dt=0.1)
+    deltas = build_frame_deltas(context_len=9, horizon_len=8, dt=0.1)
 
-    assert len(deltas) == 18
-    assert deltas[0] == pytest.approx(-1.7)
+    assert len(deltas) == 17
+    assert deltas[0] == pytest.approx(-1.6)
     assert deltas[-1] == pytest.approx(0.0)
 
 
-def test_latent_split_from_frame_ratio_preserves_total_and_nonzero_future():
+def test_latent_split_from_frame_ratio_matches_exact_wan_groups():
     context_steps, horizon_steps = latent_split_from_frame_ratio(
-        total_latent_steps=7,
-        context_frames=10,
+        total_latent_steps=5,
+        context_frames=9,
         horizon_frames=8,
     )
 
-    assert context_steps + horizon_steps == 7
-    assert context_steps >= 1
-    assert horizon_steps >= 1
+    assert context_steps == 3
+    assert horizon_steps == 2
 
 
 def test_expand_to_latent_steps_repeats_batched_vectors():

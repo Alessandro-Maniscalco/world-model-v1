@@ -14,7 +14,9 @@ class PreparedPackedBatch:
     Attributes:
     - z_past_video: Latent context video `[B, C, T_ctx, H, W]`.
     - z_future_video: Latent future video `[B, C, T_hor, H, W]`.
-    - a_plan: Action plan aligned to future latent window `[B, T_hor, A]`.
+    - control_black_latents: Constant black-frame control latents `[B, C, T, H, W]`.
+    - control_gray_latents: Constant gray-frame control latents `[B, C, T, H, W]`.
+    - a_plan: Conditioning placeholder aligned to the future latent window `[B, T_hor, A]`.
     - latent_shape: `(C_lat, H_lat, W_lat)` for the latent-video layout.
     - total_latent_steps: Encoded total latent timesteps before split.
     - context_latent_steps: Latent context steps after split.
@@ -28,3 +30,5 @@ class PreparedPackedBatch:
     total_latent_steps: int
     context_latent_steps: int
     horizon_latent_steps: int
+    control_black_latents: torch.Tensor | None = None
+    control_gray_latents: torch.Tensor | None = None

@@ -42,12 +42,16 @@ class WanVACEWorldModel(nn.Module):
         backbone: nn.Module | None = None,
         control_scale: float = 1.0,
         mask_channels: int = 64,
+        control_black_latents: torch.Tensor | None = None,
+        control_gray_latents: torch.Tensor | None = None,
     ) -> None:
         """Store the backbone and control-stream defaults."""
         super().__init__()
         self.backbone = backbone if backbone is not None else WanVACETransformer3DModel()
         self.control_scale = float(control_scale)
         self.mask_channels = int(mask_channels)
+        self.register_buffer("control_black_latents", control_black_latents, persistent=False)
+        self.register_buffer("control_gray_latents", control_gray_latents, persistent=False)
 
     def forward(
         self,
@@ -56,7 +60,7 @@ class WanVACEWorldModel(nn.Module):
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
         timestep_t: torch.Tensor,
-        block_causal_attention_mask: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -93,7 +97,17 @@ class WanVACEWorldModel(nn.Module):
             )
 
         full_hidden_states = torch.cat([observed_video, noisy_future_video], dim=2)
-        future_control_video = torch.zeros_like(noisy_future_video)
+        black_control_latents = _slice_control_latent_template(
+            template=self.control_black_latents,
+            observed_video=observed_video,
+            noisy_future_video=noisy_future_video,
+        )
+        gray_control_latents = _slice_control_latent_template(
+            template=self.control_gray_latents,
+            observed_video=observed_video,
+            noisy_future_video=noisy_future_video,
+        )
+        future_control_video = gray_control_latents[:, :, observed_video.shape[2] :, :, :]
         future_control_mask = torch.ones(
             noisy_future_video.shape[0],
             1,
@@ -109,19 +123,26 @@ class WanVACEWorldModel(nn.Module):
         control_hidden_states = build_vace_control_tensor(
             observed_latents=control_video,
             observed_mask=control_mask,
+            inactive_fill_latents=black_control_latents,
+            reactive_fill_latents=black_control_latents,
             mask_channels=self.mask_channels,
         )
-        expected_frames = full_hidden_states.shape[2]
-        if block_causal_attention_mask.shape[-1] != expected_frames or block_causal_attention_mask.shape[-2] != expected_frames:
-            raise ValueError(
-                "block_causal_attention_mask must match the full rollout length "
-                f"{expected_frames}, got {tuple(block_causal_attention_mask.shape)}"
-            )
-        patches_per_frame = _patches_per_frame(video=full_hidden_states, backbone=self.backbone)
-        attention_mask = expand_block_causal_mask_to_patch_tokens(
-            block_causal_attention_mask,
-            patches_per_frame=patches_per_frame,
-        ).to(device=full_hidden_states.device, dtype=full_hidden_states.dtype)
+        attention_mask = None
+        if block_causal_attention_mask is not None:
+            expected_frames = full_hidden_states.shape[2]
+            if (
+                block_causal_attention_mask.shape[-1] != expected_frames
+                or block_causal_attention_mask.shape[-2] != expected_frames
+            ):
+                raise ValueError(
+                    "block_causal_attention_mask must match the full rollout length "
+                    f"{expected_frames}, got {tuple(block_causal_attention_mask.shape)}"
+                )
+            patches_per_frame = _patches_per_frame(video=full_hidden_states, backbone=self.backbone)
+            attention_mask = expand_block_causal_mask_to_patch_tokens(
+                block_causal_attention_mask,
+                patches_per_frame=patches_per_frame,
+            ).to(device=full_hidden_states.device, dtype=full_hidden_states.dtype)
         control_scale = _resolve_control_scale(
             backbone=self.backbone,
             control_hidden_states_scale=control_hidden_states_scale,
@@ -177,3 +198,48 @@ def _resolve_control_scale(
     if vace_layers is None:
         return None
     return torch.full((len(vace_layers),), fill_value=default_scale, device=device, dtype=dtype)
+
+
+def _slice_control_latent_template(
+    *,
+    template: torch.Tensor | None,
+    observed_video: torch.Tensor,
+    noisy_future_video: torch.Tensor,
+) -> torch.Tensor:
+    """Slice one cached control-latent template to the current rollout window."""
+    full_steps = observed_video.shape[2] + noisy_future_video.shape[2]
+    if template is None:
+        return torch.zeros(
+            observed_video.shape[0],
+            observed_video.shape[1],
+            full_steps,
+            observed_video.shape[3],
+            observed_video.shape[4],
+            device=observed_video.device,
+            dtype=observed_video.dtype,
+        )
+    if template.ndim != 5:
+        raise ValueError(f"control template must be [B,C,T,H,W], got {tuple(template.shape)}")
+    if template.shape[1] != observed_video.shape[1]:
+        raise ValueError(
+            f"control template channel dim {template.shape[1]} must match latent channels {observed_video.shape[1]}"
+        )
+    if template.shape[3:] != observed_video.shape[3:]:
+        raise ValueError(
+            f"control template spatial shape {tuple(template.shape[3:])} must match "
+            f"{tuple(observed_video.shape[3:])}"
+        )
+    if template.shape[2] < full_steps:
+        raise ValueError(f"control template time dim {template.shape[2]} is smaller than rollout length {full_steps}")
+    if template.shape[0] not in (1, observed_video.shape[0]):
+        raise ValueError(
+            f"control template batch dim {template.shape[0]} must be 1 or match batch size {observed_video.shape[0]}"
+        )
+
+    sliced = template[:, :, :full_steps, :, :]
+    if sliced.shape[0] == observed_video.shape[0]:
+        return sliced.to(device=observed_video.device, dtype=observed_video.dtype)
+    return sliced.expand(observed_video.shape[0], -1, -1, -1, -1).to(
+        device=observed_video.device,
+        dtype=observed_video.dtype,
+    )

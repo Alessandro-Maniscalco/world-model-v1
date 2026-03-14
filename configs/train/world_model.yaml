@@ -1,7 +1,9 @@
+video_path: ""
+start_frame: 0
 repo_id: lerobot/libero
 video_key: observation.images.image
 output_dir: runs/world_model_train
-context_len: 10
+context_len: 9
 horizon_len: 8
 dt: 0.1
 batch_size: 2
@@ -35,6 +37,20 @@ vace_layers:
   - 35
 control_scale: 1.0
 mask_channels: 64
+trainable_backbone: full
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules:
+  - to_q
+  - to_k
+  - to_v
+  - to_out.0
+  - ffn.net.0.proj
+  - ffn.net.2
+  - proj_in
+  - proj_out
+conditioning_mode: none
 num_workers: 0
 log_every: 10
 checkpoint_every: 100

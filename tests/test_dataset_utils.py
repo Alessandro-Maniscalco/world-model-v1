@@ -24,10 +24,17 @@ def test_build_lerobot_dataloader_uses_expected_dataset_arguments(monkeypatch) -
     calls: dict[str, object] = {}
 
     class _FakeDataset:
-        def __init__(self, repo_id: str, delta_timestamps: dict[str, list[float]], video_backend: str) -> None:
+        def __init__(
+            self,
+            repo_id: str,
+            delta_timestamps: dict[str, list[float]],
+            video_backend: str,
+            episodes: list[int] | None = None,
+        ) -> None:
             calls["repo_id"] = repo_id
             calls["delta_timestamps"] = delta_timestamps
             calls["video_backend"] = video_backend
+            calls["episodes"] = episodes
             self._samples = [
                 {"x": torch.tensor([i], dtype=torch.float32), "meta": f"m{i}"}
                 for i in range(6)
@@ -50,9 +57,10 @@ def test_build_lerobot_dataloader_uses_expected_dataset_arguments(monkeypatch) -
 
     loader = build_lerobot_dataloader(
         repo_id="repo/x",
+        episodes=(0, 3),
         video_key="observation.images.image",
-        context_len=3,
-        horizon_len=2,
+        context_len=5,
+        horizon_len=4,
         dt=0.1,
         batch_size=2,
         subset_size=4,
@@ -65,4 +73,6 @@ def test_build_lerobot_dataloader_uses_expected_dataset_arguments(monkeypatch) -
     assert len(first["meta"]) == 2
     assert calls["repo_id"] == "repo/x"
     assert calls["video_backend"] == "pyav"
+    assert calls["episodes"] == [0, 3]
     assert "observation.images.image" in calls["delta_timestamps"]  # type: ignore[operator]
+    assert "action" in calls["delta_timestamps"]  # type: ignore[operator]

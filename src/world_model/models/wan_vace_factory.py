@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 
 from world_model.data.schema import PreparedPackedBatch
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 from world_model.vendor.wan import WanVACETransformer3DModel
 
@@ -51,11 +52,29 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
             backbone.enable_gradient_checkpointing()
         else:
             backbone.gradient_checkpointing = True
+    if getattr(cfg, "trainable_backbone", "full") == "lora":
+        _attach_lora_adapters(backbone=backbone, cfg=cfg)
 
     return WanVACEWorldModel(
         backbone=backbone,
         control_scale=cfg.control_scale,
         mask_channels=cfg.mask_channels,
+        control_black_latents=prepared_batch.control_black_latents,
+        control_gray_latents=prepared_batch.control_gray_latents,
+    )
+
+
+def build_conditioning_encoder_for_model(
+    cfg: Any,
+    prepared_batch: PreparedPackedBatch,
+    model: WanVACEWorldModel,
+) -> ActionTokenEncoder | NullConditioningEncoder:
+    """Build the configured cross-attention encoder matching the Wan text width."""
+    if getattr(cfg, "conditioning_mode", "action") == "none":
+        return NullConditioningEncoder(hidden_dim=int(model.backbone.config.text_dim))
+    return ActionTokenEncoder(
+        action_dim=int(prepared_batch.a_plan.shape[-1]),
+        hidden_dim=int(model.backbone.config.text_dim),
     )
 
 
@@ -63,7 +82,7 @@ def build_action_token_encoder_for_model(
     prepared_batch: PreparedPackedBatch,
     model: WanVACEWorldModel,
 ) -> ActionTokenEncoder:
-    """Build an action-token encoder matching the Wan backbone text width."""
+    """Build the legacy action-token encoder matching the Wan backbone text width."""
     return ActionTokenEncoder(
         action_dim=int(prepared_batch.a_plan.shape[-1]),
         hidden_dim=int(model.backbone.config.text_dim),
@@ -93,10 +112,11 @@ def build_wan_vace_runtime_modules(
     *,
     device: torch.device,
     checkpoint: dict[str, object] | None,
-) -> tuple[WanVACEWorldModel, ActionTokenEncoder]:
+) -> tuple[WanVACEWorldModel, ActionTokenEncoder | NullConditioningEncoder]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
+    cfg = _merge_runtime_backbone_config(cfg=cfg, checkpoint=checkpoint)
     model = build_wan_vace_model_from_config(cfg, prepared_batch).to(device)
-    action_encoder = build_action_token_encoder_for_model(prepared_batch, model).to(device)
+    action_encoder = build_conditioning_encoder_for_model(cfg, prepared_batch, model).to(device)
     if checkpoint is not None:
         apply_wan_vace_checkpoint_overlay(
             model=model,
@@ -114,3 +134,82 @@ def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> i
 def _offline_mode_enabled() -> bool:
     """Mirror Hugging Face offline env handling for local-cache-only loading."""
     return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+def _attach_lora_adapters(*, backbone: WanVACETransformer3DModel, cfg: Any) -> None:
+    """Attach PEFT LoRA adapters to the Wan VACE backbone."""
+    if int(cfg.lora_rank) <= 0:
+        raise ValueError(f"lora_rank must be positive, got {cfg.lora_rank}")
+    if int(cfg.lora_alpha) <= 0:
+        raise ValueError(f"lora_alpha must be positive, got {cfg.lora_alpha}")
+    if float(cfg.lora_dropout) < 0.0:
+        raise ValueError(f"lora_dropout must be non-negative, got {cfg.lora_dropout}")
+    target_modules = [str(module_name) for module_name in getattr(cfg, "lora_target_modules", ())]
+    if not target_modules:
+        raise ValueError("lora_target_modules must be non-empty when trainable_backbone=lora")
+
+    try:
+        from peft import LoraConfig
+    except ImportError as exc:
+        raise ImportError("peft is required when trainable_backbone=lora.") from exc
+
+    lora_config = LoraConfig(
+        r=int(cfg.lora_rank),
+        lora_alpha=int(cfg.lora_alpha),
+        lora_dropout=float(cfg.lora_dropout),
+        target_modules=target_modules,
+        bias="none",
+    )
+    backbone.add_adapter(lora_config)
+    if hasattr(backbone, "enable_adapters"):
+        backbone.enable_adapters()
+
+
+def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | None) -> Any:
+    """Restore train-time backbone settings from checkpoint metadata when available."""
+    if checkpoint is None:
+        return cfg
+    extra_state = checkpoint.get("extra_state")
+    if not isinstance(extra_state, dict):
+        return cfg
+    saved_cfg = extra_state.get("config")
+    if not isinstance(saved_cfg, dict):
+        return cfg
+
+    default_cfg = _make_default_config_like(cfg)
+    update_keys = (
+        "trainable_backbone",
+        "conditioning_mode",
+        "control_scale",
+        "mask_channels",
+        "vace_layers",
+        "lora_rank",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_target_modules",
+    )
+    updates: dict[str, Any] = {}
+    for key in update_keys:
+        if not hasattr(cfg, key) or key not in saved_cfg or not hasattr(default_cfg, key):
+            continue
+        if getattr(cfg, key) != getattr(default_cfg, key):
+            continue
+        value = saved_cfg[key]
+        if key in {"vace_layers", "lora_target_modules"}:
+            value = tuple(value)
+        updates[key] = value
+
+    if not updates:
+        return cfg
+    cfg_dict = dict(vars(cfg))
+    cfg_dict.update(updates)
+    return SimpleNamespace(**cfg_dict)
+
+
+def _make_default_config_like(cfg: Any) -> Any:
+    """Construct a default config instance matching the runtime config type when possible."""
+    cfg_type = type(cfg)
+    try:
+        return cfg_type()
+    except TypeError:
+        return SimpleNamespace()

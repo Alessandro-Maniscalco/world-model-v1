@@ -23,10 +23,10 @@ class _FakeEncoder:
 def test_prepare_packed_batch_preserves_structured_latent_videos() -> None:
     """Expose the structured latent-video fields used by the Wan VACE runtime."""
     batch_size = 2
-    latents = torch.randn(batch_size, 4, 6, 2, 2)
+    latents = torch.randn(batch_size, 4, 5, 2, 2)
     encoder = _FakeEncoder(latents)
     batch = {
-        "observation.images.image": torch.randn(batch_size, 18, 3, 32, 32),
+        "observation.images.image": torch.randn(batch_size, 17, 3, 32, 32),
         "action": torch.randn(batch_size, 7),
         "observation.state": torch.randn(batch_size, 5),
     }
@@ -36,7 +36,7 @@ def test_prepare_packed_batch_preserves_structured_latent_videos() -> None:
         encoder=encoder,
         device=torch.device("cpu"),
         video_key="observation.images.image",
-        context_len=10,
+        context_len=9,
         horizon_len=8,
     )
 
@@ -44,6 +44,8 @@ def test_prepare_packed_batch_preserves_structured_latent_videos() -> None:
     assert prepared.z_future_video.ndim == 5
     assert prepared.z_past_video.shape[0] == batch_size
     assert prepared.z_future_video.shape[0] == batch_size
+    assert prepared.context_latent_steps == 3
+    assert prepared.horizon_latent_steps == 2
     assert prepared.z_past_video.shape[2] == prepared.context_latent_steps
     assert prepared.z_future_video.shape[2] == prepared.horizon_latent_steps
     assert prepared.a_plan.shape[1] == prepared.horizon_latent_steps

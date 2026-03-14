@@ -7,6 +7,7 @@ canonical shared data-preparation pipeline.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import itertools
 import random
 import time
@@ -34,15 +35,15 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     sys.modules.pop("world_model", None)
 
 from world_model.config import TrainScriptConfig, apply_namespace_overrides, load_train_config
-from world_model.data import build_lerobot_dataloader, prepare_packed_batch
+from world_model.data import build_lerobot_dataloader, load_local_video_clip, prepare_packed_batch
 from world_model.data.schema import PreparedPackedBatch
 from world_model.latents import WanVAE
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
-    build_action_token_encoder_for_model,
+    build_conditioning_encoder_for_model,
     build_wan_vace_model_from_config,
 )
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.training import (
     append_jsonl,
     chunkwise_teacher_forcing_loss,
@@ -66,7 +67,10 @@ def _config_parser() -> argparse.ArgumentParser:
 def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     """Create full CLI parser using dataclass defaults."""
     parser = argparse.ArgumentParser(description=__doc__, parents=[_config_parser()])
+    parser.add_argument("--video-path", default=defaults.video_path, help="Optional local video file for fast single-clip training.")
+    parser.add_argument("--start-frame", type=int, default=defaults.start_frame)
     parser.add_argument("--repo-id", default=defaults.repo_id)
+    parser.add_argument("--episodes", type=int, nargs="*", default=list(defaults.episodes))
     parser.add_argument("--video-key", default=defaults.video_key)
     parser.add_argument("--output-dir", default=defaults.output_dir)
     parser.add_argument("--context-len", type=int, default=defaults.context_len, help="frame-time context length (l)")
@@ -75,6 +79,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
     parser.add_argument("--k", type=int, default=defaults.k, help="K in K+1 chunk schedule")
     parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
+    parser.add_argument("--auto-stop-check-every", type=int, default=defaults.auto_stop_check_every)
+    parser.add_argument(
+        "--auto-stop-min-relative-improvement",
+        type=float,
+        default=defaults.auto_stop_min_relative_improvement,
+    )
     parser.add_argument("--lr", type=float, default=defaults.lr)
     parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay)
     parser.add_argument("--grad-clip-norm", type=float, default=defaults.grad_clip_norm)
@@ -102,6 +112,14 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
     parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
+    parser.add_argument("--trainable-backbone", choices=("full", "vace", "head", "lora"), default=defaults.trainable_backbone)
+    parser.add_argument("--lora-rank", type=int, default=defaults.lora_rank)
+    parser.add_argument("--lora-alpha", type=int, default=defaults.lora_alpha)
+    parser.add_argument("--lora-dropout", type=float, default=defaults.lora_dropout)
+    parser.add_argument("--lora-target-modules", nargs="+", default=list(defaults.lora_target_modules))
+    parser.add_argument("--conditioning-mode", choices=("none", "action"), default=defaults.conditioning_mode)
+    parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
+    parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
     parser.add_argument("--log-every", type=int, default=defaults.log_every)
     parser.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
@@ -129,6 +147,110 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _select_runtime_dtype(*, device: torch.device, disable_amp: bool) -> torch.dtype:
+    """Choose the mixed-precision dtype for training on the active device."""
+    if device.type != "cuda" or disable_amp:
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+def _training_autocast_context(*, device: torch.device, disable_amp: bool, dtype: torch.dtype):
+    """Build the autocast context used by eval-mode loss checks."""
+    if device.type != "cuda" or disable_amp:
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=dtype)
+
+
+def _validate_chunk_schedule(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> None:
+    """Fail fast when latent-time chunking cannot satisfy the configured K+1 schedule."""
+    min_future_steps = cfg.k + 1
+    future_steps = prepared_batch.horizon_latent_steps
+    if future_steps < min_future_steps:
+        raise ValueError(
+            "Invalid latent-time schedule: "
+            f"raw horizon_len={cfg.horizon_len} compressed to horizon_latent_steps={future_steps}, "
+            f"but k={cfg.k} requires at least {min_future_steps} latent future steps. "
+            "Increase horizon_len or reduce k."
+        )
+
+
+def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
+    """Reject inconsistent blockwise continuation settings before entering the train loop."""
+    if cfg.auto_stop_check_every < 0:
+        raise ValueError(f"auto_stop_check_every must be >= 0, got {cfg.auto_stop_check_every}.")
+    if cfg.auto_stop_min_relative_improvement < 0.0:
+        raise ValueError(
+            "auto_stop_min_relative_improvement must be >= 0, got "
+            f"{cfg.auto_stop_min_relative_improvement}."
+        )
+    if cfg.auto_stop_check_every > 0 and cfg.max_steps < cfg.auto_stop_check_every:
+        raise ValueError(
+            "max_steps must be >= auto_stop_check_every when auto-stop is enabled; got "
+            f"max_steps={cfg.max_steps}, auto_stop_check_every={cfg.auto_stop_check_every}."
+        )
+
+
+def _relative_block_improvement(*, previous_mean_loss: float, current_mean_loss: float) -> float:
+    """Compute relative mean-loss improvement between consecutive training blocks."""
+    if previous_mean_loss <= 0.0:
+        return 0.0 if current_mean_loss >= previous_mean_loss else float("inf")
+    return (previous_mean_loss - current_mean_loss) / previous_mean_loss
+
+
+def _should_continue_after_block(
+    *,
+    block_mean_losses: list[float],
+    min_relative_improvement: float,
+) -> tuple[bool, float | None]:
+    """Decide whether to continue training after a completed block."""
+    if len(block_mean_losses) < 2:
+        return True, None
+
+    improvement = _relative_block_improvement(
+        previous_mean_loss=block_mean_losses[-2],
+        current_mean_loss=block_mean_losses[-1],
+    )
+    return improvement >= min_relative_improvement, improvement
+
+
+def _configure_trainable_parameters(
+    cfg: TrainScriptConfig,
+    model: WanVACEWorldModel,
+    action_encoder: nn.Module,
+) -> list[nn.Parameter]:
+    """Apply the requested trainable-parameter policy and return optimizer params."""
+    for parameter in model.parameters():
+        parameter.requires_grad_(cfg.trainable_backbone == "full")
+
+    if cfg.trainable_backbone in {"vace", "head", "lora"}:
+        backbone = model.backbone
+        module_names = ("vace_patch_embedding", "norm_out", "proj_out")
+        if cfg.trainable_backbone == "vace":
+            module_names = ("vace_patch_embedding", "vace_blocks", "norm_out", "proj_out")
+        for module_name in module_names:
+            module = getattr(backbone, module_name, None)
+            if module is not None:
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+        scale_shift_table = getattr(backbone, "scale_shift_table", None)
+        if isinstance(scale_shift_table, nn.Parameter):
+            scale_shift_table.requires_grad_(True)
+        if cfg.trainable_backbone == "lora":
+            for name, parameter in backbone.named_parameters():
+                if "lora_" in name:
+                    parameter.requires_grad_(True)
+
+    for parameter in action_encoder.parameters():
+        parameter.requires_grad_(True)
+
+    parameters = [parameter for parameter in itertools.chain(model.parameters(), action_encoder.parameters()) if parameter.requires_grad]
+    if not parameters:
+        raise ValueError("No trainable parameters remain after applying trainable_backbone policy")
+    return parameters
+
+
 def build_model_from_config(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> WanVACEWorldModel:
     """Build the Wan VACE world-model adapter for training."""
     return build_wan_vace_model_from_config(cfg, prepared_batch)
@@ -138,10 +260,9 @@ def build_action_encoder_from_config(
     cfg: TrainScriptConfig,
     prepared_batch: PreparedPackedBatch,
     model: WanVACEWorldModel,
-) -> ActionTokenEncoder:
-    """Build the Wan action-token encoder matching the backbone text width."""
-    del cfg
-    return build_action_token_encoder_for_model(prepared_batch, model)
+) -> ActionTokenEncoder | NullConditioningEncoder:
+    """Build the configured cross-attention encoder matching the backbone text width."""
+    return build_conditioning_encoder_for_model(cfg, prepared_batch, model)
 
 
 @torch.no_grad()
@@ -156,22 +277,26 @@ def _evaluate_loss(
     t_min: float,
     t_max: float,
     weight_mode: str,
+    device: torch.device,
+    disable_amp: bool,
+    runtime_dtype: torch.dtype,
 ) -> float:
     """Compute one eval-mode chunkwise loss for overfit diagnostics."""
     model.eval()
     action_encoder.eval()
 
-    action_tokens = action_encoder(a_plan)
-    loss = chunkwise_teacher_forcing_loss(
-        model,
-        z_past_video=z_past_video,
-        z_future_video=z_future_video,
-        action_tokens=action_tokens,
-        k=k,
-        t_min=t_min,
-        t_max=t_max,
-        weight_mode=weight_mode,
-    )
+    with _training_autocast_context(device=device, disable_amp=disable_amp, dtype=runtime_dtype):
+        action_tokens = action_encoder(a_plan)
+        loss = chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=z_past_video,
+            z_future_video=z_future_video,
+            action_tokens=action_tokens,
+            k=k,
+            t_min=t_min,
+            t_max=t_max,
+            weight_mode=weight_mode,
+        )
     return float(loss.detach().cpu().item())
 
 
@@ -179,34 +304,55 @@ def main() -> None:
     """Run chunkwise world-model training."""
     cfg = _load_args()
     _set_seed(cfg.seed)
+    _validate_auto_stop_config(cfg)
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    runtime_dtype = _select_runtime_dtype(device=device, disable_amp=cfg.disable_amp)
+    grad_scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=(device.type == "cuda" and not cfg.disable_amp and runtime_dtype == torch.float16),
+    )
     print(f"Device: {device}")
     print(
         f"Training config: steps={cfg.max_steps} batch={cfg.batch_size} "
         f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}"
     )
+    print(f"Training dtype: {runtime_dtype}")
 
-    loader = build_lerobot_dataloader(
-        repo_id=cfg.repo_id,
-        video_key=cfg.video_key,
-        context_len=cfg.context_len,
-        horizon_len=cfg.horizon_len,
-        dt=cfg.dt,
-        batch_size=cfg.batch_size,
-        subset_size=cfg.subset_size,
-        shuffle=not cfg.overfit_one_batch,
-        num_workers=cfg.num_workers,
-        drop_last=True,
-    )
-
-    vae = WanVAE.from_pretrained(device=device, deterministic=True)
-    data_iter = iter(loader)
-    first_batch = next(data_iter)
+    vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
+    loader = None
+    data_iter = None
+    if cfg.video_path:
+        if cfg.conditioning_mode != "none":
+            raise ValueError("Local-video training currently supports only conditioning_mode=none")
+        total_frames = cfg.context_len + cfg.horizon_len
+        first_batch = {
+            cfg.video_key: load_local_video_clip(
+                cfg.video_path,
+                start_frame=cfg.start_frame,
+                total_frames=total_frames,
+            )
+        }
+    else:
+        loader = build_lerobot_dataloader(
+            repo_id=cfg.repo_id,
+            episodes=cfg.episodes,
+            video_key=cfg.video_key,
+            context_len=cfg.context_len,
+            horizon_len=cfg.horizon_len,
+            dt=cfg.dt,
+            batch_size=cfg.batch_size,
+            subset_size=cfg.subset_size,
+            shuffle=not cfg.overfit_one_batch,
+            num_workers=cfg.num_workers,
+            drop_last=True,
+        )
+        data_iter = iter(loader)
+        first_batch = next(data_iter)
     prepared = prepare_packed_batch(
         batch=first_batch,
         encoder=vae,
@@ -214,17 +360,36 @@ def main() -> None:
         video_key=cfg.video_key,
         context_len=cfg.context_len,
         horizon_len=cfg.horizon_len,
+        frame_height=cfg.frame_height,
+        frame_width=cfg.frame_width,
+        allow_missing_action=(cfg.conditioning_mode == "none"),
     )
+    _validate_chunk_schedule(cfg, prepared)
+    print(
+        "Latent window: "
+        f"context={prepared.context_latent_steps} "
+        f"future={prepared.horizon_latent_steps} "
+        f"total={prepared.total_latent_steps}"
+    )
+    cached_prepared = prepared if (cfg.overfit_one_batch or cfg.video_path) else None
+    if cached_prepared is not None and device.type == "cuda":
+        vae.vae.to("cpu")
+        torch.cuda.empty_cache()
 
     model = build_model_from_config(cfg, prepared).to(device)
     action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
 
-    parameter_groups = list(model.parameters()) + list(action_encoder.parameters())
+    parameter_groups = _configure_trainable_parameters(cfg, model, action_encoder)
+    trainable_param_count = sum(parameter.numel() for parameter in parameter_groups)
+    print(f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)")
     optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
-    cached_batch = first_batch if cfg.overfit_one_batch else None
+    cached_batch = first_batch if (cfg.overfit_one_batch or cfg.video_path) else None
 
     overfit_start_loss = None
+    completed_steps = 0
+    block_losses: list[float] = []
+    block_mean_losses: list[float] = []
     if cfg.overfit_one_batch:
         overfit_start_loss = _evaluate_loss(
             model=model,
@@ -236,6 +401,9 @@ def main() -> None:
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
+            device=device,
+            disable_amp=cfg.disable_amp,
+            runtime_dtype=runtime_dtype,
         )
         print(f"Overfit baseline loss: {overfit_start_loss:.6f}")
 
@@ -245,6 +413,8 @@ def main() -> None:
         started = time.time()
 
         if cached_batch is None:
+            assert data_iter is not None
+            assert loader is not None
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -253,14 +423,20 @@ def main() -> None:
         else:
             batch = cached_batch
 
-        prepared = prepare_packed_batch(
-            batch=batch,
-            encoder=vae,
-            device=device,
-            video_key=cfg.video_key,
-            context_len=cfg.context_len,
-            horizon_len=cfg.horizon_len,
-        )
+        if cached_prepared is None:
+            prepared = prepare_packed_batch(
+                batch=batch,
+                encoder=vae,
+                device=device,
+                video_key=cfg.video_key,
+                context_len=cfg.context_len,
+                horizon_len=cfg.horizon_len,
+                frame_height=cfg.frame_height,
+                frame_width=cfg.frame_width,
+                allow_missing_action=(cfg.conditioning_mode == "none"),
+            )
+        else:
+            prepared = cached_prepared
 
         metrics = train_chunkwise_batch(
             model=model,
@@ -274,6 +450,8 @@ def main() -> None:
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
             grad_clip_norm=cfg.grad_clip_norm,
+            amp_dtype=(None if cfg.disable_amp or device.type != "cuda" else runtime_dtype),
+            grad_scaler=grad_scaler,
         )
 
         step_time_s = time.time() - started
@@ -281,6 +459,8 @@ def main() -> None:
         log_payload["lr"] = float(optimizer.param_groups[0]["lr"])
         log_payload["step_time_s"] = float(step_time_s)
         append_jsonl(metrics_path, log_payload)
+        completed_steps = step
+        block_losses.append(metrics.loss)
 
         if step % cfg.log_every == 0 or step == 1:
             print(
@@ -299,9 +479,35 @@ def main() -> None:
             )
             print(f"checkpoint={path}")
 
+        if cfg.auto_stop_check_every > 0 and step % cfg.auto_stop_check_every == 0:
+            block_mean_loss = sum(block_losses) / len(block_losses)
+            block_mean_losses.append(block_mean_loss)
+            should_continue, improvement = _should_continue_after_block(
+                block_mean_losses=block_mean_losses,
+                min_relative_improvement=cfg.auto_stop_min_relative_improvement,
+            )
+            if improvement is None:
+                print(
+                    "auto-stop block summary: "
+                    f"steps={step - len(block_losses) + 1:06d}-{step:06d} "
+                    f"mean_loss={block_mean_loss:.6f}; continuing (first block)"
+                )
+            else:
+                print(
+                    "auto-stop block summary: "
+                    f"steps={step - len(block_losses) + 1:06d}-{step:06d} "
+                    f"mean_loss={block_mean_loss:.6f} "
+                    f"relative_improvement={improvement:.4f} "
+                    f"threshold={cfg.auto_stop_min_relative_improvement:.4f}"
+                )
+            block_losses = []
+            if not should_continue:
+                print(f"auto-stop triggered at step={step:06d}")
+                break
+
     final_ckpt = save_checkpoint(
         output_dir=output_dir,
-        step=cfg.max_steps,
+        step=completed_steps,
         model=model,
         action_encoder=action_encoder,
         optimizer=optimizer,
@@ -320,6 +526,9 @@ def main() -> None:
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
+            device=device,
+            disable_amp=cfg.disable_amp,
+            runtime_dtype=runtime_dtype,
         )
         assert overfit_start_loss is not None
         print(

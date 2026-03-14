@@ -25,7 +25,7 @@ class _RecordingVideoInferenceModel(nn.Module):
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
         timestep_t: torch.Tensor,
-        block_causal_attention_mask: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -36,7 +36,7 @@ class _RecordingVideoInferenceModel(nn.Module):
                 "future_frames": noisy_future_video.shape[2],
                 "observed_frames": observed_video.shape[2],
                 "action_frames": action_tokens.shape[1],
-                "mask_shape": tuple(block_causal_attention_mask.shape),
+                "mask_shape": None if block_causal_attention_mask is None else tuple(block_causal_attention_mask.shape),
             }
         )
         return -noisy_future_video
@@ -90,6 +90,28 @@ def test_infer_future_videos_chunkwise_supports_single_chunk_prompt_conditioning
     assert model.calls[0]["observed_frames"] == 3
     assert model.calls[0]["future_frames"] == 8
     assert model.calls[0]["action_frames"] == 6
+
+
+def test_infer_future_videos_chunkwise_can_disable_block_causal_attention() -> None:
+    """Allow pretrained base-mode sampling to reuse the local adapter without a causal mask."""
+    torch.manual_seed(0)
+    model = _RecordingVideoInferenceModel()
+
+    out = infer_future_videos_chunkwise(
+        model,
+        z_past_video=torch.randn(1, 16, 3, 8, 8),
+        future_steps=4,
+        cross_attention_tokens=torch.randn(1, 6, 16),
+        chunk_conditioning=False,
+        single_chunk_rollout=True,
+        block_causal_attention=False,
+        k=1,
+        integration_steps=2,
+    )
+
+    assert out.shape == (1, 16, 4, 8, 8)
+    assert len(model.calls) == 2
+    assert model.calls[0]["mask_shape"] is None
 
 
 def test_infer_future_videos_chunkwise_auto_collapses_when_future_is_shorter_than_k_plus_one() -> None:

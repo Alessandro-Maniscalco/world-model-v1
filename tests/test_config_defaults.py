@@ -16,6 +16,20 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.load_pretrained_backbone is True
     assert cfg.wan_vace_model_id == "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
     assert cfg.wan_vace_subfolder == "transformer"
+    assert cfg.trainable_backbone == "full"
+    assert cfg.conditioning_mode == "none"
+    assert cfg.lora_rank == 8
+    assert cfg.lora_alpha == 16
+    assert cfg.lora_target_modules == (
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "ffn.net.0.proj",
+        "ffn.net.2",
+        "proj_in",
+        "proj_out",
+    )
 
 
 def test_infer_config_defaults_load_from_canonical_yaml() -> None:
@@ -26,6 +40,22 @@ def test_infer_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.load_pretrained_backbone is True
     assert cfg.wan_vace_model_id == "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
     assert cfg.wan_vace_subfolder == "transformer"
-    assert cfg.conditioning_mode == "action"
+    assert cfg.trainable_backbone == "full"
+    assert cfg.conditioning_mode == "none"
+    assert cfg.lora_rank == 8
+    assert cfg.lora_alpha == 16
+    assert cfg.lora_target_modules == (
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "ffn.net.0.proj",
+        "ffn.net.2",
+        "proj_in",
+        "proj_out",
+    )
     assert cfg.guidance_scale == 5.0
+    assert cfg.num_vis_frames == 0
+    assert cfg.frame_height == 0
+    assert cfg.frame_width == 0
     assert cfg.single_chunk_rollout is False

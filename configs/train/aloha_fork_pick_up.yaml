@@ -1,0 +1,86 @@
+# Conservative overnight training config for ALOHA fork-pick-up on a 16 GB RTX 3080.
+# This promotes the full single-task dataset to action-conditioned training and
+# uses LoRA adapters instead of head-only tuning so the model can move more of
+# the backbone without full-finetune memory cost.
+#
+# Use it with:
+#   env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE \
+#     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   python scripts/train/world_model.py \
+#     --config configs/train/aloha_fork_pick_up.yaml
+# This preset is intended for the full ALOHA fork-pick-up dataset, not the
+# episode-0 cache-only smoke path.
+
+video_path: ""
+start_frame: 0
+repo_id: lerobot/aloha_static_fork_pick_up
+video_key: observation.images.cam_high
+output_dir: runs/world_model_aloha_fork_pick_up_full_320x240
+
+# --- frame resolution ---
+# ALOHA `cam_high` is 640x480 (4:3). Use the smallest 4:3 size that stayed
+# visually stable in the upstream Wan VACE resolution sweeps.
+frame_height: 256
+frame_width: 192
+
+# --- temporal window ---
+# Intentionally sample a 10 Hz-equivalent window from the 50 Hz ALOHA stream.
+context_len: 9
+horizon_len: 8
+dt: 0.1
+
+# --- training ---
+batch_size: 1
+k: 1
+max_steps: 50000
+auto_stop_check_every: 5000
+auto_stop_min_relative_improvement: 0.05
+lr: 0.0001
+weight_decay: 0.0001
+grad_clip_norm: 1.0
+weight_mode: uniform
+t_min: 0.0
+t_max: 1.0
+
+# --- memory ---
+disable_amp: false
+gradient_checkpointing: true
+
+# --- backbone ---
+load_pretrained_backbone: true
+wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
+wan_vace_subfolder: transformer
+wan_num_attention_heads: 40
+wan_attention_head_dim: 128
+wan_text_dim: 4096
+wan_freq_dim: 256
+wan_ffn_dim: 13824
+wan_num_layers: 40
+
+# --- VACE control injection layers ---
+vace_layers:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 25
+  - 30
+  - 35
+control_scale: 1.0
+mask_channels: 64
+trainable_backbone: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+conditioning_mode: action
+
+# --- data loading ---
+num_workers: 0
+subset_size: 0
+overfit_one_batch: false
+
+# --- logging ---
+log_every: 10
+checkpoint_every: 500
+seed: 0

@@ -13,6 +13,17 @@ Canonical inference preset. This file is the default runtime source for eval
 settings when `scripts/train/infer_world_model.py` is invoked without
 `--config`.
 
+- `configs/train/droid_local_smoke.yaml`
+Small local-overfit training preset for the exported DROID clip path. This
+config exists specifically to validate the bf16/null-conditioning/latent-time
+training path on a 16 GB workstation GPU.
+
+## Documentation
+
+- `docs/training.md`
+Persistent notes for the current training path, including bf16 behavior,
+latent-time schedule constraints, and the recommended local overfit command.
+
 ## Source Packages
 
 - `src/world_model/config.py`
@@ -20,12 +31,17 @@ Defines typed `dataclass` schemas for training (`TrainScriptConfig`) and
 inference (`InferScriptConfig`), along with YAML loading, key validation, and
 CLI override helpers. Runtime defaults now come from the canonical YAML presets
 under `configs/`, while this module owns the Python-side config contract,
-including inference-only prompt-conditioning and single-chunk rollout toggles.
+including trainable-backbone policy, inference-only prompt-conditioning, and
+single-chunk rollout toggles.
 
 - `src/world_model/data/`
   - `dataset.py`: Gets raw frames from disk.
-  - `temporal.py`: Expands frame-rate signals into latent-time sequences and
-    computes latent-time splits.
+  - `droid_video.py`: Shared helpers for exporting reusable local preview clips
+    from DROID/LeRobot episodes, including PNG frame dumps and MP4 preview
+    creation.
+  - `temporal.py`: Validates Wan's exact `4n+1` raw-frame packing, expands
+    frame-rate signals into latent-time sequences, and computes latent-time
+    splits.
   - `schema.py`: Defines the canonical prepared batch for the Wan VACE path,
     including structured latent videos, aligned actions, and latent metadata.
   - `prepare.py`: Runs the VAE, computes latent-time splits, aligns actions,
@@ -76,7 +92,10 @@ upstream-style smoke tests.
 
 - `scripts/train/world_model.py`
 Canonical Wan VACE training entrypoint. Builds the pretrained or config-shaped
-VACE backbone, action-token encoder, and chunkwise flow-matching loop.
+VACE backbone, configured conditioning encoder, and chunkwise flow-matching
+loop. Also owns local-video overfit mode, latent-time schedule validation,
+automatic bf16/fp16 selection, and the `full`/`vace`/`head` trainable-backbone
+policies.
 
 - `scripts/train/infer_world_model.py`
 Canonical Wan VACE inference and visualization entrypoint. Loads the pretrained
@@ -89,4 +108,9 @@ inference when AMP is enabled, and saves a comparison grid.
 
 - `scripts/check/`
 Canonical diagnostics (`dataset`, `forward_real_batch`, `latent_cache`,
-`masking_leakage`, `vae_roundtrip`, `latents_summary`).
+`masking_leakage`, `vae_roundtrip`, `latents_summary`) plus manual sweep tools
+such as `sweep_infer_resolutions.py`, `sweep_vae_roundtrip_resolutions.py`,
+and `diagnose_dit_conditioning.py` for visual comparison across resize settings
+and null-vs-prompt conditioning diagnostics. The diagnosis script can now
+auto-export a first-episode DROID preview clip for local-video checks and can
+fall back to the pretrained backbone when no fine-tuned checkpoint exists.

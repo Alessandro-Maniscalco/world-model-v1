@@ -1,0 +1,83 @@
+# Dataset-backed smoke config for cached ALOHA fork-pick-up episodes.
+# This keeps the same low-memory recipe as the verified local DROID smoke path,
+# but swaps in the landscape ALOHA `cam_high` stream.
+#
+# Use it with:
+#   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   python scripts/train/world_model.py \
+#     --config configs/train/aloha_fork_pick_up_smoke.yaml
+# This preset pins `episodes: [0]` because the current local cache is partial.
+
+video_path: ""
+start_frame: 0
+repo_id: lerobot/aloha_static_fork_pick_up
+episodes:
+  - 0
+video_key: observation.images.cam_high
+output_dir: runs/world_model_aloha_fork_pick_up_smoke_episode0
+
+# --- frame resolution ---
+# Multiples of 8 are required by the VAE spatial stride.
+# 128x224 is the safest 16 GB starting point that already worked for the same
+# head-only training recipe on this machine.
+frame_height: 128
+frame_width: 224
+
+# --- temporal window ---
+# ALOHA runs at 50 Hz, but this preset intentionally samples at 0.1 s to get a
+# 10 Hz-equivalent window with larger visible motion per step.
+# Wan requires context_len=4m+1 and horizon_len=4h to preserve exact temporal packing.
+context_len: 9
+horizon_len: 8
+dt: 0.1
+
+# --- training ---
+batch_size: 1
+k: 1
+max_steps: 2
+lr: 0.0001
+weight_decay: 0.0001
+grad_clip_norm: 1.0
+weight_mode: uniform
+t_min: 0.0
+t_max: 1.0
+
+# --- memory ---
+disable_amp: false
+gradient_checkpointing: true
+
+# --- backbone ---
+load_pretrained_backbone: true
+wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
+wan_vace_subfolder: transformer
+wan_num_attention_heads: 40
+wan_attention_head_dim: 128
+wan_text_dim: 4096
+wan_freq_dim: 256
+wan_ffn_dim: 13824
+wan_num_layers: 40
+
+# --- VACE control injection layers ---
+vace_layers:
+  - 0
+  - 5
+  - 10
+  - 15
+  - 20
+  - 25
+  - 30
+  - 35
+control_scale: 1.0
+mask_channels: 64
+trainable_backbone: head
+conditioning_mode: none
+
+# --- data loading ---
+num_workers: 0
+subset_size: 1
+overfit_one_batch: true
+
+# --- logging ---
+log_every: 1
+checkpoint_every: 2
+seed: 0

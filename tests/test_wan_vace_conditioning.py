@@ -26,3 +26,34 @@ def test_build_vace_control_tensor_matches_vace_channel_contract() -> None:
     assert torch.allclose(control[:, :16], latents * (1.0 - mask))
     assert torch.allclose(control[:, 16:32], latents * mask)
     assert control[:, 32:].shape[1] == 64
+
+
+def test_build_vace_control_tensor_uses_fill_latents_for_masked_regions() -> None:
+    """Use fill latents instead of mathematical zeroes in masked control regions."""
+    latents = torch.tensor(
+        [[[[[1.0]]], [[[2.0]]]]],
+        dtype=torch.float32,
+    )
+    mask = torch.tensor([[[[[0.0]]]]], dtype=torch.float32)
+    inactive_fill = torch.full_like(latents, -3.0)
+    reactive_fill = torch.full_like(latents, -5.0)
+
+    observed_control = build_vace_control_tensor(
+        observed_latents=latents,
+        observed_mask=mask,
+        inactive_fill_latents=inactive_fill,
+        reactive_fill_latents=reactive_fill,
+        mask_channels=1,
+    )
+    generated_control = build_vace_control_tensor(
+        observed_latents=latents,
+        observed_mask=torch.ones_like(mask),
+        inactive_fill_latents=inactive_fill,
+        reactive_fill_latents=reactive_fill,
+        mask_channels=1,
+    )
+
+    assert torch.equal(observed_control[:, :2], latents)
+    assert torch.equal(observed_control[:, 2:4], reactive_fill)
+    assert torch.equal(generated_control[:, :2], inactive_fill)
+    assert torch.equal(generated_control[:, 2:4], latents)

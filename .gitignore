@@ -22,3 +22,8 @@ assets/**
 .envrc
 .hf_datasets/
 .hf_home/
+/.vscode/
+/data/
+/latent
+/preprocessed
+/tmp_vace/

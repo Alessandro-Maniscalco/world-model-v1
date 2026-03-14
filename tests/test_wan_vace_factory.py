@@ -8,7 +8,7 @@ import torch
 
 from world_model.config import InferScriptConfig, load_infer_config, load_train_config
 from world_model.data.schema import PreparedPackedBatch
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 from world_model.models import wan_vace_factory
 
@@ -29,7 +29,12 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
                 vace_layers=(0, 1),
             )
 
-    def _fake_from_pretrained(model_id: str, subfolder: str | None = None):
+    def _fake_from_pretrained(
+        model_id: str,
+        subfolder: str | None = None,
+        local_files_only: bool = False,
+    ):
+        del local_files_only
         calls.append((model_id, subfolder))
         return _FakeBackbone()
 
@@ -52,7 +57,9 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     )
 
     assert isinstance(model, WanVACEWorldModel)
-    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert isinstance(action_encoder, NullConditioningEncoder)
+    assert model.control_black_latents is not None
+    assert model.control_gray_latents is not None
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer")]
 
 
@@ -60,6 +67,7 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()
     cfg = InferScriptConfig(
+        conditioning_mode="action",
         load_pretrained_backbone=False,
         wan_num_attention_heads=2,
         wan_attention_head_dim=8,
@@ -107,4 +115,6 @@ def _make_prepared_batch() -> PreparedPackedBatch:
         total_latent_steps=6,
         context_latent_steps=2,
         horizon_latent_steps=4,
+        control_black_latents=torch.full((2, 16, 6, 8, 8), -1.0),
+        control_gray_latents=torch.full((2, 16, 6, 8, 8), 0.5),
     )

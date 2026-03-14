@@ -16,15 +16,20 @@ DEFAULT_INFER_CONFIG_PATH = REPO_ROOT / "configs" / "eval" / "infer_world_model.
 class TrainScriptConfig:
     """Configuration for world-model training entrypoint."""
 
+    video_path: str = ""
+    start_frame: int = 0
     repo_id: str = "lerobot/libero"
+    episodes: tuple[int, ...] = ()
     video_key: str = "observation.images.image"
     output_dir: str = "runs/world_model_train"
-    context_len: int = 10
+    context_len: int = 9
     horizon_len: int = 8
     dt: float = 0.1
     batch_size: int = 2
     k: int = 1
     max_steps: int = 2000
+    auto_stop_check_every: int = 0
+    auto_stop_min_relative_improvement: float = 0.0
     lr: float = 1e-4
     weight_decay: float = 1e-4
     grad_clip_norm: float = 1.0
@@ -45,6 +50,23 @@ class TrainScriptConfig:
     vace_layers: tuple[int, ...] = (0, 5, 10, 15, 20, 25, 30, 35)
     control_scale: float = 1.0
     mask_channels: int = 64
+    trainable_backbone: str = "full"
+    lora_rank: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.0
+    lora_target_modules: tuple[str, ...] = (
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "ffn.net.0.proj",
+        "ffn.net.2",
+        "proj_in",
+        "proj_out",
+    )
+    conditioning_mode: str = "none"
+    frame_height: int = 0
+    frame_width: int = 0
     num_workers: int = 0
     log_every: int = 10
     checkpoint_every: int = 100
@@ -63,14 +85,14 @@ class InferScriptConfig:
     repo_id: str = "lerobot/libero"
     video_key: str = "observation.images.image"
     output_dir: str = "runs/infer_world_model"
-    context_len: int = 10
+    context_len: int = 9
     horizon_len: int = 8
     dt: float = 0.1
     batch_size: int = 1
     subset_size: int = 1
     k: int = 1
     integration_steps: int = 20
-    num_vis_frames: int = 5
+    num_vis_frames: int = 0
     load_pretrained_backbone: bool = True
     wan_vace_model_id: str = "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
     wan_vace_subfolder: str = "transformer"
@@ -83,7 +105,23 @@ class InferScriptConfig:
     vace_layers: tuple[int, ...] = (0, 5, 10, 15, 20, 25, 30, 35)
     control_scale: float = 1.0
     mask_channels: int = 64
-    conditioning_mode: str = "action"
+    trainable_backbone: str = "full"
+    lora_rank: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.0
+    lora_target_modules: tuple[str, ...] = (
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "ffn.net.0.proj",
+        "ffn.net.2",
+        "proj_in",
+        "proj_out",
+    )
+    conditioning_mode: str = "none"
+    frame_height: int = 0
+    frame_width: int = 0
     prompt: str = ""
     negative_prompt: str = ""
     guidance_scale: float = 5.0
@@ -137,7 +175,10 @@ def _coerce_dataclass(cls: type[T], payload: dict[str, Any]) -> T:
     if unknown:
         raise ValueError(f"Unknown config keys for {cls.__name__}: {unknown}")
     base = asdict(cls())
-    base.update(payload)
+    for field_info in fields(cls):
+        if field_info.name not in payload:
+            continue
+        base[field_info.name] = _coerce_field_value(base[field_info.name], payload[field_info.name])
     return cls(**base)
 
 
@@ -153,3 +194,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError(f"Expected mapping at root of {path}, got {type(loaded).__name__}")
     return loaded
+
+
+def _coerce_field_value(default_value: Any, value: Any) -> Any:
+    """Convert YAML-loaded values into the shapes expected by typed config fields."""
+    if isinstance(default_value, tuple) and isinstance(value, list):
+        return tuple(value)
+    return value

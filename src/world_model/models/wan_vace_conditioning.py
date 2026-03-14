@@ -58,10 +58,30 @@ class ActionTokenEncoder(nn.Module):
         return self.net(a_plan)
 
 
+class NullConditioningEncoder(nn.Module):
+    """Emit constant zero cross-attention tokens while ignoring conditioning inputs."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        """Store the output token width used by the Wan backbone."""
+        super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        self.hidden_dim = int(hidden_dim)
+
+    def forward(self, token_source: torch.Tensor) -> torch.Tensor:
+        """Return `[B,T,D]` zero tokens using only batch/time from `token_source`."""
+        if token_source.ndim != 3:
+            raise ValueError(f"token_source must be [B,T,F], got {tuple(token_source.shape)}")
+        batch_size, steps = token_source.shape[:2]
+        return token_source.new_zeros(batch_size, steps, self.hidden_dim)
+
+
 def build_vace_control_tensor(
     *,
     observed_latents: torch.Tensor,
     observed_mask: torch.Tensor,
+    inactive_fill_latents: torch.Tensor | None = None,
+    reactive_fill_latents: torch.Tensor | None = None,
     mask_channels: int = 64,
 ) -> torch.Tensor:
     """Build the Wan VACE control tensor `[inactive; reactive; mask]`.
@@ -84,7 +104,35 @@ def build_vace_control_tensor(
         raise ValueError(f"mask_channels must be positive, got {mask_channels}")
 
     mask = observed_mask.to(device=observed_latents.device, dtype=observed_latents.dtype)
-    inactive = observed_latents * (1.0 - mask)
-    reactive = observed_latents * mask
+    inactive_fill_latents = _resolve_control_fill_latents(
+        fill_latents=inactive_fill_latents,
+        reference_latents=observed_latents,
+        name="inactive_fill_latents",
+    )
+    reactive_fill_latents = _resolve_control_fill_latents(
+        fill_latents=reactive_fill_latents,
+        reference_latents=observed_latents,
+        name="reactive_fill_latents",
+    )
+    mask_bool = mask.to(dtype=torch.bool).expand_as(observed_latents)
+    inactive = torch.where(mask_bool, inactive_fill_latents, observed_latents)
+    reactive = torch.where(mask_bool, observed_latents, reactive_fill_latents)
     mask_features = mask.expand(-1, mask_channels, -1, -1, -1)
     return torch.cat([inactive, reactive, mask_features], dim=1)
+
+
+def _resolve_control_fill_latents(
+    *,
+    fill_latents: torch.Tensor | None,
+    reference_latents: torch.Tensor,
+    name: str,
+) -> torch.Tensor:
+    """Validate optional control fill latents against the active latent tensor."""
+    if fill_latents is None:
+        return torch.zeros_like(reference_latents)
+    if fill_latents.shape != reference_latents.shape:
+        raise ValueError(
+            f"{name} must match observed_latents shape {tuple(reference_latents.shape)}, "
+            f"got {tuple(fill_latents.shape)}"
+        )
+    return fill_latents.to(device=reference_latents.device, dtype=reference_latents.dtype)

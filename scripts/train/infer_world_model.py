@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from dataclasses import replace
+import json
 import os
 import random
 from pathlib import Path
@@ -38,11 +40,11 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     sys.modules.pop("world_model", None)
 
 from world_model.config import InferScriptConfig, apply_namespace_overrides, load_infer_config
-from world_model.data import build_lerobot_dataloader, prepare_packed_batch
+from world_model.data import build_lerobot_dataloader, prepare_packed_batch, preprocess_video_for_vae
 from world_model.data.schema import PreparedPackedBatch
 from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.models.wan_vace_factory import build_wan_vace_runtime_modules
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 
@@ -83,7 +85,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--subset-size", type=int, default=defaults.subset_size)
     parser.add_argument("--k", type=int, default=defaults.k)
     parser.add_argument("--integration-steps", type=int, default=defaults.integration_steps)
-    parser.add_argument("--num-vis-frames", type=int, default=defaults.num_vis_frames)
+    parser.add_argument(
+        "--num-vis-frames",
+        type=int,
+        default=defaults.num_vis_frames,
+        help="Maximum frames to render per output grid; 0 shows all available frames.",
+    )
     parser.add_argument(
         "--load-pretrained-backbone",
         action="store_true",
@@ -101,11 +108,18 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
     parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
+    parser.add_argument("--trainable-backbone", choices=("full", "vace", "head", "lora"), default=defaults.trainable_backbone)
+    parser.add_argument("--lora-rank", type=int, default=defaults.lora_rank)
+    parser.add_argument("--lora-alpha", type=int, default=defaults.lora_alpha)
+    parser.add_argument("--lora-dropout", type=float, default=defaults.lora_dropout)
+    parser.add_argument("--lora-target-modules", nargs="+", default=list(defaults.lora_target_modules))
+    parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
+    parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument(
         "--conditioning-mode",
-        choices=("action", "prompt"),
+        choices=("none", "action", "prompt"),
         default=defaults.conditioning_mode,
-        help="Use action-plan tokens for scope-aligned evaluation or prompt tokens for upstream-style smoke tests.",
+        help="Use null tokens, action-plan tokens, or prompt tokens for cross-attention conditioning.",
     )
     parser.add_argument(
         "--prompt",
@@ -170,6 +184,66 @@ def _load_args() -> InferScriptConfig:
     parser = _build_parser(defaults)
     args = parser.parse_args()
     return apply_namespace_overrides(defaults, args)
+
+
+def _validate_infer_config(cfg: InferScriptConfig) -> None:
+    """Reject inference configurations that cannot produce meaningful outputs."""
+    if cfg.num_vis_frames < 0:
+        raise ValueError(f"num_vis_frames must be >= 0, got {cfg.num_vis_frames}")
+    if cfg.conditioning_mode == "action" and not cfg.checkpoint:
+        raise ValueError(
+            "Action conditioning requires --checkpoint because the action encoder is random otherwise. "
+            "Use --conditioning-mode prompt for pretrained-backbone smoke tests."
+        )
+
+
+def _resolve_effective_infer_config(cfg: InferScriptConfig) -> InferScriptConfig:
+    """Promote checkpoint-free prompt smoke tests to a more VACE-like sampling setup."""
+    if cfg.checkpoint or cfg.conditioning_mode not in ("none", "prompt"):
+        return cfg
+
+    resolved = cfg
+    if not resolved.single_chunk_rollout:
+        resolved = replace(resolved, single_chunk_rollout=True)
+    if resolved.integration_steps < 50:
+        resolved = replace(resolved, integration_steps=50)
+    return resolved
+
+
+def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[str, object] | None) -> InferScriptConfig:
+    """Adopt saved runtime settings from a checkpoint when the current config still uses defaults."""
+    if ckpt is None:
+        return cfg
+    extra_state = ckpt.get("extra_state")
+    if not isinstance(extra_state, dict):
+        return cfg
+    saved_cfg = extra_state.get("config")
+    if not isinstance(saved_cfg, dict):
+        return cfg
+
+    defaults = InferScriptConfig()
+    update_keys = (
+        "trainable_backbone",
+        "conditioning_mode",
+        "control_scale",
+        "mask_channels",
+        "vace_layers",
+        "lora_rank",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_target_modules",
+    )
+    updates: dict[str, Any] = {}
+    for key in update_keys:
+        if key not in saved_cfg or getattr(cfg, key) != getattr(defaults, key):
+            continue
+        value = saved_cfg[key]
+        if key in {"vace_layers", "lora_target_modules"}:
+            value = tuple(value)
+        updates[key] = value
+    if not updates:
+        return cfg
+    return replace(cfg, **updates)
 
 
 def _set_seed(seed: int) -> None:
@@ -289,17 +363,22 @@ def _prepare_from_local_video(
     ckpt: dict[str, object] | None,
     vae: WanVAE,
     device: torch.device,
-) -> Any:
-    """Build a prepared batch from a local video clip plus action conditioning."""
+) -> tuple[PreparedPackedBatch, torch.Tensor]:
+    """Build a prepared batch from a local clip and return the source video tensor."""
     total_frames = cfg.context_len + cfg.horizon_len
     video_btchw = _load_video_clip(cfg.video_path, cfg.start_frame, total_frames).to(device)
+    video_btchw = preprocess_video_for_vae(
+        video_btchw,
+        frame_height=cfg.frame_height,
+        frame_width=cfg.frame_width,
+    )
 
-    if cfg.action_dim > 0:
+    if cfg.conditioning_mode in ("none", "prompt"):
+        action_dim = max(int(cfg.action_dim), 1)
+    elif cfg.action_dim > 0:
         action_dim = cfg.action_dim
     elif ckpt is not None:
         action_dim = _infer_action_dim_from_checkpoint(ckpt)
-    elif cfg.conditioning_mode == "prompt":
-        action_dim = 1
     else:
         action_dim = 0
     action = _load_action_tensor(
@@ -312,14 +391,55 @@ def _prepare_from_local_video(
         cfg.video_key: video_btchw,
         "action": action,
     }
-    return prepare_packed_batch(
+    prepared = prepare_packed_batch(
         batch=batch,
         encoder=vae,
         device=device,
         video_key=cfg.video_key,
         context_len=cfg.context_len,
         horizon_len=cfg.horizon_len,
+        frame_height=cfg.frame_height,
+        frame_width=cfg.frame_width,
     )
+    return prepared, video_btchw
+
+
+def _to_zero_one(video_btchw: torch.Tensor) -> torch.Tensor:
+    """Convert video tensor to float `[0,1]` while preserving `BTCHW` layout."""
+    if video_btchw.ndim != 5:
+        raise ValueError(f"Expected BTCHW video with 5 dims, got {tuple(video_btchw.shape)}")
+    if video_btchw.dtype == torch.uint8:
+        return video_btchw.float() / 255.0
+
+    video = video_btchw.float()
+    max_val = float(video.max().detach().cpu()) if video.numel() > 0 else 1.0
+    min_val = float(video.min().detach().cpu()) if video.numel() > 0 else 0.0
+    if min_val >= -0.1 and max_val <= 1.1:
+        return video.clamp(0.0, 1.0)
+    if min_val >= -1.1 and max_val <= 1.1:
+        return ((video + 1.0) / 2.0).clamp(0.0, 1.0)
+    if min_val >= 0.0 and max_val <= 255.0:
+        return (video / 255.0).clamp(0.0, 1.0)
+    raise ValueError(
+        f"Unable to infer video range for visualization from min={min_val:.3f}, max={max_val:.3f}."
+    )
+
+
+def _resample_video_time(video_btchw: torch.Tensor, target_steps: int) -> torch.Tensor:
+    """Nearest-resample `BTCHW` video to `target_steps` frames."""
+    if target_steps <= 0:
+        raise ValueError(f"target_steps must be positive, got {target_steps}")
+    if video_btchw.ndim != 5:
+        raise ValueError(f"Expected BTCHW video with 5 dims, got {tuple(video_btchw.shape)}")
+
+    source_steps = int(video_btchw.shape[1])
+    if source_steps <= 0:
+        raise ValueError("Cannot resample an empty video time dimension")
+    if source_steps == target_steps:
+        return video_btchw
+    idx = torch.linspace(0, source_steps - 1, steps=target_steps, device=video_btchw.device)
+    idx = idx.round().long().clamp(0, source_steps - 1)
+    return video_btchw.index_select(dim=1, index=idx)
 
 
 def build_runtime_modules(
@@ -328,7 +448,7 @@ def build_runtime_modules(
     prepared: PreparedPackedBatch,
     device: torch.device,
     checkpoint: dict[str, object] | None,
-) -> tuple[WanVACEWorldModel, ActionTokenEncoder]:
+) -> tuple[WanVACEWorldModel, ActionTokenEncoder | NullConditioningEncoder]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
     return build_wan_vace_runtime_modules(
         cfg,
@@ -447,11 +567,21 @@ def _save_grid(
     target_video: torch.Tensor,
     output_path: Path,
     num_frames: int,
+    top_label: str = "Ground-truth",
+    bottom_label: str = "Generated",
 ) -> None:
-    """Save a two-row ground-truth vs generated frame grid to disk."""
+    """Save a two-row comparison grid to disk."""
     pred_frames = pred_video[0].detach().float().cpu()
     target_frames = target_video[0].detach().float().cpu()
-    vis_frames = min(num_frames, pred_frames.shape[0], target_frames.shape[0])
+    if pred_frames.shape[2:] != target_frames.shape[2:]:
+        raise ValueError(
+            "Predicted/target frame sizes must match for grid export; "
+            f"got pred={tuple(pred_frames.shape[2:])}, target={tuple(target_frames.shape[2:])}"
+        )
+    vis_frames = _resolve_visualized_frame_count(
+        requested_frames=num_frames,
+        available_frames=min(pred_frames.shape[0], target_frames.shape[0]),
+    )
     if vis_frames <= 0:
         raise ValueError("No frames available for visualization")
 
@@ -475,8 +605,8 @@ def _save_grid(
     canvas_h = frame_h * 2 + gap
     canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
     draw = ImageDraw.Draw(canvas)
-    draw.text((16, frame_h // 2), "Ground-truth", fill=(30, 30, 30))
-    draw.text((24, frame_h + gap + frame_h // 2), "Generated", fill=(30, 30, 30))
+    draw.text((16, frame_h // 2), top_label, fill=(30, 30, 30))
+    draw.text((24, frame_h + gap + frame_h // 2), bottom_label, fill=(30, 30, 30))
 
     for idx in range(vis_frames):
         gt = (target_frames[idx].clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype("uint8")
@@ -488,17 +618,209 @@ def _save_grid(
     canvas.save(output_path)
 
 
+def _save_strip(
+    *,
+    video: torch.Tensor,
+    output_path: Path,
+    num_frames: int,
+    label: str,
+) -> None:
+    """Save a one-row frame strip for a single video."""
+    frames = video[0].detach().float().cpu()
+    vis_frames = _resolve_visualized_frame_count(
+        requested_frames=num_frames,
+        available_frames=frames.shape[0],
+    )
+    if vis_frames <= 0:
+        raise ValueError("No frames available for visualization")
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        torch.save({"video": video.detach().cpu()}, output_path.with_suffix(".pt"))
+        return
+
+    frame_h = int(frames.shape[2])
+    frame_w = int(frames.shape[3])
+    margin = 140
+    canvas = Image.new("RGB", (margin + vis_frames * frame_w, frame_h), (245, 245, 245))
+    draw = ImageDraw.Draw(canvas)
+    draw.text((16, frame_h // 2), label, fill=(30, 30, 30))
+
+    for idx in range(vis_frames):
+        frame = (frames[idx].clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype("uint8")
+        canvas.paste(Image.fromarray(frame), (margin + idx * frame_w, 0))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path)
+
+
+def _resolve_visualized_frame_count(*, requested_frames: int, available_frames: int) -> int:
+    """Resolve `0 => all` and clamp frame-visualization requests to availability."""
+    if requested_frames < 0:
+        raise ValueError(f"requested_frames must be >= 0, got {requested_frames}")
+    if available_frames < 0:
+        raise ValueError(f"available_frames must be >= 0, got {available_frames}")
+    if requested_frames == 0:
+        return available_frames
+    return min(requested_frames, available_frames)
+
+
+def _build_frame_report(
+    *,
+    cfg: InferScriptConfig,
+    prepared: PreparedPackedBatch,
+    source_video: torch.Tensor,
+    raw_future: torch.Tensor,
+    raw_future_aligned: torch.Tensor,
+    pred_video: torch.Tensor,
+    target_video: torch.Tensor,
+) -> dict[str, object]:
+    """Build a compact frame/latent accounting report for saved inference artifacts."""
+    return {
+        "requested_context_frames": int(cfg.context_len),
+        "requested_horizon_frames": int(cfg.horizon_len),
+        "raw_source_frames_after_preprocess": int(source_video.shape[1]),
+        "raw_future_frames": int(raw_future.shape[1]),
+        "latent_total_steps": int(prepared.total_latent_steps),
+        "latent_context_steps": int(prepared.context_latent_steps),
+        "latent_future_steps": int(prepared.horizon_latent_steps),
+        "decoded_roundtrip_future_frames": int(target_video.shape[1]),
+        "decoded_generated_future_frames": int(pred_video.shape[1]),
+        "aligned_raw_future_frames": int(raw_future_aligned.shape[1]),
+        "visualized_frames": int(
+            _resolve_visualized_frame_count(
+                requested_frames=cfg.num_vis_frames,
+                available_frames=min(
+                    int(raw_future.shape[1]),
+                    int(raw_future_aligned.shape[1]),
+                    int(target_video.shape[1]),
+                    int(pred_video.shape[1]),
+                ),
+            )
+        ),
+        "comparison_labels": {
+            "comparison_grid.png": ["VAE roundtrip", "Generated"],
+            "vae_roundtrip_future_grid.png": ["Raw future aligned", "VAE roundtrip"],
+            "raw_future_grid.png": ["Raw future"],
+        },
+        "note": (
+            "Wan VAE operates in compressed latent time, so raw horizon frames, latent future steps, "
+            "and decoded future frames are different quantities."
+        ),
+    }
+
+
+def _save_frame_report(report: dict[str, object], output_path: Path) -> None:
+    """Persist a JSON report describing raw/latent/decoded frame counts."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _mean_gradient_energy(video_btchw: torch.Tensor) -> float:
+    """Estimate perceptual sharpness from mean spatial gradient energy."""
+    if video_btchw.ndim != 5:
+        raise ValueError(f"Expected BTCHW video with 5 dims, got {tuple(video_btchw.shape)}")
+    video = video_btchw.detach().float().cpu()
+    if video.numel() == 0:
+        return 0.0
+
+    gray = video.mean(dim=2)
+    grad_y = gray[:, :, 1:, :] - gray[:, :, :-1, :]
+    grad_x = gray[:, :, :, 1:] - gray[:, :, :, :-1]
+    return float(grad_y.pow(2).mean().item() + grad_x.pow(2).mean().item())
+
+
+def _build_sharpness_report(
+    *,
+    raw_future_aligned: torch.Tensor,
+    target_video: torch.Tensor,
+    pred_video: torch.Tensor,
+) -> dict[str, object]:
+    """Summarize relative sharpness between raw, VAE-roundtrip, and generated frames."""
+    raw_energy = _mean_gradient_energy(raw_future_aligned)
+    target_energy = _mean_gradient_energy(target_video)
+    pred_energy = _mean_gradient_energy(pred_video)
+    return {
+        "mean_gradient_energy": {
+            "raw_future_aligned": raw_energy,
+            "vae_roundtrip": target_energy,
+            "generated": pred_energy,
+        },
+        "relative_to_vae_roundtrip": {
+            "generated": 0.0 if target_energy == 0.0 else pred_energy / target_energy,
+            "raw_future_aligned": 0.0 if target_energy == 0.0 else raw_energy / target_energy,
+        },
+        "note": (
+            "Higher mean gradient energy usually means a sharper image. "
+            "Generated-to-roundtrip values well below 1.0 indicate extra blur beyond the VAE."
+        ),
+    }
+
+
+def _save_json_report(report: dict[str, object], output_path: Path) -> None:
+    """Persist a generic JSON report."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _release_sampling_modules(*modules: torch.nn.Module, device: torch.device) -> None:
+    """Move completed sampling modules off the active accelerator before VAE decode."""
+    if device.type != "cuda":
+        return
+    for module in modules:
+        module.to("cpu")
+    torch.cuda.empty_cache()
+
+
+def _release_vae_after_prepare(vae: WanVAE, *, device: torch.device) -> None:
+    """Move the Wan VAE off GPU once latent preparation has finished."""
+    if device.type != "cuda":
+        return
+    vae.vae.to("cpu")
+    torch.cuda.empty_cache()
+
+
+def _decode_future_videos(
+    *,
+    vae: WanVAE,
+    pred_future_video: torch.Tensor,
+    target_future_video: torch.Tensor,
+    device: torch.device,
+    disable_amp: bool,
+    runtime_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode future latent videos, falling back to CPU to reduce GPU peak memory."""
+    decode_device = device
+    decode_dtype = runtime_dtype
+    if device.type == "cuda":
+        vae.vae.to(device="cpu", dtype=torch.float32)
+        pred_future_video = pred_future_video.to("cpu")
+        target_future_video = target_future_video.to("cpu")
+        torch.cuda.empty_cache()
+        decode_device = torch.device("cpu")
+        decode_dtype = torch.float32
+
+    with _autocast_context(device=decode_device, disable_amp=disable_amp, dtype=decode_dtype):
+        pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
+        target_video = vae.decode(target_future_video, output_layout="BTCHW", output_range="zero_to_one")
+    return pred_video, target_video
+
+
 @torch.no_grad()
 def main() -> None:
     """Run chunkwise autoregressive inference from pretrained Wan VACE weights."""
     cfg = _load_args()
+    ckpt = _load_checkpoint(cfg.checkpoint, device=torch.device("cpu")) if cfg.checkpoint else None
+    cfg = _restore_runtime_config_from_checkpoint(cfg, ckpt)
+    _validate_infer_config(cfg)
+    cfg = _resolve_effective_infer_config(cfg)
     _set_seed(cfg.seed)
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     runtime_dtype = _select_runtime_dtype(device=device, disable_amp=cfg.disable_amp)
-    ckpt = _load_checkpoint(cfg.checkpoint, device=device) if cfg.checkpoint else None
 
     vae = WanVAE.from_pretrained(
         device=device,
@@ -506,7 +828,7 @@ def main() -> None:
         torch_dtype=runtime_dtype,
     )
     if cfg.video_path:
-        prepared = _prepare_from_local_video(
+        prepared, source_video = _prepare_from_local_video(
             cfg=cfg,
             ckpt=ckpt,
             vae=vae,
@@ -526,6 +848,14 @@ def main() -> None:
             drop_last=True,
         )
         batch = next(iter(loader))
+        source_video = batch[cfg.video_key].to(device)
+        source_video = preprocess_video_for_vae(
+            source_video,
+            frame_height=cfg.frame_height,
+            frame_width=cfg.frame_width,
+        )
+        batch = dict(batch)
+        batch[cfg.video_key] = source_video
         prepared = prepare_packed_batch(
             batch=batch,
             encoder=vae,
@@ -533,8 +863,11 @@ def main() -> None:
             video_key=cfg.video_key,
             context_len=cfg.context_len,
             horizon_len=cfg.horizon_len,
+            frame_height=cfg.frame_height,
+            frame_width=cfg.frame_width,
         )
 
+    _release_vae_after_prepare(vae, device=device)
     model, action_encoder = build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
@@ -569,6 +902,10 @@ def main() -> None:
         del text_encoder
         if device.type == "cuda":
             torch.cuda.empty_cache()
+    elif cfg.conditioning_mode == "action":
+        with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
+            cross_attention_tokens = action_encoder(prepared.a_plan)
+        negative_cross_attention_tokens = None
     else:
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
@@ -584,13 +921,22 @@ def main() -> None:
             integration_steps=cfg.integration_steps,
             negative_cross_attention_tokens=negative_cross_attention_tokens,
             guidance_scale=cfg.guidance_scale,
-            chunk_conditioning=(cfg.conditioning_mode == "action"),
+            chunk_conditioning=(cfg.conditioning_mode in ("none", "action")),
             single_chunk_rollout=cfg.single_chunk_rollout,
             scheduler=scheduler,
         )
 
-        pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
-        target_video = vae.decode(prepared.z_future_video, output_layout="BTCHW", output_range="zero_to_one")
+    del cross_attention_tokens
+    del negative_cross_attention_tokens
+    _release_sampling_modules(model, action_encoder, device=device)
+    pred_video, target_video = _decode_future_videos(
+        vae=vae,
+        pred_future_video=pred_future_video,
+        target_future_video=prepared.z_future_video,
+        device=device,
+        disable_amp=cfg.disable_amp,
+        runtime_dtype=runtime_dtype,
+    )
 
     grid_path = output_dir / "comparison_grid.png"
     _save_grid(
@@ -598,8 +944,64 @@ def main() -> None:
         target_video=target_video,
         output_path=grid_path,
         num_frames=cfg.num_vis_frames,
+        top_label="VAE roundtrip",
+        bottom_label="Generated",
     )
     print(f"Saved comparison grid: {grid_path}")
+
+    raw_video = _to_zero_one(source_video)
+    raw_future = raw_video[:, cfg.context_len:cfg.context_len + cfg.horizon_len]
+    raw_grid_path = output_dir / "raw_future_grid.png"
+    _save_strip(
+        video=raw_future,
+        output_path=raw_grid_path,
+        num_frames=cfg.num_vis_frames,
+        label="Raw future",
+    )
+    print(f"Saved raw future grid: {raw_grid_path}")
+    raw_future_aligned = _resample_video_time(raw_future, target_video.shape[1])
+    vae_grid_path = output_dir / "vae_roundtrip_future_grid.png"
+    _save_grid(
+        pred_video=target_video,
+        target_video=raw_future_aligned,
+        output_path=vae_grid_path,
+        num_frames=cfg.num_vis_frames,
+        top_label="Raw future aligned",
+        bottom_label="VAE roundtrip",
+    )
+    print(f"Saved VAE blur check grid: {vae_grid_path}")
+    frame_report = _build_frame_report(
+        cfg=cfg,
+        prepared=prepared,
+        source_video=source_video,
+        raw_future=raw_future,
+        raw_future_aligned=raw_future_aligned,
+        pred_video=pred_video,
+        target_video=target_video,
+    )
+    report_path = output_dir / "frame_report.json"
+    _save_frame_report(frame_report, report_path)
+    print(f"Saved frame report: {report_path}")
+    sharpness_report = _build_sharpness_report(
+        raw_future_aligned=raw_future_aligned,
+        target_video=target_video,
+        pred_video=pred_video,
+    )
+    sharpness_report_path = output_dir / "sharpness_report.json"
+    _save_json_report(sharpness_report, sharpness_report_path)
+    print(f"Saved sharpness report: {sharpness_report_path}")
+    print(
+        "Frame counts: "
+        f"requested raw future={frame_report['raw_future_frames']} "
+        f"latent future={frame_report['latent_future_steps']} "
+        f"decoded future={frame_report['decoded_roundtrip_future_frames']} "
+        f"visualized={frame_report['visualized_frames']}"
+    )
+    print(
+        "Sharpness ratios vs VAE roundtrip: "
+        f"generated={sharpness_report['relative_to_vae_roundtrip']['generated']:.3f} "
+        f"raw={sharpness_report['relative_to_vae_roundtrip']['raw_future_aligned']:.3f}"
+    )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ logging, and checkpoint save utilities.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,8 @@ def train_chunkwise_batch(
     snr_clip_max: float = 5.0,
     eps: float = 1e-6,
     generator: torch.Generator | None = None,
+    amp_dtype: torch.dtype | None = None,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> ChunkwiseStepMetrics:
     """Run one optimizer step using chunkwise teacher-forced flow matching."""
     model.train()
@@ -60,30 +63,47 @@ def train_chunkwise_batch(
 
     optimizer.zero_grad(set_to_none=True)
     trainable_params = list(model.parameters()) + list(action_encoder.parameters())
-    action_tokens = action_encoder(a_plan)
-    info = chunkwise_teacher_forcing_loss(
-        model,
-        z_past_video=z_past_video,
-        z_future_video=z_future_video,
-        action_tokens=action_tokens,
-        k=k,
-        t_min=t_min,
-        t_max=t_max,
-        weight_mode=weight_mode,
-        snr_clip_max=snr_clip_max,
-        eps=eps,
-        generator=generator,
-        return_info=True,
-    )
-    info.loss.backward()
+    autocast_context = _build_training_autocast_context(z_past_video=z_past_video, amp_dtype=amp_dtype)
+    with autocast_context:
+        action_tokens = action_encoder(a_plan)
+        info = chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=z_past_video,
+            z_future_video=z_future_video,
+            action_tokens=action_tokens,
+            k=k,
+            t_min=t_min,
+            t_max=t_max,
+            weight_mode=weight_mode,
+            snr_clip_max=snr_clip_max,
+            eps=eps,
+            generator=generator,
+            return_info=True,
+        )
+
+    if grad_scaler is None:
+        info.loss.backward()
+    else:
+        grad_scaler.scale(info.loss).backward()
 
     if grad_clip_norm is None:
         grad_norm = _compute_grad_norm(trainable_params)
+        if grad_scaler is None:
+            optimizer.step()
+        else:
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
     else:
+        if grad_scaler is not None:
+            grad_scaler.unscale_(optimizer)
         grad_norm = float(
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm).detach().cpu().item()
         )
-    optimizer.step()
+        if grad_scaler is None:
+            optimizer.step()
+        else:
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
 
     return ChunkwiseStepMetrics(
         loss=float(info.loss.detach().cpu().item()),
@@ -135,3 +155,14 @@ def _compute_grad_norm(parameters: Any) -> float:
         norm = float(param.grad.detach().norm(2).cpu().item())
         total_sq += norm * norm
     return total_sq ** 0.5
+
+
+def _build_training_autocast_context(
+    *,
+    z_past_video: torch.Tensor,
+    amp_dtype: torch.dtype | None,
+):
+    """Create an autocast context for mixed-precision training when requested."""
+    if amp_dtype is None or z_past_video.device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=amp_dtype)

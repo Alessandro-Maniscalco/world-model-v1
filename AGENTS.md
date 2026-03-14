@@ -9,6 +9,7 @@
 - Exception: lightweight smoke-check scripts under `scripts/check/` do not require a corresponding pytest file when they are only intended for manual execution.
 - Use `pytest` for testing.
 - If the logic depends on external models or heavy resources (like VAEs), use mocks to keep tests fast and deterministic.
+- When it makes sense, run the command you are telling me to run, check whether if it runs correctly for the amount of time you feel reasonable, fix it if it fails, and repeat until there is no error.
 ## Environment
 - Always run Python and test commands inside the repo virtualenv at `.venv`.
 - Before running Python tools, execute: `source .venv/bin/activate`.

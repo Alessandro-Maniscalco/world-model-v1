@@ -16,7 +16,7 @@ from PIL import Image
 LEROBOT_REPO_ID = "lerobot/libero"
 LEROBOT_SAMPLE_INDEX = 0
 LEROBOT_VIDEO_KEY = "observation.images.image"
-NUM_CONDITION_FRAMES = 19
+NUM_CONDITION_FRAMES = 13
 OUTPUT_DIR = Path("runs/check_lerobot_preview")
 
 
@@ -114,6 +114,35 @@ def _resolve_fps(requested_fps: float | None, dataset_fps: float) -> int:
     return int(round(fps))
 
 
+def compute_consecutive_frame_differences(*, images: list[Image.Image]) -> list[float]:
+    """Compute mean absolute RGB deltas for each consecutive frame pair."""
+    if len(images) < 2:
+        return []
+
+    differences: list[float] = []
+    previous = np.asarray(images[0].convert("RGB"), dtype=np.float32)
+    for current_image in images[1:]:
+        current = np.asarray(current_image.convert("RGB"), dtype=np.float32)
+        if current.shape != previous.shape:
+            raise ValueError(
+                f"Frame shape mismatch for difference computation: {previous.shape} vs {current.shape}."
+            )
+        differences.append(float(np.abs(current - previous).mean()))
+        previous = current
+    return differences
+
+
+def print_consecutive_frame_differences(*, differences: list[float]) -> None:
+    """Print mean absolute RGB deltas between each pair of neighboring frames."""
+    if not differences:
+        print("Consecutive frame differences: not enough frames to compare.")
+        return
+
+    print("Consecutive frame differences (mean absolute RGB delta in [0, 255]):")
+    for index, delta in enumerate(differences, start=1):
+        print(f"  frame_{index - 1:04d} -> frame_{index:04d}: {delta:.6f}")
+
+
 def save_ordered_png_frames(*, images: list[Image.Image], output_dir: Path) -> list[Path]:
     """Save each image to disk with a stable sequential filename."""
     frames_dir = output_dir / "frames"
@@ -169,6 +198,7 @@ def main() -> None:
 
     frame_paths = save_ordered_png_frames(images=images, output_dir=args.output_dir)
     video_path = export_preview_video(images=images, output_path=args.output_dir / "preview.mp4", fps=final_fps)
+    frame_differences = compute_consecutive_frame_differences(images=images)
     storage_type = _detect_dataset_storage_type(repo_id=args.repo_id)
 
     print(f"Saved {len(frame_paths)} ordered frame images to: {args.output_dir / 'frames'}")
@@ -180,6 +210,7 @@ def main() -> None:
         f"repo_id={args.repo_id}, sample_index={args.sample_index}, "
         f"video_key={args.video_key}, num_frames={args.num_frames}"
     )
+    print_consecutive_frame_differences(differences=frame_differences)
 
 
 if __name__ == "__main__":

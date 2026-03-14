@@ -21,7 +21,7 @@ class VideoVelocityModel(Protocol):
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
         timestep_t: torch.Tensor,
-        block_causal_attention_mask: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -41,6 +41,7 @@ def infer_future_videos_chunkwise(
     guidance_scale: float = 1.0,
     chunk_conditioning: bool = True,
     single_chunk_rollout: bool = False,
+    block_causal_attention: bool = True,
     scheduler: FlowMatchEulerDiscreteScheduler | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
@@ -100,19 +101,21 @@ def infer_future_videos_chunkwise(
             device=observed_video.device,
             dtype=observed_video.dtype,
         )
-        full_chunk_ids = torch.cat(
-            [
-                torch.full(
-                    (observed_video.shape[2],),
-                    fill_value=-1,
-                    device=z_past_video.device,
-                    dtype=torch.long,
-                ),
-                torch.zeros(chunk_len, device=z_past_video.device, dtype=torch.long),
-            ],
-            dim=0,
-        )
-        mask = build_block_causal_mask(full_chunk_ids, mask_format="additive")
+        mask = None
+        if block_causal_attention:
+            full_chunk_ids = torch.cat(
+                [
+                    torch.full(
+                        (observed_video.shape[2],),
+                        fill_value=-1,
+                        device=z_past_video.device,
+                        dtype=torch.long,
+                    ),
+                    torch.zeros(chunk_len, device=z_past_video.device, dtype=torch.long),
+                ],
+                dim=0,
+            )
+            mask = build_block_causal_mask(full_chunk_ids, mask_format="additive")
 
         positive_tokens = _select_chunk_conditioning_tokens(
             cross_attention_tokens,

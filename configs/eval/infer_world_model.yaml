@@ -4,14 +4,14 @@ start_frame: 0
 repo_id: lerobot/libero
 video_key: observation.images.image
 output_dir: runs/infer_world_model
-context_len: 10
+context_len: 9
 horizon_len: 8
 dt: 0.1
 batch_size: 1
 subset_size: 1
 k: 1
 integration_steps: 20
-num_vis_frames: 5
+num_vis_frames: 0
 load_pretrained_backbone: true
 wan_vace_model_id: Wan-AI/Wan2.1-VACE-1.3B-diffusers
 wan_vace_subfolder: transformer
@@ -32,7 +32,22 @@ vace_layers:
   - 35
 control_scale: 1.0
 mask_channels: 64
-conditioning_mode: action
+trainable_backbone: full
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules:
+  - to_q
+  - to_k
+  - to_v
+  - to_out.0
+  - ffn.net.0.proj
+  - ffn.net.2
+  - proj_in
+  - proj_out
+conditioning_mode: none
+frame_height: 0
+frame_width: 0
 prompt: ""
 negative_prompt: ""
 guidance_scale: 5.0

@@ -28,6 +28,7 @@ def collate_tensor_dict(batch: list[dict[str, Any]]) -> dict[str, Any]:
 def build_lerobot_dataloader(
     *,
     repo_id: str,
+    episodes: list[int] | tuple[int, ...] | None = None,
     video_key: str,
     context_len: int,
     horizon_len: int,
@@ -54,11 +55,17 @@ def build_lerobot_dataloader(
         raise ImportError("lerobot is required to build the LIBERO dataloader") from exc
 
     deltas = build_frame_deltas(context_len=context_len, horizon_len=horizon_len, dt=dt)
-    dataset = LeRobotDataset(
-        repo_id,
-        delta_timestamps={video_key: deltas},
-        video_backend=video_backend,
-    )
+    dataset_kwargs: dict[str, Any] = {
+        "delta_timestamps": {
+            video_key: deltas,
+            "action": deltas,
+        },
+        "video_backend": video_backend,
+    }
+    if episodes:
+        dataset_kwargs["episodes"] = list(episodes)
+
+    dataset = LeRobotDataset(repo_id, **dataset_kwargs)
     if subset_size > 0:
         dataset = Subset(dataset, range(subset_size))
 

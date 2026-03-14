@@ -31,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-id", default="lerobot/libero")
     parser.add_argument("--video-key", default="observation.images.image")
-    parser.add_argument("--context-len", type=int, default=10, help="l in frame-time")
+    parser.add_argument("--context-len", type=int, default=9, help="l in frame-time")
     parser.add_argument("--horizon-len", type=int, default=8, help="H in frame-time")
     parser.add_argument("--dt", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=1)
