@@ -20,8 +20,8 @@ output_dir: runs/world_model_aloha_fork_pick_up_full_320x240
 # --- frame resolution ---
 # ALOHA `cam_high` is 640x480 (4:3). Use the smallest 4:3 size that stayed
 # visually stable in the upstream Wan VACE resolution sweeps.
-frame_height: 256
-frame_width: 192
+frame_height: 240
+frame_width: 320
 
 # --- temporal window ---
 # Intentionally sample a 10 Hz-equivalent window from the 50 Hz ALOHA stream.
@@ -38,7 +38,7 @@ auto_stop_min_relative_improvement: 0.05
 lr: 0.0001
 weight_decay: 0.0001
 grad_clip_norm: 1.0
-weight_mode: uniform
+weight_mode: clipped_snr
 t_min: 0.0
 t_max: 1.0
 
@@ -83,4 +83,6 @@ overfit_one_batch: false
 # --- logging ---
 log_every: 10
 checkpoint_every: 500
+checkpoint_early_every: 100
+checkpoint_early_until: 500
 seed: 0

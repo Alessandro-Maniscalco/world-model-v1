@@ -1,8 +1,14 @@
 """Unit tests for flow-matching utility helpers."""
 
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 import pytest
 import torch
-from world_model.training.flow_matching import make_noisy_and_target, sample_t, w
+from world_model.training.flow_matching import (
+    make_noisy_and_target,
+    normalized_t_to_scheduler_timestep,
+    sample_t,
+    w,
+)
 
 
 def test_sample_t_shape_and_bounds():
@@ -35,10 +41,10 @@ def test_make_noisy_and_target_matches_linear_path_with_given_noise():
 
     z_t, v_target = make_noisy_and_target(z_clean, t, noise=noise)
 
-    expected_0 = 0.75 * noise[0] + 0.25 * z_clean[0]
-    expected_1 = 0.25 * noise[1] + 0.75 * z_clean[1]
+    expected_0 = 0.75 * z_clean[0] + 0.25 * noise[0]
+    expected_1 = 0.25 * z_clean[1] + 0.75 * noise[1]
     expected_z_t = torch.stack((expected_0, expected_1), dim=0)
-    expected_v = z_clean - noise
+    expected_v = noise - z_clean
 
     assert torch.allclose(z_t, expected_z_t)
     assert torch.allclose(v_target, expected_v)
@@ -54,20 +60,42 @@ def test_make_noisy_and_target_returns_expected_endpoint_states():
     z_zero, _ = make_noisy_and_target(z_clean, t_zero, noise=noise)
     z_one, _ = make_noisy_and_target(z_clean, t_one, noise=noise)
 
-    assert torch.allclose(z_zero, noise)
-    assert torch.allclose(z_one, z_clean)
+    assert torch.allclose(z_zero, z_clean)
+    assert torch.allclose(z_one, noise)
+
+
+def test_normalized_t_to_scheduler_timestep_matches_flowmatch_scale():
+    t = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float32)
+
+    scaled = normalized_t_to_scheduler_timestep(t)
+
+    assert torch.allclose(scaled, torch.tensor([0.0, 500.0, 1000.0]))
+
+
+def test_make_noisy_and_target_matches_euler_scheduler_direction():
+    scheduler = FlowMatchEulerDiscreteScheduler()
+    scheduler.set_timesteps(1)
+    clean = torch.tensor([[2.0]], dtype=torch.float32)
+    noise = torch.tensor([[0.0]], dtype=torch.float32)
+    sigma = torch.tensor([1.0], dtype=torch.float32)
+
+    noisy, target = make_noisy_and_target(clean, sigma, noise=noise)
+    denoised = scheduler.step(target, scheduler.timesteps[0], noisy, return_dict=False)[0]
+
+    assert torch.allclose(noisy, noise)
+    assert torch.allclose(denoised, clean)
 
 
 def test_weight_function_modes():
-    t = torch.tensor([0.0, 0.5, 0.9])
+    t = torch.tensor([0.1, 0.5, 0.9])
 
     uniform = w(t, mode="uniform")
     snr = w(t, mode="snr", eps=1e-6)
     clipped = w(t, mode="clipped_snr", snr_clip_max=2.0, eps=1e-6)
 
     assert torch.allclose(uniform, torch.ones_like(t))
-    assert snr[0] == pytest.approx(0.0, abs=1e-6)
-    assert snr[2] > snr[1]
+    assert snr[0] > snr[1] > snr[2]
+    assert clipped[0] == pytest.approx(2.0, abs=1e-6)
     assert clipped.max() <= 2.0
 
 
@@ -86,6 +114,9 @@ def test_flow_matching_validates_shapes_and_params():
 
     with pytest.raises(ValueError, match="must be a floating tensor"):
         w(torch.tensor([0, 1], dtype=torch.long))
+
+    with pytest.raises(ValueError, match="must be a floating tensor"):
+        normalized_t_to_scheduler_timestep(torch.tensor([0, 1], dtype=torch.long))
 
     with pytest.raises(ValueError, match="Unsupported weight mode"):
         w(torch.tensor([0.1], dtype=torch.float32), mode="bad")

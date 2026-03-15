@@ -13,6 +13,27 @@ of a frozen Wan video VAE. Training keeps the repo's existing chunkwise
 teacher-forcing structure as the outer loop, but replaces the inner denoiser
 with a Wan VACE-compatible backbone vendored from upstream Wan code.
 
+## Optimizer control plane
+
+The staged training optimizer is now split into two explicit roles:
+
+1. Codex planning and analysis:
+   - `scripts/train/training_optimizer.py --planner codex` uses the local
+     `codex` CLI, authenticated through ChatGPT sign-in, to decide whether the
+     next loop action should be `run_experiment`, `inspect_artifact`,
+     `apply_repo_edit`, or `stop`
+   - Codex can inspect comparison artifacts and propose validated repo edits,
+     including training-logic fixes, but it does not directly own the
+     long-running training/eval subprocesses
+2. Deterministic controller execution:
+   - `src/world_model/optimization/controller.py` remains the executor for
+     actual training, checkpoint sweep, plausibility checks, state persistence,
+     budget enforcement, lockfiles, and edit rollback on failed validation
+
+This keeps the autonomous loop auditable: model judgment is used only for
+planning and analysis, while execution, validation, and recovery stay local and
+deterministic.
+
 Canonical checkpoint format:
 
 1. base transformer weights come from Hugging Face Diffusers
@@ -584,6 +605,60 @@ conditional prediction.
    - run the Wan VACE adapter forward
    - compute flow-matching loss on only the active chunk
 
+The trainer minimizes:
+
+$$
+\mathcal{L}(\theta)
+=
+\mathbb{E}_{z_{\mathrm{past}}, z_{\mathrm{future}}, a, \{t_j\}_{j=0}^{K}}
+\left[
+\frac{
+\sum_{j=0}^{K}
+w(t_j)
+\left\|
+u_\theta\!\left(
+\tilde{z}_{j:}^{(j)},
+z_{\mathrm{past}},
+z_{<j},
+a_{j:},
+\tau_j,
+M_j
+\right)
+\vphantom{\tilde{z}_{j:}^{(j)}}_{[:\Delta_j]}
+- v_j
+\right\|_2^2
+}{
+\sum_{j=0}^{K} w(t_j) N_j
+}
+\right].
+$$
+
+For the active future chunk $z_j$, the repo uses the Wan-compatible
+flow-matching path
+
+$$
+\tilde{z}_j = (1 - t_j) z_j + t_j \epsilon_j,
+\qquad
+v_j = \epsilon_j - z_j,
+\qquad
+\tau_j = 1000\, t_j,
+$$
+
+where $\epsilon_j \sim \mathcal{N}(0, I)$, $t_j \in [0,1]$ is the normalized
+noise level, and $\tau_j$ is the scheduler-scale timestep passed into the Wan
+backbone. Therefore $t_j = 0$ means a clean latent chunk and $t_j = 1$ means a
+pure-noise chunk.
+
+Chunk stage $j$ supervises only the active future chunk of length $\Delta_j$,
+with $N_j$ equal to the number of latent elements in that chunk.
+$\tilde{z}_{j:}^{(j)}$ is the future suffix whose first chunk is noised at
+level $t_j$ and whose later suffix remains clean, $z_{<j}$ are the earlier
+future chunks exposed through teacher forcing via `observed_video`, $a_{j:}$
+are the aligned action tokens sliced from the active chunk onward, and $M_j$
+is the block-causal attention mask for that stage. In implementation, the loss
+is a weighted mean squared error over all supervised chunk elements, not a
+plain `1 / K` average over chunks.
+
 ### Inference
 
 Inference stays open-loop:
@@ -607,6 +682,17 @@ Inference stays open-loop:
 Unlike training, no future teacher forcing is available during inference. Only
 real context and previously generated predictions can populate the control
 stream.
+
+At inference, the scheduler integrates the learned flow field with Euler-style
+updates
+
+$$
+z_{n+1} = z_n + (\sigma_{n+1} - \sigma_n)\,\hat{v}_\theta(z_n, \sigma_n),
+$$
+
+with $\sigma_{n+1} < \sigma_n$. This is why the training target uses
+$v = \epsilon - z$: as the scheduler decreases the noise level, that sign
+convention moves the sample from noise toward clean data.
 
 When a smoke-check script sets `num_inference_steps=50`, the `50` means:
 
@@ -655,6 +741,11 @@ Local code should own:
 2. VACE control-tensor construction from latent videos and masks
 3. chunkwise teacher-forcing schedule and loss
 4. training/inference entrypoints and config schema/validation
+5. the experiment controller that stages train/eval/check loops around the
+   canonical entrypoints, records findings back into markdown memory, and
+   stores manual comparison-video review guidance alongside each staged result
+6. a bounded self-edit layer for controller policy, with applied source edits
+   logged under `## Controller Edits` in the optimizer memory
 
 Configuration ownership:
 

@@ -16,6 +16,7 @@ DEFAULT_INFER_CONFIG_PATH = REPO_ROOT / "configs" / "eval" / "infer_world_model.
 class TrainScriptConfig:
     """Configuration for world-model training entrypoint."""
 
+    resume_from: str = ""
     video_path: str = ""
     start_frame: int = 0
     repo_id: str = "lerobot/libero"
@@ -70,6 +71,8 @@ class TrainScriptConfig:
     num_workers: int = 0
     log_every: int = 10
     checkpoint_every: int = 100
+    checkpoint_early_every: int = 0
+    checkpoint_early_until: int = 0
     subset_size: int = 0
     overfit_one_batch: bool = False
     seed: int = 0

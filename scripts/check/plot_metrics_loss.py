@@ -2,7 +2,7 @@
 
 source .venv/bin/activate
 python scripts/check/plot_metrics_loss.py \
-  runs/world_model_aloha_fork_pick_up_episode0_20k/metrics.jsonl \
+  runs/test_400steps_320x240_episode0_lora8_action/metrics.jsonl \
   --rolling-window 50
 """
 

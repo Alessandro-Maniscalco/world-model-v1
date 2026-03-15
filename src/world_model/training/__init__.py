@@ -13,6 +13,12 @@ from world_model.training.flow_matching import (
     sample_t,
     w,
 )
+from world_model.training.validation import (
+    TrainingStageSummary,
+    format_stage_summary,
+    load_metrics_rows,
+    validate_training_stage,
+)
 
 __all__ = [
     "sample_t",
@@ -24,4 +30,8 @@ __all__ = [
     "train_chunkwise_batch",
     "save_checkpoint",
     "append_jsonl",
+    "TrainingStageSummary",
+    "load_metrics_rows",
+    "validate_training_stage",
+    "format_stage_summary",
 ]

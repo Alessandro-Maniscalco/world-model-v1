@@ -41,6 +41,12 @@ Train:
 python scripts/train/world_model.py --config configs/train/world_model.yaml
 ```
 
+Training optimization controller:
+
+```bash
+python scripts/train/training_optimizer.py --train-config configs/train/aloha_fork_pick_up.yaml --memory-path docs/training_optimizer.md
+```
+
 Local overfit smoke run:
 
 ```bash

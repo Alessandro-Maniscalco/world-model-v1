@@ -3,10 +3,9 @@
 Flags frame-level failures such as near-black output, severe color drift, and
 posterized low-palette artifacts, then saves a JSON report.
 
-This is a PASS:
 python scripts/check/check_generated_video_plausibility.py \
   --reference-video runs/check_aloha_fork_preview_start30/preview.mp4 \
-  --generated-video runs/check_wan_vace_base_resolution_sweep/320x240.mp4 \
+  --generated-video runs/check_wan_vace_local_repo_resolution_sweep/320x240.mp4  \
   --resize-reference 
 """
 

@@ -8,6 +8,7 @@ import torch.nn as nn
 import pytest
 
 from world_model.eval import infer_future_videos_chunkwise
+from world_model.eval.inference import _build_rollout_boundaries, _select_chunk_conditioning_tokens
 
 
 class _RecordingVideoInferenceModel(nn.Module):
@@ -40,6 +41,44 @@ class _RecordingVideoInferenceModel(nn.Module):
             }
         )
         return -noisy_future_video
+
+
+class _TokenDrivenInferenceModel(nn.Module):
+    """Return a constant velocity field derived from the active token values."""
+
+    def forward(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor | None,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Fill the latent chunk with the mean token value."""
+        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        value = action_tokens.mean(dim=(1, 2)).view(-1, 1, 1, 1, 1)
+        return value.expand_as(noisy_future_video)
+
+
+class _EchoScheduler:
+    """Return the model output as the next latent state."""
+
+    def __init__(self) -> None:
+        """Initialize the scheduler timestep storage."""
+        self.timesteps = torch.tensor([], dtype=torch.float32)
+
+    def set_timesteps(self, num_inference_steps: int, device: torch.device) -> None:
+        """Expose a simple descending timestep tensor."""
+        del num_inference_steps
+        self.timesteps = torch.tensor([0.0], device=device, dtype=torch.float32)
+
+    def step(self, model_output: torch.Tensor, t: torch.Tensor, sample: torch.Tensor, **kwargs):
+        """Return the predicted velocity directly for deterministic testing."""
+        del t, sample, kwargs
+        return (model_output.clone(),)
 
 
 def test_infer_future_videos_chunkwise_shapes_and_calls():
@@ -159,4 +198,92 @@ def test_infer_future_videos_chunkwise_rejects_misaligned_chunk_conditioning() -
             k=1,
             integration_steps=5,
             chunk_conditioning=True,
+        )
+
+
+def test_infer_future_videos_chunkwise_applies_classifier_free_guidance() -> None:
+    """Combine conditional and unconditional predictions using the CFG equation."""
+    model = _TokenDrivenInferenceModel()
+    scheduler = _EchoScheduler()
+
+    out = infer_future_videos_chunkwise(
+        model,
+        z_past_video=torch.zeros(1, 1, 1, 1, 1),
+        future_steps=2,
+        cross_attention_tokens=torch.full((1, 2, 3), 3.0),
+        negative_cross_attention_tokens=torch.full((1, 2, 3), 1.0),
+        guidance_scale=2.0,
+        chunk_conditioning=True,
+        single_chunk_rollout=True,
+        block_causal_attention=False,
+        scheduler=scheduler,
+        k=1,
+        integration_steps=1,
+    )
+
+    assert torch.allclose(out, torch.full_like(out, 5.0))
+
+
+def test_select_chunk_conditioning_tokens_slices_multi_chunk_window() -> None:
+    """Select only the token window belonging to the active chunk when chunking is enabled."""
+    tokens = torch.arange(1 * 6 * 2, dtype=torch.float32).reshape(1, 6, 2)
+
+    chunk_tokens = _select_chunk_conditioning_tokens(tokens, start=2, end=5, chunk_conditioning=True)
+
+    assert torch.equal(chunk_tokens, tokens[:, 2:5])
+
+
+def test_build_rollout_boundaries_matches_single_and_k_plus_one_modes() -> None:
+    """Return the expected chunk boundaries for chunked and single-chunk rollout."""
+    assert _build_rollout_boundaries(
+        future_steps=8,
+        k=1,
+        single_chunk_rollout=False,
+        device=torch.device("cpu"),
+    ) == ((0, 4), (4, 8))
+    assert _build_rollout_boundaries(
+        future_steps=8,
+        k=3,
+        single_chunk_rollout=True,
+        device=torch.device("cpu"),
+    ) == ((0, 8),)
+
+
+def test_infer_future_videos_chunkwise_rejects_batch_and_guidance_mismatches() -> None:
+    """Validate batch-aligned tokens, negative tokens, guidance scale, and chunk count."""
+    model = _RecordingVideoInferenceModel()
+
+    with pytest.raises(ValueError, match="batch size must match"):
+        infer_future_videos_chunkwise(
+            model,
+            z_past_video=torch.randn(1, 16, 3, 8, 8),
+            future_steps=4,
+            cross_attention_tokens=torch.randn(2, 4, 16),
+            k=1,
+        )
+    with pytest.raises(ValueError, match="negative_cross_attention_tokens must match"):
+        infer_future_videos_chunkwise(
+            model,
+            z_past_video=torch.randn(1, 16, 3, 8, 8),
+            future_steps=4,
+            cross_attention_tokens=torch.randn(1, 4, 16),
+            negative_cross_attention_tokens=torch.randn(1, 3, 16),
+            k=1,
+        )
+    with pytest.raises(ValueError, match="guidance_scale must be >= 1.0"):
+        infer_future_videos_chunkwise(
+            model,
+            z_past_video=torch.randn(1, 16, 3, 8, 8),
+            future_steps=4,
+            cross_attention_tokens=torch.randn(1, 4, 16),
+            guidance_scale=0.5,
+            k=1,
+        )
+    with pytest.raises(ValueError, match="k must be >= 1"):
+        infer_future_videos_chunkwise(
+            model,
+            z_past_video=torch.randn(1, 16, 3, 8, 8),
+            future_steps=4,
+            cross_attention_tokens=torch.randn(1, 4, 16),
+            k=0,
         )

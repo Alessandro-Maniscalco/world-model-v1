@@ -15,6 +15,7 @@ from world_model.masking import build_block_causal_mask
 
 
 WeightMode = Literal["uniform", "snr", "clipped_snr"]
+DEFAULT_NUM_TRAIN_TIMESTEPS = 1000.0
 
 
 class ChunkwiseVideoVelocityModel(Protocol):
@@ -79,17 +80,17 @@ def make_noisy_and_target(
     *,
     noise: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Construct noisy state `z_t` and target velocity `v_target`.
+    """Construct scheduler-aligned noisy state `z_t` and target velocity.
 
-    Uses a straight-line interpolation path between standard Gaussian noise
-    (`x_0`) and clean data (`x_1 = z_clean`):
+    Uses the FlowMatch Euler scheduler parameterization where normalized
+    timestep `t` is the current noise scale:
 
-    `z_t = (1 - t) * x_0 + t * x_1`
-    `v_target = x_1 - x_0`
+    `z_t = (1 - t) * z_clean + t * noise`
+    `v_target = noise - z_clean`
 
     Args:
         z_clean: Clean latent target with shape `[B, ...]`.
-        t: Per-sample timesteps with shape `[B]`.
+        t: Per-sample normalized scheduler timesteps with shape `[B]`.
         noise: Optional pre-sampled noise tensor `[B, ...]`.
     """
     if z_clean.ndim < 2:
@@ -112,9 +113,22 @@ def make_noisy_and_target(
     view_shape = (z_clean.shape[0],) + (1,) * (z_clean.ndim - 1)
     t_broadcast = t.view(view_shape)
 
-    z_t = (1.0 - t_broadcast) * noise + t_broadcast * z_clean
-    v_target = z_clean - noise
+    z_t = (1.0 - t_broadcast) * z_clean + t_broadcast * noise
+    v_target = noise - z_clean
     return z_t, v_target
+
+
+def normalized_t_to_scheduler_timestep(
+    t: torch.Tensor,
+    *,
+    num_train_timesteps: float = DEFAULT_NUM_TRAIN_TIMESTEPS,
+) -> torch.Tensor:
+    """Convert normalized FlowMatch timesteps to the scheduler scale used by Wan."""
+    if not t.is_floating_point():
+        raise ValueError("t must be a floating tensor")
+    if num_train_timesteps <= 0:
+        raise ValueError(f"num_train_timesteps must be positive, got {num_train_timesteps}")
+    return t * float(num_train_timesteps)
 
 
 def w(
@@ -130,7 +144,7 @@ def w(
         t: Timesteps in `[0, 1]`, shape `[B]` or any tensor shape.
         mode: Weighting mode.
             - `uniform`: constant 1.
-            - `snr`: `t / (1 - t + eps)`.
+            - `snr`: `(1 - t) / (t + eps)`.
             - `clipped_snr`: same as `snr`, clipped to `snr_clip_max`.
         snr_clip_max: Upper clip used by `clipped_snr`.
         eps: Numerical stability term.
@@ -143,7 +157,7 @@ def w(
     if mode == "uniform":
         return torch.ones_like(t)
 
-    snr = t / (1.0 - t + eps)
+    snr = (1.0 - t) / (t + eps)
     if mode == "snr":
         return snr
     if mode == "clipped_snr":
@@ -281,7 +295,7 @@ def _chunkwise_teacher_forcing_video_loss(
             noisy_future_video=noisy_suffix,
             observed_video=observed_video,
             action_tokens=action_tokens[:, start:],
-            timestep_t=t,
+            timestep_t=normalized_t_to_scheduler_timestep(t),
             block_causal_attention_mask=attn_mask,
             observed_mask=observed_mask,
             control_hidden_states_scale=None,

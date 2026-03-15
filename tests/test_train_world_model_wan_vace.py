@@ -91,6 +91,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     parser = train_script._build_parser(load_train_config())
     option_strings = {option for action in parser._actions for option in action.option_strings}
 
+    assert "--resume-from" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -167,14 +168,116 @@ def test_train_script_accepts_disabled_auto_stop() -> None:
     train_script._validate_auto_stop_config(TrainScriptConfig())
 
 
-def test_train_script_rejects_invalid_auto_stop_config() -> None:
-    """Reject impossible blockwise continuation settings before training starts."""
+def test_train_script_can_resume_training_state(tmp_path: Path) -> None:
+    """Restore model, action encoder, optimizer, and completed step from a saved checkpoint."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    cfg = TrainScriptConfig(
+        conditioning_mode="action",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    source_model = train_script.build_model_from_config(cfg, prepared)
+    source_action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, source_model)
+    source_parameters = train_script._configure_trainable_parameters(cfg, source_model, source_action_encoder)
+    source_optimizer = torch.optim.AdamW(source_parameters, lr=1e-3)
+
+    for parameter in source_model.parameters():
+        parameter.data.fill_(0.25)
+    for parameter in source_action_encoder.parameters():
+        parameter.data.fill_(-0.5)
+
+    checkpoint_path = tmp_path / "resume.pt"
+    torch.save(
+        {
+            "step": 123,
+            "model_state_dict": source_model.state_dict(),
+            "action_encoder_state_dict": source_action_encoder.state_dict(),
+            "optimizer_state_dict": source_optimizer.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    resumed_model = train_script.build_model_from_config(cfg, prepared)
+    resumed_action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, resumed_model)
+    resumed_parameters = train_script._configure_trainable_parameters(cfg, resumed_model, resumed_action_encoder)
+    resumed_optimizer = torch.optim.AdamW(resumed_parameters, lr=1e-3)
+
+    checkpoint = train_script._load_training_checkpoint(checkpoint_path)
+    resumed_step = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=resumed_model,
+        action_encoder=resumed_action_encoder,
+        optimizer=resumed_optimizer,
+    )
+    train_script._optimizer_state_to_device(resumed_optimizer, device=torch.device("cpu"))
+
+    assert resumed_step == 123
+    first_model_key = next(iter(source_model.state_dict()))
+    first_action_key = next(iter(source_action_encoder.state_dict()))
+    assert torch.allclose(resumed_model.state_dict()[first_model_key], source_model.state_dict()[first_model_key])
+    assert torch.allclose(
+        resumed_action_encoder.state_dict()[first_action_key],
+        source_action_encoder.state_dict()[first_action_key],
+    )
+
+
+def test_train_script_rejects_missing_resume_checkpoint(tmp_path: Path) -> None:
+    """Fail clearly when --resume-from points to a nonexistent file."""
+    train_script = _load_train_script_module()
+    missing_path = tmp_path / "missing.pt"
+
+    with pytest.raises(FileNotFoundError, match="Training checkpoint not found"):
+        train_script._load_training_checkpoint(missing_path)
+
+
+def test_train_script_allows_auto_stop_check_beyond_max_steps() -> None:
+    """Allow auto-stop intervals longer than the configured training run."""
     train_script = _load_train_script_module()
 
-    with pytest.raises(ValueError, match="max_steps must be >= auto_stop_check_every"):
-        train_script._validate_auto_stop_config(
-            TrainScriptConfig(max_steps=1000, auto_stop_check_every=5000),
-        )
+    train_script._validate_auto_stop_config(
+        TrainScriptConfig(max_steps=1000, auto_stop_check_every=5000),
+    )
+
+
+def test_train_script_uses_piecewise_checkpoint_schedule_when_configured() -> None:
+    """Save more frequently during early steps before falling back to the long-run interval."""
+    train_script = _load_train_script_module()
+    cfg = TrainScriptConfig(
+        checkpoint_every=500,
+        checkpoint_early_every=100,
+        checkpoint_early_until=500,
+    )
+
+    save_steps = [step for step in range(1, 1601) if train_script._should_save_checkpoint(cfg, step)]
+
+    assert save_steps == [100, 200, 300, 400, 500, 1000, 1500]
+
+
+def test_train_script_keeps_legacy_checkpoint_schedule_when_early_window_is_disabled() -> None:
+    """Preserve the old fixed-interval checkpoint behavior by default."""
+    train_script = _load_train_script_module()
+    cfg = TrainScriptConfig(checkpoint_every=100)
+
+    save_steps = [step for step in range(1, 351) if train_script._should_save_checkpoint(cfg, step)]
+
+    assert save_steps == [100, 200, 300]
 
 
 def test_train_script_continues_after_first_auto_stop_block() -> None:

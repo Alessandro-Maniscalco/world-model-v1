@@ -31,12 +31,13 @@ class _RecordingVideoModel(nn.Module):
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Record structured video-path inputs and return a scaled prediction."""
-        del action_tokens, timestep_t, observed_mask, control_hidden_states_scale
+        del action_tokens, observed_mask, control_hidden_states_scale
         self.calls.append(
             {
                 "observed_frames": torch.tensor(observed_video.shape[2]),
                 "future_frames": torch.tensor(noisy_future_video.shape[2]),
                 "mask": block_causal_attention_mask.detach().clone(),
+                "timestep_t": timestep_t.detach().clone(),
             }
         )
         return self.scale * noisy_future_video
@@ -70,6 +71,8 @@ def test_chunkwise_teacher_forcing_loss_supports_structured_latent_videos() -> N
     assert model.calls[1]["future_frames"].item() == 4
     assert model.calls[0]["mask"].shape == (11, 11)
     assert model.calls[1]["mask"].shape == (11, 11)
+    assert torch.allclose(model.calls[0]["timestep_t"], torch.full((2,), 300.0))
+    assert torch.allclose(model.calls[1]["timestep_t"], torch.full((2,), 300.0))
     assert model.scale.grad is not None
     assert model.scale.grad.abs().item() > 0.0
 
@@ -149,6 +152,33 @@ def test_train_chunkwise_batch_structured_video_grad_norm_includes_action_encode
         k=1,
         t_min=0.5,
         t_max=0.5,
+    )
+
+    assert metrics.loss > 0.0
+    assert metrics.grad_norm > 0.0
+
+
+def test_train_chunkwise_batch_reports_unclipped_grad_norm_when_disabled() -> None:
+    """Use the explicit unclipped grad-norm branch when gradient clipping is disabled."""
+    torch.manual_seed(0)
+    model = _RecordingVideoModel()
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(action_encoder.parameters()),
+        lr=1e-2,
+    )
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 8, 8, 8),
+        a_plan=torch.randn(2, 8, 6),
+        k=1,
+        t_min=0.5,
+        t_max=0.5,
+        grad_clip_norm=None,
     )
 
     assert metrics.loss > 0.0

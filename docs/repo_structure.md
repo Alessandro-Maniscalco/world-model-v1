@@ -20,9 +20,15 @@ training path on a 16 GB workstation GPU.
 
 ## Documentation
 
-- `docs/training.md`
-Persistent notes for the current training path, including bf16 behavior,
-latent-time schedule constraints, and the recommended local overfit command.
+- `docs/training_optimizer.md`
+Persistent experiment memory for the current training-optimization loop. The
+controller appends `[controller ...]` findings to `Current Signal`, rewrites
+the current controller recommendation under `Next Work`, and logs completed
+stages under `Training runs`, including comparison-video paths plus manual
+visual-review commands for the saved sweep artifacts. In Codex mode it also
+stores the latest model-side planning summary under `Codex Analysis` and keeps
+the audit trail for bounded controller or validated repo edits under
+`Controller Edits`.
 
 ## Source Packages
 
@@ -82,6 +88,26 @@ Owns block-causal attention mask construction.
     gradient clipping across both the Wan VACE backbone and the action-token
     encoder, and handles metrics/checkpoints.
 
+- `src/world_model/optimization/`
+Owns the staged training-optimization controller helpers. This layer reads
+`docs/training_optimizer.md`, chooses the next conservative experiment,
+launches the canonical train/eval/check scripts, stores machine-readable state
+under `runs/training_optimizer/`, and writes concise findings back into the
+markdown memory file. It now supports either the deterministic rule-based
+planner or a local ChatGPT-authenticated Codex planner with budgets, lockfiles,
+artifact inspection, and validated repo edits.
+  - `controller.py`: Parses `Next Work` hints from the optimizer markdown into
+    staged experiment plans, resumes or starts the selected branch, runs the
+    train/sweep/plausibility checks for one stage, summarizes the result,
+    records comparison-video review guidance, can either follow the
+    deterministic recommendation path or run a Codex-authenticated
+    decide/inspect/edit/run/stop loop, can rewrite its bounded controller-policy
+    block when repeated outcomes suggest a better process, and writes the next
+    conservative recommendation into both JSON state and markdown memory.
+  - `codex_runner.py`: Wraps the local `codex` CLI for fail-closed
+    ChatGPT-login checks plus structured `codex exec` calls with JSON schema
+    enforcement and optional image inputs for artifact inspection.
+
 - `src/world_model/eval/`
 Owns inference-time chunkwise sampling for structured latent videos via
 `infer_future_videos_chunkwise`, including flow-matching scheduler stepping,
@@ -96,6 +122,15 @@ VACE backbone, configured conditioning encoder, and chunkwise flow-matching
 loop. Also owns local-video overfit mode, latent-time schedule validation,
 automatic bf16/fp16 selection, and the `full`/`vace`/`head` trainable-backbone
 policies.
+
+- `scripts/train/training_optimizer.py`
+Canonical optimization-loop controller. Reuses the existing training,
+validation, checkpoint sweep, and plausibility scripts; plans one staged
+experiment at a time from `docs/training_optimizer.md`; persists structured
+history to `runs/training_optimizer/controller_state.json`; and updates the
+markdown memory with the latest finding plus next recommendation. The CLI now
+exposes `--planner codex|deterministic` and Codex-loop budget flags for real
+runs, Codex calls, failures, edit cycles, and wall-clock limits.
 
 - `scripts/train/infer_world_model.py`
 Canonical Wan VACE inference and visualization entrypoint. Loads the pretrained

@@ -1,5 +1,6 @@
 """Tests for block-causal attention mask behavior."""
 
+import pytest
 import torch
 
 from world_model.chunking import build_full_sequence_chunk_ids
@@ -40,3 +41,18 @@ def test_block_causal_mask_works_with_schedule_chunk_ids():
     assert mask.shape == (8, 8)
     # Rows up to current chunk (past + future chunk 0) cannot attend future chunk 1.
     assert mask[:6, 6:].all()
+
+
+def test_block_causal_mask_rejects_invalid_input_shapes() -> None:
+    """Validate chunk-id rank, padding shape, padding length, and mask format."""
+    with pytest.raises(ValueError, match="chunk_ids must have shape \\[L\\]"):
+        build_block_causal_mask(torch.zeros(2, 2, dtype=torch.long))
+    with pytest.raises(ValueError, match="padding_mask must have shape \\[B,L\\]"):
+        build_block_causal_mask(torch.zeros(2, dtype=torch.long), padding_mask=torch.zeros(2, dtype=torch.bool))
+    with pytest.raises(ValueError, match="does not match chunk_ids"):
+        build_block_causal_mask(
+            torch.zeros(2, dtype=torch.long),
+            padding_mask=torch.zeros(1, 3, dtype=torch.bool),
+        )
+    with pytest.raises(ValueError, match="Unsupported mask_format"):
+        build_block_causal_mask(torch.zeros(2, dtype=torch.long), mask_format="bad")  # type: ignore[arg-type]

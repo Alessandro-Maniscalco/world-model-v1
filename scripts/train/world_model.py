@@ -67,6 +67,7 @@ def _config_parser() -> argparse.ArgumentParser:
 def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     """Create full CLI parser using dataclass defaults."""
     parser = argparse.ArgumentParser(description=__doc__, parents=[_config_parser()])
+    parser.add_argument("--resume-from", default=defaults.resume_from, help="Optional training checkpoint .pt to resume model, action encoder, optimizer, and step state.")
     parser.add_argument("--video-path", default=defaults.video_path, help="Optional local video file for fast single-clip training.")
     parser.add_argument("--start-frame", type=int, default=defaults.start_frame)
     parser.add_argument("--repo-id", default=defaults.repo_id)
@@ -123,6 +124,8 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
     parser.add_argument("--log-every", type=int, default=defaults.log_every)
     parser.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
+    parser.add_argument("--checkpoint-early-every", type=int, default=defaults.checkpoint_early_every)
+    parser.add_argument("--checkpoint-early-until", type=int, default=defaults.checkpoint_early_until)
     parser.add_argument("--subset-size", type=int, default=defaults.subset_size, help="0 uses full dataset")
     parser.add_argument("--overfit-one-batch", action="store_true", default=defaults.overfit_one_batch)
     parser.add_argument("--no-overfit-one-batch", dest="overfit_one_batch", action="store_false")
@@ -185,11 +188,12 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "auto_stop_min_relative_improvement must be >= 0, got "
             f"{cfg.auto_stop_min_relative_improvement}."
         )
-    if cfg.auto_stop_check_every > 0 and cfg.max_steps < cfg.auto_stop_check_every:
-        raise ValueError(
-            "max_steps must be >= auto_stop_check_every when auto-stop is enabled; got "
-            f"max_steps={cfg.max_steps}, auto_stop_check_every={cfg.auto_stop_check_every}."
-        )
+    if cfg.checkpoint_every < 0:
+        raise ValueError(f"checkpoint_every must be >= 0, got {cfg.checkpoint_every}.")
+    if cfg.checkpoint_early_every < 0:
+        raise ValueError(f"checkpoint_early_every must be >= 0, got {cfg.checkpoint_early_every}.")
+    if cfg.checkpoint_early_until < 0:
+        raise ValueError(f"checkpoint_early_until must be >= 0, got {cfg.checkpoint_early_until}.")
 
 
 def _relative_block_improvement(*, previous_mean_loss: float, current_mean_loss: float) -> float:
@@ -213,6 +217,72 @@ def _should_continue_after_block(
         current_mean_loss=block_mean_losses[-1],
     )
     return improvement >= min_relative_improvement, improvement
+
+
+def _should_save_checkpoint(cfg: TrainScriptConfig, step: int) -> bool:
+    """Decide whether the current step should emit a checkpoint."""
+    if step <= 0:
+        return False
+    if (
+        cfg.checkpoint_early_every > 0
+        and step <= cfg.checkpoint_early_until
+        and step % cfg.checkpoint_early_every == 0
+    ):
+        return True
+    if cfg.checkpoint_every <= 0:
+        return False
+    return step % cfg.checkpoint_every == 0
+
+
+def _load_training_checkpoint(path: str | Path) -> dict[str, object]:
+    """Load one training checkpoint payload from disk onto CPU."""
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Training checkpoint not found: {checkpoint_path}")
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError("Training checkpoint payload must be a dict")
+    return payload
+
+
+def _resume_training_state(
+    *,
+    checkpoint: dict[str, object],
+    model: nn.Module,
+    action_encoder: nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    """Restore training modules from checkpoint and return the completed step."""
+    model_state = checkpoint.get("model_state_dict")
+    if not isinstance(model_state, dict):
+        raise ValueError("Checkpoint missing model_state_dict")
+    action_state = checkpoint.get("action_encoder_state_dict")
+    if not isinstance(action_state, dict):
+        raise ValueError("Checkpoint missing action_encoder_state_dict")
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if not isinstance(optimizer_state, dict):
+        raise ValueError("Checkpoint missing optimizer_state_dict")
+
+    step = checkpoint.get("step")
+    if not isinstance(step, int):
+        raise ValueError("Checkpoint missing integer step")
+    if step < 0:
+        raise ValueError(f"Checkpoint step must be >= 0, got {step}")
+
+    model.load_state_dict(model_state)
+    action_encoder.load_state_dict(action_state)
+    optimizer.load_state_dict(optimizer_state)
+    return step
+
+
+def _optimizer_state_to_device(optimizer: torch.optim.Optimizer, *, device: torch.device) -> None:
+    """Move optimizer state tensors to the active device after a CPU checkpoint load."""
+    for state in optimizer.state.values():
+        if not isinstance(state, dict):
+            continue
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device=device)
 
 
 def _configure_trainable_parameters(
@@ -322,6 +392,8 @@ def main() -> None:
         f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}"
     )
     print(f"Training dtype: {runtime_dtype}")
+    if cfg.resume_from:
+        print(f"Resume checkpoint: {cfg.resume_from}")
 
     vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
     loader = None
@@ -384,10 +456,25 @@ def main() -> None:
     print(f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)")
     optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
+    resumed_step = 0
+    if cfg.resume_from:
+        checkpoint = _load_training_checkpoint(cfg.resume_from)
+        resumed_step = _resume_training_state(
+            checkpoint=checkpoint,
+            model=model,
+            action_encoder=action_encoder,
+            optimizer=optimizer,
+        )
+        del checkpoint
+        _optimizer_state_to_device(optimizer, device=device)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        print(f"Resumed training state from step={resumed_step:06d}")
+
     cached_batch = first_batch if (cfg.overfit_one_batch or cfg.video_path) else None
 
     overfit_start_loss = None
-    completed_steps = 0
+    completed_steps = resumed_step
     block_losses: list[float] = []
     block_mean_losses: list[float] = []
     if cfg.overfit_one_batch:
@@ -407,7 +494,13 @@ def main() -> None:
         )
         print(f"Overfit baseline loss: {overfit_start_loss:.6f}")
 
-    for step in itertools.count(start=1):
+    if cfg.max_steps <= resumed_step:
+        print(
+            f"Requested max_steps={cfg.max_steps} is not greater than resumed step={resumed_step}; "
+            "skipping optimizer updates."
+        )
+
+    for step in itertools.count(start=resumed_step + 1):
         if step > cfg.max_steps:
             break
         started = time.time()
@@ -468,7 +561,7 @@ def main() -> None:
                 f"time={step_time_s:.3f}s chunks={metrics.per_chunk_losses}"
             )
 
-        if step % cfg.checkpoint_every == 0:
+        if _should_save_checkpoint(cfg, step):
             path = save_checkpoint(
                 output_dir=output_dir,
                 step=step,

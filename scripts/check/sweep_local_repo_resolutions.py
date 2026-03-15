@@ -5,6 +5,11 @@ Supports pretrained local weights or a saved checkpoint overlay.
 python scripts/check/sweep_local_repo_resolutions.py \
   --mode base \
   --resolutions 320x240
+
+python scripts/check/sweep_local_repo_resolutions.py \
+  --mode checkpoint \
+  --checkpoint runs/test_400steps_320x240_episode0_lora8_action/checkpoints/step_0000300.pt \
+  --resolutions 320x240
 """
 
 from __future__ import annotations
@@ -41,12 +46,11 @@ from world_model.data.temporal import WAN_FRAME_GROUP_SIZE
 from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
 from world_model.config import load_train_config
-from world_model.models.wan_vace_conditioning import build_vace_control_tensor
-from world_model.models.wan_vace_factory import build_wan_vace_runtime_modules
+from world_model.models.wan_vace_factory import _attach_lora_adapters, build_wan_vace_runtime_modules
 from world_model.vendor.wan import WanVACETransformer3DModel
 
 
-DEFAULT_OUTPUT_DIR = Path("runs/check_wan_vace_local_repo_resolution_sweep")
+DEFAULT_SWEEP_OUTPUT_DIR = Path("runs/sweep_local")
 DEFAULT_RESOLUTIONS = (
     "320x240",
     "384x288",
@@ -61,7 +65,7 @@ DEFAULT_K = 1
 DEFAULT_DEVICE = "auto"
 DEFAULT_ACTION_SOURCE = "auto"
 DEFAULT_FPS = 10
-DEFAULT_INFERENCE_STEPS = 20
+DEFAULT_INFERENCE_STEPS = 50
 DEFAULT_BASE_PROMPT = ""
 DEFAULT_BASE_NEGATIVE_PROMPT = ""
 DEFAULT_BASE_GUIDANCE_SCALE = 5.0
@@ -74,7 +78,15 @@ def _parse_args() -> argparse.Namespace:
     """Parse CLI overrides for the local-resolution sweep."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("base", "checkpoint"), default=DEFAULT_MODE)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output directory override. Defaults to "
+            f"{DEFAULT_SWEEP_OUTPUT_DIR} for both modes."
+        ),
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -112,7 +124,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint path for --mode checkpoint.")
     parser.add_argument("--repo-id", default=DEFAULT_CHECKPOINT_REPO_ID, help="Dataset repo used for checkpoint mode.")
     parser.add_argument("--episode-index", type=int, default=0, help="Episode index used for checkpoint mode.")
-    parser.add_argument("--start-frame", type=int, default=0, help="Episode-local start frame used for checkpoint mode.")
+    parser.add_argument("--start-frame", type=int, default=60, help="Episode-local start frame used for checkpoint mode.")
     parser.add_argument("--video-key", default=DEFAULT_CHECKPOINT_VIDEO_KEY, help="Camera key used for checkpoint mode.")
     parser.add_argument("--context-len", type=int, default=DEFAULT_CONTEXT_LEN)
     parser.add_argument("--horizon-len", type=int, default=DEFAULT_HORIZON_LEN)
@@ -151,6 +163,49 @@ def _parse_resolution(spec: str) -> tuple[int, int]:
             f"Resolution must be divisible by 16 for Wan VACE, got {width}x{height}."
         )
     return width, height
+
+
+def _checkpoint_run_stem(checkpoint_path: Path) -> str:
+    """Derive a stable output stem from the checkpoint run directory and step."""
+    checkpoint_stem = checkpoint_path.stem
+    if checkpoint_path.parent.name == "checkpoints" and checkpoint_path.parent.parent != checkpoint_path.parent:
+        return f"{checkpoint_path.parent.parent.name}_{checkpoint_stem}"
+    if checkpoint_path.parent.name:
+        return f"{checkpoint_path.parent.name}_{checkpoint_stem}"
+    return checkpoint_stem
+
+
+def _resolve_output_root(*, mode: str, output_dir: Path | None) -> Path:
+    """Choose the effective output root for the active sweep mode."""
+    if output_dir is not None:
+        return output_dir
+    return DEFAULT_SWEEP_OUTPUT_DIR
+
+
+def _resolve_output_artifacts(
+    *,
+    mode: str,
+    output_dir: Path | None,
+    checkpoint_path: Path | None,
+    label: str,
+    resolution_count: int,
+) -> tuple[Path, Path, Path]:
+    """Resolve video, comparison, and summary paths for one sweep item."""
+    output_root = _resolve_output_root(mode=mode, output_dir=output_dir)
+    if mode == "checkpoint" and checkpoint_path is not None:
+        run_stem = _checkpoint_run_stem(checkpoint_path)
+        video_stem = run_stem if resolution_count == 1 else f"{run_stem}_{label}"
+        return (
+            output_root / f"{video_stem}.mp4",
+            output_root / f"{video_stem}_comparison.mp4",
+            output_root / f"{run_stem}_summary.json",
+        )
+
+    return (
+        output_root / f"{label}.mp4",
+        output_root / f"{label}_comparison.mp4",
+        output_root / "summary.json",
+    )
 
 
 def _load_checkpoint_runtime_config(checkpoint_path: Path) -> tuple[dict[str, object], SimpleNamespace]:
@@ -508,10 +563,11 @@ def _build_dense_prefix_condition_lists(
     return video_frames, mask_frames
 
 
-def _load_local_base_pipeline(
+def _load_local_pipeline(
     *,
     runtime_cfg: SimpleNamespace,
     runtime_dtype: torch.dtype,
+    transformer: WanVACETransformer3DModel | None = None,
 ) -> WanVACEPipeline:
     """Load a Wan VACE pipeline using the local vendored transformer implementation."""
     tokenizer = AutoTokenizer.from_pretrained(
@@ -525,11 +581,12 @@ def _load_local_base_pipeline(
         torch_dtype=runtime_dtype,
         local_files_only=_scheduler_local_files_only(),
     )
-    transformer = WanVACETransformer3DModel.from_pretrained(
-        runtime_cfg.wan_vace_model_id,
-        subfolder=runtime_cfg.wan_vace_subfolder or None,
-        local_files_only=_scheduler_local_files_only(),
-    )
+    if transformer is None:
+        transformer = WanVACETransformer3DModel.from_pretrained(
+            runtime_cfg.wan_vace_model_id,
+            subfolder=runtime_cfg.wan_vace_subfolder or None,
+            local_files_only=_scheduler_local_files_only(),
+        )
     vae = AutoencoderKLWan.from_pretrained(
         "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         subfolder="vae",
@@ -548,8 +605,167 @@ def _load_local_base_pipeline(
         vae=vae,
         scheduler=scheduler,
     )
-    pipe.enable_sequential_cpu_offload()
+    if torch.cuda.is_available():
+        pipe.enable_sequential_cpu_offload()
     return pipe
+
+
+def _load_checkpoint_transformer(
+    *,
+    runtime_cfg: SimpleNamespace,
+    checkpoint: dict[str, object],
+) -> WanVACETransformer3DModel:
+    """Load checkpoint-backed transformer weights into the canonical pipeline backbone."""
+    transformer = WanVACETransformer3DModel.from_pretrained(
+        runtime_cfg.wan_vace_model_id,
+        subfolder=runtime_cfg.wan_vace_subfolder or None,
+        local_files_only=_scheduler_local_files_only(),
+    )
+    if getattr(runtime_cfg, "trainable_backbone", "full") == "lora":
+        _attach_lora_adapters(backbone=transformer, cfg=runtime_cfg)
+
+    model_state = checkpoint.get("model_state_dict")
+    if not isinstance(model_state, dict):
+        raise ValueError("Checkpoint missing model_state_dict")
+    backbone_state = {
+        key.removeprefix("backbone."): value
+        for key, value in model_state.items()
+        if key.startswith("backbone.")
+    }
+    incompatible = transformer.load_state_dict(backbone_state, strict=False)
+    missing = [key for key in incompatible.missing_keys if "lora_" not in key]
+    unexpected = [key for key in incompatible.unexpected_keys if "control_" not in key]
+    if missing or unexpected:
+        raise ValueError(
+            "Checkpoint backbone overlay mismatch: "
+            f"missing={missing[:10]} unexpected={unexpected[:10]}"
+        )
+    return transformer
+
+
+@torch.no_grad()
+def _run_local_pipeline(
+    *,
+    pipe: WanVACEPipeline,
+    video_frames: list["Image.Image"],
+    mask_frames: list["Image.Image"],
+    height: int,
+    width: int,
+    num_frames: int,
+    num_inference_steps: int,
+    generator: torch.Generator | None,
+    guidance_scale: float,
+    max_sequence_length: int,
+    conditioning_scale: float,
+    prompt: str,
+    progress_label: str | None = None,
+) -> np.ndarray:
+    """Run the canonical Wan VACE pipeline path with a shared no-conditioning prompt."""
+
+    if num_frames % pipe.vae_scale_factor_temporal != 1:
+        num_frames = num_frames // pipe.vae_scale_factor_temporal * pipe.vae_scale_factor_temporal + 1
+        num_frames = max(num_frames, 1)
+
+    pipe._guidance_scale = guidance_scale
+    pipe._attention_kwargs = None
+    pipe._current_timestep = None
+    pipe._interrupt = False
+
+    device = pipe._execution_device
+    batch_size = 1
+    vae_dtype = pipe.vae.dtype
+    transformer_dtype = pipe.transformer.dtype
+    do_cfg = False
+
+    conditioning_scale_tensor = torch.tensor(
+        [conditioning_scale] * len(pipe.transformer.config.vace_layers),
+        device=device,
+        dtype=transformer_dtype,
+    )
+
+    encoded_prompt_embeds, encoded_negative_prompt_embeds = pipe.encode_prompt(
+        prompt=prompt,
+        negative_prompt=None,
+        do_classifier_free_guidance=do_cfg,
+        num_videos_per_prompt=1,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        max_sequence_length=max_sequence_length,
+        device=device,
+    )
+    encoded_prompt_embeds = encoded_prompt_embeds.to(device=device, dtype=transformer_dtype)
+
+    pipe.scheduler.set_timesteps(num_inference_steps, device=device)
+    timesteps = pipe.scheduler.timesteps
+
+    video_tensor, mask_tensor, reference_images = pipe.preprocess_conditions(
+        video_frames,
+        mask_frames,
+        None,
+        batch_size,
+        height,
+        width,
+        num_frames,
+        torch.float32,
+        device,
+    )
+    num_reference_images = len(reference_images[0])
+
+    conditioning_latents = pipe.prepare_video_latents(
+        video_tensor,
+        mask_tensor,
+        reference_images,
+        generator,
+        device,
+    )
+    prepared_masks = pipe.prepare_masks(mask_tensor, reference_images, generator)
+    conditioning_latents = torch.cat([conditioning_latents, prepared_masks], dim=1).to(transformer_dtype)
+
+    latents = pipe.prepare_latents(
+        batch_size,
+        pipe.transformer.config.in_channels,
+        height,
+        width,
+        num_frames + num_reference_images * pipe.vae_scale_factor_temporal,
+        torch.float32,
+        device,
+        generator,
+        None,
+    )
+
+    with pipe.progress_bar(total=len(timesteps)) as progress_bar:
+        if progress_label:
+            progress_bar.set_description(progress_label)
+        for timestep in timesteps:
+            pipe._current_timestep = timestep
+            latent_model_input = latents.to(transformer_dtype)
+            timestep_batch = timestep.expand(latents.shape[0])
+
+            noise_pred = pipe.transformer(
+                hidden_states=latent_model_input,
+                timestep=timestep_batch,
+                encoder_hidden_states=encoded_prompt_embeds,
+                control_hidden_states=conditioning_latents,
+                control_hidden_states_scale=conditioning_scale_tensor,
+                attention_kwargs=None,
+                return_dict=False,
+            )[0]
+
+            latents = pipe.scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
+            progress_bar.update()
+
+    pipe._current_timestep = None
+
+    latents = latents[:, :, num_reference_images:].to(vae_dtype)
+    latents_mean = torch.tensor(pipe.vae.config.latents_mean).view(1, pipe.vae.config.z_dim, 1, 1, 1)
+    latents_std = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(1, pipe.vae.config.z_dim, 1, 1, 1)
+    latents_mean = latents_mean.to(latents.device, latents.dtype)
+    latents_std = latents_std.to(latents.device, latents.dtype)
+    latents = latents / latents_std + latents_mean
+    video = pipe.vae.decode(latents, return_dict=False)[0]
+    video = pipe.video_processor.postprocess_video(video, output_type="np")
+    pipe.maybe_free_model_hooks()
+    return np.ascontiguousarray(video[0])
 
 
 def _make_constant_video_like(*, video: torch.Tensor, zero_to_one_value: float) -> torch.Tensor:
@@ -612,6 +828,128 @@ def _offload_vae_to_cpu(vae: WanVAE) -> None:
 def _reload_vae_to_device(vae: WanVAE, *, device: torch.device, runtime_dtype: torch.dtype) -> None:
     """Move the wrapped diffusers VAE back to the active runtime device for decode."""
     vae.vae.to(device=device, dtype=runtime_dtype)
+
+
+def _checkpoint_autocast_context(*, device: torch.device, runtime_dtype: torch.dtype):
+    """Build the autocast context used for checkpoint-mode world-model inference."""
+    if device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=runtime_dtype)
+
+
+@torch.no_grad()
+def _decode_future_latents(
+    *,
+    vae: WanVAE,
+    pred_future_video: torch.Tensor,
+    target_future_video: torch.Tensor,
+    device: torch.device,
+    runtime_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode generated and target future latents while avoiding GPU VAE memory spikes."""
+    decode_pred = pred_future_video
+    decode_target = target_future_video
+    if device.type == "cuda":
+        vae.vae.to(device="cpu", dtype=torch.float32)
+        decode_pred = pred_future_video.to("cpu")
+        decode_target = target_future_video.to("cpu")
+        torch.cuda.empty_cache()
+    pred_video = vae.decode(decode_pred, output_layout="BTCHW", output_range="zero_to_one")
+    target_video = vae.decode(decode_target, output_layout="BTCHW", output_range="zero_to_one")
+    return pred_video, target_video
+
+
+@torch.no_grad()
+def _run_checkpoint_world_model(
+    *,
+    runtime_cfg: SimpleNamespace,
+    checkpoint: dict[str, object],
+    video: torch.Tensor,
+    action_seq: torch.Tensor,
+    video_key: str,
+    width: int,
+    height: int,
+    k: int,
+    integration_steps: int,
+    single_chunk_rollout: bool,
+    action_source: str,
+    device: torch.device,
+    runtime_dtype: torch.dtype,
+    generator: torch.Generator | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run checkpoint-mode inference with the repo world-model path used during training eval."""
+    vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
+    expected_action_dim = _infer_checkpoint_action_dim(checkpoint)
+    action_tensor = _select_action_tensor(
+        action_seq=action_seq,
+        action_source=action_source,
+        expected_action_dim=expected_action_dim,
+    )
+    batch = {
+        video_key: video,
+        "action": action_tensor,
+    }
+    prepared = prepare_packed_batch(
+        batch=batch,
+        encoder=vae,
+        device=device,
+        video_key=video_key,
+        context_len=int(getattr(runtime_cfg, "context_len", DEFAULT_CONTEXT_LEN)),
+        horizon_len=int(getattr(runtime_cfg, "horizon_len", DEFAULT_HORIZON_LEN)),
+        frame_height=height,
+        frame_width=width,
+    )
+    model, action_encoder = build_wan_vace_runtime_modules(
+        runtime_cfg,
+        prepared,
+        device=device,
+        checkpoint=checkpoint,
+    )
+    if device.type == "cuda":
+        model = model.to(device=device, dtype=runtime_dtype)
+        action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
+    model.eval()
+    action_encoder.eval()
+
+    with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
+        cross_attention_tokens = action_encoder(prepared.a_plan)
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        runtime_cfg.wan_vace_model_id,
+        subfolder="scheduler",
+        local_files_only=_scheduler_local_files_only(),
+    )
+    with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
+        pred_future_video = infer_future_videos_chunkwise(
+            model,
+            z_past_video=prepared.z_past_video,
+            future_steps=prepared.z_future_video.shape[2],
+            cross_attention_tokens=cross_attention_tokens,
+            k=k,
+            integration_steps=integration_steps,
+            negative_cross_attention_tokens=None,
+            guidance_scale=1.0,
+            chunk_conditioning=(getattr(runtime_cfg, "conditioning_mode", "action") in ("none", "action")),
+            single_chunk_rollout=single_chunk_rollout,
+            scheduler=scheduler,
+            generator=generator,
+        )
+    pred_video, target_video = _decode_future_latents(
+        vae=vae,
+        pred_future_video=pred_future_video,
+        target_future_video=prepared.z_future_video,
+        device=device,
+        runtime_dtype=runtime_dtype,
+    )
+    target_full_video = preprocess_video_for_vae(
+        video.detach().cpu(),
+        frame_height=height,
+        frame_width=width,
+    )
+    return _build_rollout_video(
+        target_full_video=target_full_video,
+        pred_future_video=pred_video,
+        context_len=int(getattr(runtime_cfg, "context_len", DEFAULT_CONTEXT_LEN)),
+    )
 
 
 def _sample_local_base_full_video(
@@ -689,7 +1027,8 @@ def _run_one_checkpoint_resolution(
     checkpoint_path: Path,
     width: int,
     height: int,
-    output_dir: Path,
+    output_path: Path,
+    comparison_path: Path,
     repo_id: str,
     episode_index: int,
     start_frame: int,
@@ -710,13 +1049,34 @@ def _run_one_checkpoint_resolution(
 ) -> dict[str, object]:
     """Run one local world-model generation at a specific resolution."""
     label = f"{width}x{height}"
-    output_path = output_dir / f"{label}.mp4"
-    comparison_path = output_dir / f"{label}_comparison.mp4"
+    effective_inference_steps = max(integration_steps, 50)
     start_time = time.time()
     try:
         checkpoint: dict[str, object] | None = None
+        runtime_notes: list[str] = []
+        result_metadata: dict[str, object] = {
+            "requested_num_inference_steps": integration_steps,
+            "effective_num_inference_steps": effective_inference_steps,
+        }
         if mode == "checkpoint":
             checkpoint, runtime_cfg = _load_checkpoint_runtime_config(checkpoint_path)
+            train_width = int(getattr(runtime_cfg, "frame_width", width) or width)
+            train_height = int(getattr(runtime_cfg, "frame_height", height) or height)
+            result_metadata.update(
+                checkpoint_train_resolution=f"{train_width}x{train_height}",
+                checkpoint_trainable_backbone=str(getattr(runtime_cfg, "trainable_backbone", "unknown")),
+                checkpoint_conditioning_mode=str(getattr(runtime_cfg, "conditioning_mode", "unknown")),
+                checkpoint_path=str(checkpoint_path),
+            )
+            if (train_width, train_height) != (width, height):
+                runtime_notes.append(
+                    "Requested inference resolution does not match the checkpoint training resolution "
+                    f"({width}x{height} vs {train_width}x{train_height})."
+                )
+            if "wrong_architecture" in checkpoint_path.name:
+                runtime_notes.append(
+                    "Checkpoint filename marks this artifact as wrong_architecture; treat failures as expected."
+                )
         else:
             runtime_cfg = _load_base_runtime_config(config_path)
             runtime_cfg.prompt = prompt
@@ -724,9 +1084,21 @@ def _run_one_checkpoint_resolution(
             runtime_cfg.guidance_scale = guidance_scale
             runtime_cfg.max_sequence_length = max_sequence_length
             runtime_cfg.single_chunk_rollout = True
+        if mode == "base":
+            runtime_notes.append(
+                "Base mode uses the canonical Wan VACE pipeline with dense-prefix mask conditioning."
+            )
+        else:
+            runtime_notes.append(
+                "Checkpoint mode uses the repo's direct chunkwise world-model inference path to match training."
+            )
         device = _resolve_device(device_name=device_name)
         runtime_dtype = _select_runtime_dtype(device=device)
-        total_frames = DEFAULT_BASE_TOTAL_FRAMES if mode == "base" else context_len + horizon_len
+        total_frames = (
+            context_len + horizon_len
+            if mode == "checkpoint"
+            else DEFAULT_BASE_TOTAL_FRAMES
+        )
         torch.manual_seed(seed)
         generator = torch.Generator(device=device.type) if device.type == "cuda" else torch.Generator()
         generator.manual_seed(seed)
@@ -739,15 +1111,6 @@ def _run_one_checkpoint_resolution(
             video_key=video_key,
             device=device,
         )
-        action = _select_action_tensor(
-            action_seq=action_seq,
-            action_source=action_source,
-            expected_action_dim=_infer_checkpoint_action_dim(checkpoint) if checkpoint is not None else None,
-        )
-        batch = {
-            video_key: video,
-            "action": action,
-        }
 
         if mode == "base":
             target_full_video = preprocess_video_for_vae(
@@ -759,104 +1122,44 @@ def _run_one_checkpoint_resolution(
                 target_video=target_full_video,
                 context_len=min(DEFAULT_BASE_CONDITION_FRAMES, int(target_full_video.shape[1])),
             )
-            pipe = _load_local_base_pipeline(runtime_cfg=runtime_cfg, runtime_dtype=runtime_dtype)
-            frames = pipe(
-                prompt=runtime_cfg.prompt,
-                negative_prompt=runtime_cfg.negative_prompt,
-                video=video_frames,
-                mask=mask_frames,
+            pipe = _load_local_pipeline(runtime_cfg=runtime_cfg, runtime_dtype=runtime_dtype)
+            frames = _run_local_pipeline(
+                pipe=pipe,
+                video_frames=video_frames,
+                mask_frames=mask_frames,
                 height=height,
                 width=width,
                 num_frames=DEFAULT_BASE_TOTAL_FRAMES,
-                num_inference_steps=max(integration_steps, 50),
-                guidance_scale=float(runtime_cfg.guidance_scale),
+                num_inference_steps=effective_inference_steps,
+                generator=generator,
+                guidance_scale=1.0,
                 max_sequence_length=int(runtime_cfg.max_sequence_length),
-                output_type="np",
-            ).frames[0]
+                conditioning_scale=float(getattr(runtime_cfg, "control_scale", 1.0)),
+                prompt="",
+                progress_label=f"{label} steps",
+            )
             pred_rollout = torch.from_numpy(np.ascontiguousarray(frames)).permute(0, 3, 1, 2).unsqueeze(0).float()
             pred_rollout = _normalize_video_for_export(pred_rollout)
             target_rollout = _normalize_video_for_export(target_full_video)
         else:
-            vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
-            prepared = prepare_packed_batch(
-                batch=batch,
-                encoder=vae,
-                device=device,
-                video_key=video_key,
-                context_len=context_len,
-                horizon_len=horizon_len,
-                frame_height=height,
-                frame_width=width,
-                allow_missing_action=(getattr(runtime_cfg, "conditioning_mode", "none") == "none"),
-            )
-            model, action_encoder = build_wan_vace_runtime_modules(
-                runtime_cfg,
-                prepared,
-                device=device,
+            target_rollout, pred_rollout = _run_checkpoint_world_model(
+                runtime_cfg=runtime_cfg,
                 checkpoint=checkpoint,
-            )
-            if device.type == "cuda":
-                model = model.to(device=device, dtype=runtime_dtype)
-                action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
-            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-                runtime_cfg.wan_vace_model_id,
-                subfolder="scheduler",
-                local_files_only=_scheduler_local_files_only(),
-            )
-            model.eval()
-            action_encoder.eval()
-
-            negative_cross_attention_tokens = None
-            with _autocast_context(device=device, dtype=runtime_dtype):
-                if getattr(runtime_cfg, "conditioning_mode", "none") == "prompt":
-                    tokenizer, text_encoder = _load_prompt_encoder(runtime_cfg)
-                    backbone_dtype = next(model.backbone.parameters()).dtype
-                    cross_attention_tokens, negative_cross_attention_tokens = _build_prompt_conditioning_tokens(
-                        prompt=runtime_cfg.prompt,
-                        negative_prompt=runtime_cfg.negative_prompt,
-                        batch_size=prepared.z_past_video.shape[0],
-                        tokenizer=tokenizer,
-                        text_encoder=text_encoder,
-                        encoder_device=torch.device("cpu"),
-                        output_device=device,
-                        dtype=backbone_dtype,
-                        guidance_scale=float(runtime_cfg.guidance_scale),
-                        max_sequence_length=int(runtime_cfg.max_sequence_length),
-                    )
-                    del text_encoder
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
-                else:
-                    cross_attention_tokens = action_encoder(prepared.a_plan)
-                pred_future = infer_future_videos_chunkwise(
-                    model,
-                    z_past_video=prepared.z_past_video,
-                    future_steps=prepared.z_future_video.shape[2],
-                    cross_attention_tokens=cross_attention_tokens,
-                    k=k,
-                    integration_steps=integration_steps,
-                    negative_cross_attention_tokens=negative_cross_attention_tokens,
-                    guidance_scale=1.0,
-                    chunk_conditioning=(getattr(runtime_cfg, "conditioning_mode", "none") in ("none", "action")),
-                    single_chunk_rollout=single_chunk_rollout,
-                    block_causal_attention=True,
-                    scheduler=scheduler,
-                    generator=generator,
-                )
-                pred_video = vae.decode(pred_future, output_layout="BTCHW", output_range="zero_to_one")
-
-            target_full_video = preprocess_video_for_vae(
-                video,
-                frame_height=height,
-                frame_width=width,
-            )
-            target_rollout, pred_rollout = _build_rollout_video(
-                target_full_video=target_full_video,
-                pred_future_video=pred_video,
-                context_len=context_len,
+                video=video,
+                action_seq=action_seq,
+                video_key=video_key,
+                width=width,
+                height=height,
+                k=k,
+                integration_steps=effective_inference_steps,
+                single_chunk_rollout=single_chunk_rollout,
+                action_source=action_source,
+                device=device,
+                runtime_dtype=runtime_dtype,
+                generator=generator,
             )
 
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         _export_video(video_frames=_tensor_video_to_frames(pred_rollout), output_video_path=str(output_path), fps=fps)
         comparison_video = _build_side_by_side_video(left=target_rollout, right=pred_rollout)
         _export_video(
@@ -871,6 +1174,8 @@ def _run_one_checkpoint_resolution(
             "comparison_output_path": str(comparison_path),
             "elapsed_s": time.time() - start_time,
             "mode": mode,
+            "notes": runtime_notes,
+            **result_metadata,
         }
     except Exception as exc:  # pragma: no cover - manual smoke script
         if isinstance(exc, torch.cuda.OutOfMemoryError):
@@ -886,13 +1191,14 @@ def _run_one_checkpoint_resolution(
             "error": error,
             "elapsed_s": time.time() - start_time,
             "mode": mode,
+            "notes": runtime_notes,
+            **result_metadata,
         }
 
 
-def _save_summary(*, output_dir: Path, results: list[dict[str, object]]) -> Path:
+def _save_summary(*, summary_path: Path, results: list[dict[str, object]]) -> Path:
     """Persist the sweep results as JSON for quick review."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = output_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary_path
 
@@ -902,20 +1208,35 @@ def main() -> None:
     args = _parse_args()
     parsed_resolutions = [_parse_resolution(spec) for spec in args.resolutions]
     results: list[dict[str, object]] = []
+    summary_path: Path | None = None
 
     if args.mode == "checkpoint" and args.checkpoint is None:
         raise ValueError("--checkpoint is required when --mode checkpoint.")
 
     for width, height in parsed_resolutions:
         label = f"{width}x{height}"
-        print(f"Running local {args.mode} at {label}...")
+        output_path, comparison_path, summary_path = _resolve_output_artifacts(
+            mode=args.mode,
+            output_dir=args.output_dir,
+            checkpoint_path=args.checkpoint,
+            label=label,
+            resolution_count=len(parsed_resolutions),
+        )
+        effective_inference_steps = max(args.num_inference_steps, 50)
+        print(
+            "Running local "
+            f"{args.mode} at {label} with "
+            f"{args.num_inference_steps} requested integration steps "
+            f"({effective_inference_steps} effective)..."
+        )
         result = _run_one_checkpoint_resolution(
             mode=args.mode,
             config_path=args.config,
             checkpoint_path=args.checkpoint if args.checkpoint is not None else Path(""),
             width=width,
             height=height,
-            output_dir=args.output_dir,
+            output_path=output_path,
+            comparison_path=comparison_path,
             repo_id=args.repo_id,
             episode_index=args.episode_index,
             start_frame=args.start_frame,
@@ -936,12 +1257,17 @@ def main() -> None:
         )
         results.append(result)
         if result["status"] == "ok":
-            print(f"{label}: saved {result['output_path']}")
+            print(
+                f"{label}: saved {result['output_path']} "
+                f"(steps={result['effective_num_inference_steps']})"
+            )
             print(f"{label}: saved {result['comparison_output_path']}")
         else:
             print(f"{label}: {result['error']}")
 
-    summary_path = _save_summary(output_dir=args.output_dir, results=results)
+    if summary_path is None:
+        summary_path = _resolve_output_root(mode=args.mode, output_dir=args.output_dir) / "summary.json"
+    summary_path = _save_summary(summary_path=summary_path, results=results)
     print(f"Saved sweep summary: {summary_path}")
 
 

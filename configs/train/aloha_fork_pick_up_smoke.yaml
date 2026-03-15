@@ -78,6 +78,6 @@ subset_size: 1
 overfit_one_batch: true
 
 # --- logging ---
-log_every: 1
+log_every: 10
 checkpoint_every: 2
 seed: 0

@@ -31,9 +31,9 @@ def preprocess_video_for_vae(
     *,
     frame_height: int = 0,
     frame_width: int = 0,
-    spatial_multiple: int = 8,
+    spatial_multiple: int = 16,
 ) -> torch.Tensor:
-    """Resize and center-crop `BTCHW` video to a VAE-safe spatial shape."""
+    """Resize and center-crop `BTCHW` video to a Wan VAE and patch-grid-safe shape."""
     if video.ndim != 5:
         raise ValueError(f"Expected video [B,T,C,H,W], got {tuple(video.shape)}")
     if spatial_multiple <= 0:

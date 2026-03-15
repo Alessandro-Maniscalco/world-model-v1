@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
+from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from world_model.config import InferScriptConfig, load_infer_config, load_train_config
@@ -34,8 +37,7 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
         subfolder: str | None = None,
         local_files_only: bool = False,
     ):
-        del local_files_only
-        calls.append((model_id, subfolder))
+        calls.append((model_id, subfolder, local_files_only))
         return _FakeBackbone()
 
     monkeypatch.setattr(wan_vace_factory.WanVACETransformer3DModel, "from_pretrained", _fake_from_pretrained)
@@ -60,7 +62,7 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     assert isinstance(action_encoder, NullConditioningEncoder)
     assert model.control_black_latents is not None
     assert model.control_gray_latents is not None
-    assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer")]
+    assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer", False)]
 
 
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
@@ -103,6 +105,145 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     first_action_key = next(iter(action_state))
     assert torch.allclose(loaded_model.state_dict()[first_model_key], model_state[first_model_key])
     assert torch.allclose(loaded_action_encoder.state_dict()[first_action_key], action_state[first_action_key])
+
+
+def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypatch) -> None:
+    """Load pretrained backbones in local-files-only mode when offline env vars are set."""
+    prepared = _make_prepared_batch()
+    calls: list[bool] = []
+
+    class _FakeBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(text_dim=32, in_channels=16, vace_in_channels=36, vace_layers=(0,))
+
+    def _fake_from_pretrained(*args, local_files_only: bool = False, **kwargs):
+        del args, kwargs
+        calls.append(local_files_only)
+        return _FakeBackbone()
+
+    monkeypatch.setattr(wan_vace_factory.WanVACETransformer3DModel, "from_pretrained", _fake_from_pretrained)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    wan_vace_factory.build_wan_vace_runtime_modules(
+        InferScriptConfig(mask_channels=4),
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert calls == [True]
+
+
+def test_expected_control_channels_matches_inactive_reactive_plus_mask() -> None:
+    """Count both fill-latent streams plus the expanded mask channels."""
+    assert wan_vace_factory._expected_control_channels(latent_channels=16, mask_channels=64) == 96
+
+
+def test_merge_runtime_backbone_config_restores_saved_defaults_only() -> None:
+    """Apply checkpoint config only to fields the runtime has not overridden."""
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "mask_channels": 8,
+                "vace_layers": [1, 3],
+                "lora_target_modules": ["to_q", "to_v"],
+            }
+        }
+    }
+
+    merged = wan_vace_factory._merge_runtime_backbone_config(cfg=cfg, checkpoint=checkpoint)
+
+    assert merged.conditioning_mode == "action"
+    assert merged.mask_channels == 8
+    assert merged.vace_layers == (1, 3)
+    assert merged.lora_target_modules == ("to_q", "to_v")
+
+
+def test_merge_runtime_backbone_config_keeps_explicit_runtime_overrides() -> None:
+    """Do not overwrite runtime choices that already differ from defaults."""
+    cfg = InferScriptConfig(conditioning_mode="action", mask_channels=4)
+    checkpoint = {"extra_state": {"config": {"conditioning_mode": "none", "mask_channels": 99}}}
+
+    merged = wan_vace_factory._merge_runtime_backbone_config(cfg=cfg, checkpoint=checkpoint)
+
+    assert merged.conditioning_mode == "action"
+    assert merged.mask_channels == 4
+
+
+@pytest.mark.parametrize(
+    ("cfg", "pattern"),
+    [
+        (SimpleNamespace(lora_rank=0, lora_alpha=16, lora_dropout=0.0, lora_target_modules=("to_q",)), "lora_rank"),
+        (SimpleNamespace(lora_rank=4, lora_alpha=0, lora_dropout=0.0, lora_target_modules=("to_q",)), "lora_alpha"),
+        (
+            SimpleNamespace(lora_rank=4, lora_alpha=16, lora_dropout=-0.1, lora_target_modules=("to_q",)),
+            "lora_dropout",
+        ),
+        (
+            SimpleNamespace(lora_rank=4, lora_alpha=16, lora_dropout=0.0, lora_target_modules=()),
+            "lora_target_modules",
+        ),
+    ],
+)
+def test_attach_lora_adapters_validates_config_before_import(cfg: SimpleNamespace, pattern: str) -> None:
+    """Reject invalid LoRA settings before attempting to import PEFT."""
+    backbone = SimpleNamespace(add_adapter=lambda config: None)
+
+    with pytest.raises(ValueError, match=pattern):
+        wan_vace_factory._attach_lora_adapters(backbone=backbone, cfg=cfg)
+
+
+def test_attach_lora_adapters_requires_peft(monkeypatch) -> None:
+    """Raise a clear error when LoRA is requested without the PEFT dependency."""
+    backbone = SimpleNamespace(add_adapter=lambda config: None)
+    cfg = SimpleNamespace(lora_rank=4, lora_alpha=16, lora_dropout=0.0, lora_target_modules=("to_q",))
+    real_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "peft":
+            raise ImportError("missing peft")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with pytest.raises(ImportError, match="peft is required"):
+        wan_vace_factory._attach_lora_adapters(backbone=backbone, cfg=cfg)
+
+
+def test_build_wan_vace_model_from_config_rejects_backbone_channel_mismatch(monkeypatch) -> None:
+    """Reject pretrained backbones whose latent channel counts do not match prepared data."""
+    prepared = _make_prepared_batch()
+
+    class _FakeBackbone(torch.nn.Module):
+        def __init__(self, *, in_channels: int, vace_in_channels: int) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(
+                text_dim=32,
+                in_channels=in_channels,
+                vace_in_channels=vace_in_channels,
+                vace_layers=(0,),
+            )
+
+    cfg = InferScriptConfig(mask_channels=4)
+
+    monkeypatch.setattr(
+        wan_vace_factory.WanVACETransformer3DModel,
+        "from_pretrained",
+        lambda *args, **kwargs: _FakeBackbone(in_channels=8, vace_in_channels=36),
+    )
+    with pytest.raises(ValueError, match="in_channels=8 does not match latent channels=16"):
+        wan_vace_factory.build_wan_vace_model_from_config(cfg, prepared)
+
+    monkeypatch.setattr(
+        wan_vace_factory.WanVACETransformer3DModel,
+        "from_pretrained",
+        lambda *args, **kwargs: _FakeBackbone(in_channels=16, vace_in_channels=12),
+    )
+    with pytest.raises(ValueError, match="vace_in_channels=12 does not match expected control channels=36"):
+        wan_vace_factory.build_wan_vace_model_from_config(cfg, prepared)
 
 
 def _make_prepared_batch() -> PreparedPackedBatch:

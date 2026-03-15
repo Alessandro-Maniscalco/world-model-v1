@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 
+import pytest
 import torch
 from torch import nn
 
@@ -164,3 +165,46 @@ def test_encode_and_decode_cast_inputs_to_loaded_vae_dtype() -> None:
 
     assert fake_vae.last_encode_input_dtype == torch.bfloat16
     assert fake_vae.last_decode_input_dtype == torch.bfloat16
+
+
+def test_encode_rejects_unsupported_input_layout() -> None:
+    """Reject encode requests whose configured layout is not recognized."""
+    model = WanVAE(_FakeVAE(), WanVAEConfig(input_layout="bad"))  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="Unsupported layout"):
+        model.encode(torch.zeros(1, 2, 3, 4, 4))
+
+
+def test_encode_rejects_ambiguous_auto_input_range() -> None:
+    """Require an explicit input range when auto-detection cannot classify the tensor values."""
+    model = WanVAE(_FakeVAE(), WanVAEConfig(input_range="auto"))
+    video = torch.tensor([[[[[-2.0, 2.0], [0.0, 3.0]]]]], dtype=torch.float32).expand(1, 1, 3, 2, 2)
+
+    with pytest.raises(ValueError, match="Unable to infer input range"):
+        model.encode(video)
+
+
+def test_encode_requires_wan_latent_stats_when_normalizing() -> None:
+    """Fail clearly when Wan latent normalization stats are missing."""
+    fake_vae = _FakeVAE()
+    fake_vae.config = types.SimpleNamespace(z_dim=3)
+    model = WanVAE(fake_vae, WanVAEConfig(latent_format="wan", input_range="minus_one_to_one"))
+
+    with pytest.raises(ValueError, match="latents_mean`/`latents_std"):
+        model.encode(torch.zeros(1, 2, 3, 4, 4))
+
+
+def test_decode_rejects_invalid_payload_and_output_options() -> None:
+    """Validate decode payload extraction and output layout/range arguments."""
+    fake_vae = _FakeVAE()
+    model = WanVAE(fake_vae, WanVAEConfig())
+    latents = torch.zeros(1, 3, 1, 2, 2)
+
+    with pytest.raises(ValueError, match="Unsupported output layout"):
+        model.decode(latents, output_layout="bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Unsupported output range"):
+        model.decode(latents, output_range="bad")  # type: ignore[arg-type]
+
+    fake_vae.decode = lambda z: object()
+    with pytest.raises(ValueError, match="missing tensor/sample"):
+        model.decode(latents)
