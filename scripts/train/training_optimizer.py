@@ -32,6 +32,9 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from world_model.optimization.controller import (
+    DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
+    DEFAULT_CODEX_MAX_SESSION_AGE_MINUTES,
+    DEFAULT_CODEX_MAX_SESSION_TURNS,
     DEFAULT_MEMORY_PATH,
     DEFAULT_STATE_PATH,
     DEFAULT_TRAIN_CONFIG_PATH,
@@ -53,6 +56,36 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional Codex model override passed through to `codex exec --model`.",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
+        help="Hard timeout for each `codex exec` call before the controller aborts that turn.",
+    )
+    parser.add_argument(
+        "--codex-memory",
+        choices=("hybrid", "session-only", "controller-only"),
+        default="hybrid",
+        help="Persistent-memory mode for Codex planning turns.",
+    )
+    parser.add_argument(
+        "--codex-session-id",
+        type=str,
+        default=None,
+        help="Optional persisted Codex session id to resume explicitly.",
+    )
+    parser.add_argument(
+        "--codex-max-session-turns",
+        type=int,
+        default=DEFAULT_CODEX_MAX_SESSION_TURNS,
+        help="Maximum number of Codex turns before forcing a fresh session. Use `0` to keep one session until age/workspace/model changes require a reset.",
+    )
+    parser.add_argument(
+        "--codex-max-session-age-minutes",
+        type=int,
+        default=DEFAULT_CODEX_MAX_SESSION_AGE_MINUTES,
+        help="Maximum age of a persisted Codex session before forcing a fresh session.",
     )
     parser.add_argument(
         "--train-config",
@@ -155,6 +188,11 @@ def main() -> int:
         state_path=args.state_path,
         planner=args.planner,
         codex_model=args.codex_model,
+        codex_timeout_seconds=args.codex_timeout_seconds,
+        codex_memory=args.codex_memory,
+        codex_session_id=args.codex_session_id,
+        codex_max_session_turns=args.codex_max_session_turns,
+        codex_max_session_age_minutes=args.codex_max_session_age_minutes,
         iterations=args.iterations,
         max_real_runs=args.max_real_runs,
         max_codex_calls=args.max_codex_calls,

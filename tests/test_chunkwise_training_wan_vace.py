@@ -122,17 +122,19 @@ class _ActionTokenOnlyVideoModel(nn.Module):
         observed_mask: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Project time-aligned action tokens back into the latent video shape."""
+        """Project active-window action tokens into the leading latent frames."""
         del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
         channels = noisy_future_video.shape[1]
-        timesteps = noisy_future_video.shape[2]
-        return (
-            action_tokens[:, :timesteps, :channels]
+        token_steps = action_tokens.shape[1]
+        prediction = torch.zeros_like(noisy_future_video)
+        prediction[:, :, :token_steps, :, :] = (
+            action_tokens[:, :, :channels]
             .permute(0, 2, 1)
             .unsqueeze(-1)
             .unsqueeze(-1)
-            .expand_as(noisy_future_video)
+            .expand(-1, -1, -1, noisy_future_video.shape[3], noisy_future_video.shape[4])
         )
+        return prediction
 
 
 def test_train_chunkwise_batch_structured_video_grad_norm_includes_action_encoder() -> None:

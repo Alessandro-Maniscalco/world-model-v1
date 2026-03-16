@@ -294,7 +294,7 @@ def _chunkwise_teacher_forcing_video_loss(
         pred_suffix = model(
             noisy_future_video=noisy_suffix,
             observed_video=observed_video,
-            action_tokens=action_tokens[:, start:],
+            action_tokens=action_tokens[:, start:end],
             timestep_t=normalized_t_to_scheduler_timestep(t),
             block_causal_attention_mask=attn_mask,
             observed_mask=observed_mask,

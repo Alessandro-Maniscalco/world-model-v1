@@ -8,7 +8,7 @@ python scripts/check/sweep_local_repo_resolutions.py \
 
 python scripts/check/sweep_local_repo_resolutions.py \
   --mode checkpoint \
-  --checkpoint runs/test_400steps_320x240_episode0_lora8_action/checkpoints/step_0000300.pt \
+  --checkpoint runs/hour_test_action/checkpoints/step_0000800.pt \
   --resolutions 320x240
 """
 

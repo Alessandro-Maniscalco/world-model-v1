@@ -4,6 +4,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 import pytest
 import torch
 from world_model.training.flow_matching import (
+    chunkwise_teacher_forcing_loss,
     make_noisy_and_target,
     normalized_t_to_scheduler_timestep,
     sample_t,
@@ -120,3 +121,48 @@ def test_flow_matching_validates_shapes_and_params():
 
     with pytest.raises(ValueError, match="Unsupported weight mode"):
         w(torch.tensor([0.1], dtype=torch.float32), mode="bad")
+
+
+class _ChunkActionWindowRecorder:
+    """Record per-chunk action-token windows during teacher forcing."""
+
+    def __init__(self) -> None:
+        """Initialize captured action-window storage."""
+        self.action_windows: list[torch.Tensor] = []
+
+    def __call__(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Capture the active action window and emit zero velocities."""
+        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        self.action_windows.append(action_tokens.detach().clone())
+        return torch.zeros_like(noisy_future_video)
+
+
+def test_chunkwise_teacher_forcing_uses_current_chunk_action_window():
+    """Use only the active chunk's action tokens in each teacher-forced call."""
+    model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=torch.randn(1, 2, 3, 1, 1),
+        z_future_video=torch.randn(1, 2, 5, 1, 1),
+        action_tokens=action_tokens,
+        k=2,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert len(model.action_windows) == 3
+    assert torch.equal(model.action_windows[0], action_tokens[:, 0:2])
+    assert torch.equal(model.action_windows[1], action_tokens[:, 2:4])
+    assert torch.equal(model.action_windows[2], action_tokens[:, 4:5])
