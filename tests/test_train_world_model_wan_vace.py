@@ -167,6 +167,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--resume-from" in option_strings
     assert "--motion-loss-alpha" in option_strings
     assert "--motion-loss-max-weight" in option_strings
+    assert "--motion-loss-excess-only" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings

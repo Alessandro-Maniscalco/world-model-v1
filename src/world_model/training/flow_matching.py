@@ -180,6 +180,7 @@ def chunkwise_teacher_forcing_loss(
     weight_mode: WeightMode = "uniform",
     motion_loss_alpha: float = 0.0,
     motion_loss_max_weight: float = 0.0,
+    motion_loss_excess_only: bool = False,
     snr_clip_max: float = 5.0,
     eps: float = 1e-6,
     generator: torch.Generator | None = None,
@@ -197,6 +198,7 @@ def chunkwise_teacher_forcing_loss(
         weight_mode=weight_mode,
         motion_loss_alpha=motion_loss_alpha,
         motion_loss_max_weight=motion_loss_max_weight,
+        motion_loss_excess_only=motion_loss_excess_only,
         snr_clip_max=snr_clip_max,
         eps=eps,
         generator=generator,
@@ -216,6 +218,7 @@ def _chunkwise_teacher_forcing_video_loss(
     weight_mode: WeightMode,
     motion_loss_alpha: float,
     motion_loss_max_weight: float,
+    motion_loss_excess_only: bool,
     snr_clip_max: float,
     eps: float,
     generator: torch.Generator | None,
@@ -317,6 +320,7 @@ def _chunkwise_teacher_forcing_video_loss(
             clean_chunk=clean_chunk,
             alpha=motion_loss_alpha,
             max_weight=motion_loss_max_weight,
+            excess_only=motion_loss_excess_only,
         )
         sq_err = sq_err * motion_weight
         per_sample_elements = clean_chunk[0].numel()
@@ -374,6 +378,7 @@ def _compute_motion_loss_weight(
     clean_chunk: torch.Tensor,
     alpha: float,
     max_weight: float = 0.0,
+    excess_only: bool = False,
 ) -> torch.Tensor:
     """Build a per-pixel loss weight that upweights moving latent regions."""
     _validate_motion_loss_max_weight(max_weight)
@@ -387,6 +392,8 @@ def _compute_motion_loss_weight(
     flat = motion_energy.flatten(start_dim=1)
     mean_energy = flat.mean(dim=1, keepdim=True).clamp_min(1e-6)
     normalized = (flat / mean_energy).view_as(motion_energy)
+    if excess_only:
+        normalized = torch.relu(normalized - 1.0)
     weight = 1.0 + alpha * normalized
     if max_weight > 0.0:
         weight = weight.clamp(max=max_weight)

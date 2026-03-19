@@ -37,6 +37,7 @@ class TrainScriptConfig:
     weight_mode: str = "uniform"
     motion_loss_alpha: float = 0.0
     motion_loss_max_weight: float = 0.0
+    motion_loss_excess_only: bool = False
     t_min: float = 0.0
     t_max: float = 1.0
     disable_amp: bool = False

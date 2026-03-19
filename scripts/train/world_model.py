@@ -102,6 +102,18 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.motion_loss_max_weight,
         help="Optional cap on the per-region motion-aware loss multiplier; 0 disables capping.",
     )
+    parser.add_argument(
+        "--motion-loss-excess-only",
+        action="store_true",
+        default=defaults.motion_loss_excess_only,
+        help="Only add motion-aware loss bonus above the per-sample mean motion level.",
+    )
+    parser.add_argument(
+        "--no-motion-loss-excess-only",
+        dest="motion_loss_excess_only",
+        action="store_false",
+        help="Apply motion-aware loss bonus to all motion magnitudes, including average regions.",
+    )
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
@@ -391,6 +403,7 @@ def _evaluate_loss(
     weight_mode: str,
     motion_loss_alpha: float,
     motion_loss_max_weight: float,
+    motion_loss_excess_only: bool,
     device: torch.device,
     disable_amp: bool,
     runtime_dtype: torch.dtype,
@@ -412,6 +425,7 @@ def _evaluate_loss(
             weight_mode=weight_mode,
             motion_loss_alpha=motion_loss_alpha,
             motion_loss_max_weight=motion_loss_max_weight,
+            motion_loss_excess_only=motion_loss_excess_only,
         )
     return float(loss.detach().cpu().item())
 
@@ -541,6 +555,7 @@ def main() -> None:
             weight_mode=cfg.weight_mode,
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
+            motion_loss_excess_only=cfg.motion_loss_excess_only,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,
@@ -598,6 +613,7 @@ def main() -> None:
             weight_mode=cfg.weight_mode,
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
+            motion_loss_excess_only=cfg.motion_loss_excess_only,
             grad_clip_norm=cfg.grad_clip_norm,
             amp_dtype=(None if cfg.disable_amp or device.type != "cuda" else runtime_dtype),
             grad_scaler=grad_scaler,
@@ -680,6 +696,7 @@ def main() -> None:
             weight_mode=cfg.weight_mode,
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
+            motion_loss_excess_only=cfg.motion_loss_excess_only,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,

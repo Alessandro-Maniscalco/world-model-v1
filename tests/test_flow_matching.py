@@ -252,3 +252,25 @@ def test_motion_loss_weight_cap_limits_peak_weight_without_removing_motion_bias(
 
     assert float(weight_capped[0, 0, 1, 0, 0]) == pytest.approx(2.0)
     assert float(weight_capped[0, 0, 1, 0, 0]) > float(weight_capped[0, 0, 0, 0, 0])
+
+
+def test_motion_loss_weight_excess_only_leaves_average_motion_at_base_weight():
+    """Upweight only above-average motion regions when excess-only weighting is enabled."""
+    z_past = torch.zeros(1, 1, 1, 1, 1)
+    clean_chunk = torch.tensor([[[[[1.0]], [[3.0]]]]], dtype=torch.float32)
+
+    weight_default = _compute_motion_loss_weight(
+        observed_video=z_past,
+        clean_chunk=clean_chunk,
+        alpha=1.0,
+    )
+    weight_excess = _compute_motion_loss_weight(
+        observed_video=z_past,
+        clean_chunk=clean_chunk,
+        alpha=1.0,
+        excess_only=True,
+    )
+
+    assert float(weight_default[0, 0, 0, 0, 0]) > 1.0
+    assert float(weight_excess[0, 0, 0, 0, 0]) == pytest.approx(1.0)
+    assert float(weight_excess[0, 0, 1, 0, 0]) > 1.0
