@@ -73,6 +73,8 @@ class TrainScriptConfig:
     action_mlp_dim: int = 0
     action_mlp_residual: bool = False
     action_temporal_difference_scale: float = 0.0
+    action_temporal_mixer_kernel_size: int = 0
+    action_temporal_mixer_scale: float = 0.0
     frame_height: int = 0
     frame_width: int = 0
     num_workers: int = 0
@@ -134,6 +136,8 @@ class InferScriptConfig:
     action_mlp_dim: int = 0
     action_mlp_residual: bool = False
     action_temporal_difference_scale: float = 0.0
+    action_temporal_mixer_kernel_size: int = 0
+    action_temporal_mixer_scale: float = 0.0
     frame_height: int = 0
     frame_width: int = 0
     prompt: str = ""

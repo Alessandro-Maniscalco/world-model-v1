@@ -192,6 +192,42 @@ def test_train_script_builds_action_encoder_with_temporal_difference_scale_when_
     assert action_encoder.temporal_difference_scale == pytest.approx(0.75)
 
 
+def test_train_script_builds_action_encoder_with_temporal_mixer_when_requested() -> None:
+    """Allow the train config to request a temporal mixer over action tokens."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = TrainScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_temporal_mixer_kernel_size=3,
+        action_temporal_mixer_scale=0.5,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model = train_script.build_model_from_config(cfg, prepared)
+    action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, model)
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.temporal_mixer is not None
+    assert action_encoder.temporal_mixer_scale == pytest.approx(0.5)
+
+
 def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     """Avoid exposing removed non-VACE backbone shape flags."""
     train_script = _load_train_script_module()
@@ -203,6 +239,8 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--motion-loss-max-weight" in option_strings
     assert "--motion-loss-excess-only" in option_strings
     assert "--action-temporal-difference-scale" in option_strings
+    assert "--action-temporal-mixer-kernel-size" in option_strings
+    assert "--action-temporal-mixer-scale" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -331,7 +369,7 @@ def test_train_script_can_resume_training_state(tmp_path: Path) -> None:
     resumed_optimizer = torch.optim.AdamW(resumed_parameters, lr=1e-3)
 
     checkpoint = train_script._load_training_checkpoint(checkpoint_path)
-    resumed_step = train_script._resume_training_state(
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
         checkpoint=checkpoint,
         model=resumed_model,
         action_encoder=resumed_action_encoder,
@@ -340,6 +378,7 @@ def test_train_script_can_resume_training_state(tmp_path: Path) -> None:
     train_script._optimizer_state_to_device(resumed_optimizer, device=torch.device("cpu"))
 
     assert resumed_step == 123
+    assert restored_optimizer_state is True
     first_model_key = next(iter(source_model.state_dict()))
     first_action_key = next(iter(source_action_encoder.state_dict()))
     assert torch.allclose(resumed_model.state_dict()[first_model_key], source_model.state_dict()[first_model_key])
@@ -347,6 +386,80 @@ def test_train_script_can_resume_training_state(tmp_path: Path) -> None:
         resumed_action_encoder.state_dict()[first_action_key],
         source_action_encoder.state_dict()[first_action_key],
     )
+
+
+def test_train_script_can_resume_old_action_checkpoint_without_temporal_mixer_optimizer_state(tmp_path: Path) -> None:
+    """Allow older checkpoints to seed a new temporal mixer while keeping a fresh optimizer."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    old_cfg = TrainScriptConfig(
+        conditioning_mode="action",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    new_cfg = TrainScriptConfig(
+        conditioning_mode="action",
+        action_temporal_mixer_kernel_size=3,
+        action_temporal_mixer_scale=0.5,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    source_model = train_script.build_model_from_config(old_cfg, prepared)
+    source_action_encoder = train_script.build_action_encoder_from_config(old_cfg, prepared, source_model)
+    source_parameters = train_script._configure_trainable_parameters(old_cfg, source_model, source_action_encoder)
+    source_optimizer = torch.optim.AdamW(source_parameters, lr=1e-3)
+
+    checkpoint_path = tmp_path / "resume_old.pt"
+    torch.save(
+        {
+            "step": 123,
+            "model_state_dict": source_model.state_dict(),
+            "action_encoder_state_dict": source_action_encoder.state_dict(),
+            "optimizer_state_dict": source_optimizer.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    resumed_model = train_script.build_model_from_config(new_cfg, prepared)
+    resumed_action_encoder = train_script.build_action_encoder_from_config(new_cfg, prepared, resumed_model)
+    resumed_parameters = train_script._configure_trainable_parameters(new_cfg, resumed_model, resumed_action_encoder)
+    resumed_optimizer = torch.optim.AdamW(resumed_parameters, lr=1e-3)
+
+    checkpoint = train_script._load_training_checkpoint(checkpoint_path)
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=resumed_model,
+        action_encoder=resumed_action_encoder,
+        optimizer=resumed_optimizer,
+    )
+
+    assert resumed_step == 123
+    assert restored_optimizer_state is False
+    assert resumed_action_encoder.temporal_mixer is not None
+    assert torch.count_nonzero(resumed_action_encoder.temporal_mixer.weight) == 0
 
 
 def test_train_script_rejects_missing_resume_checkpoint(tmp_path: Path) -> None:

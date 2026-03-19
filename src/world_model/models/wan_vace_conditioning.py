@@ -19,6 +19,8 @@ class ActionTokenEncoder(nn.Module):
         dropout: float = 0.0,
         input_layernorm: bool = True,
         temporal_difference_scale: float = 0.0,
+        temporal_mixer_kernel_size: int = 0,
+        temporal_mixer_scale: float = 0.0,
     ) -> None:
         """Initialize an action-token projection stack."""
         super().__init__()
@@ -33,12 +35,34 @@ class ActionTokenEncoder(nn.Module):
                 "temporal_difference_scale must be non-negative, got "
                 f"{temporal_difference_scale}"
             )
+        if temporal_mixer_kernel_size < 0:
+            raise ValueError(
+                "temporal_mixer_kernel_size must be non-negative, got "
+                f"{temporal_mixer_kernel_size}"
+            )
+        if temporal_mixer_kernel_size not in (0, 1) and temporal_mixer_kernel_size % 2 == 0:
+            raise ValueError(
+                "temporal_mixer_kernel_size must be odd so temporal mixing preserves sequence length, "
+                f"got {temporal_mixer_kernel_size}"
+            )
+        if temporal_mixer_scale < 0:
+            raise ValueError(
+                "temporal_mixer_scale must be non-negative, got "
+                f"{temporal_mixer_scale}"
+            )
+        if temporal_mixer_scale > 0.0 and temporal_mixer_kernel_size <= 1:
+            raise ValueError(
+                "temporal_mixer_scale requires temporal_mixer_kernel_size >= 3, got "
+                f"kernel_size={temporal_mixer_kernel_size}"
+            )
 
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
         self.input_layernorm = bool(input_layernorm)
         self.mlp_residual = bool(mlp_residual)
         self.temporal_difference_scale = float(temporal_difference_scale)
+        self.temporal_mixer_kernel_size = int(temporal_mixer_kernel_size)
+        self.temporal_mixer_scale = float(temporal_mixer_scale)
         input_norm = nn.LayerNorm(self.action_dim) if self.input_layernorm else nn.Identity()
 
         if self.mlp_residual and mlp_dim is None:
@@ -78,6 +102,20 @@ class ActionTokenEncoder(nn.Module):
                 )
                 self.residual_net = None
 
+        self.temporal_mixer: nn.Conv1d | None = None
+        if self.temporal_mixer_kernel_size > 1:
+            padding = self.temporal_mixer_kernel_size // 2
+            self.temporal_mixer = nn.Conv1d(
+                self.hidden_dim,
+                self.hidden_dim,
+                kernel_size=self.temporal_mixer_kernel_size,
+                padding=padding,
+                groups=self.hidden_dim,
+            )
+            nn.init.zeros_(self.temporal_mixer.weight)
+            if self.temporal_mixer.bias is not None:
+                nn.init.zeros_(self.temporal_mixer.bias)
+
     def forward(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project `[B, T, A]` actions to `[B, T, D]` Wan cross-attention tokens."""
         if a_plan.ndim != 3:
@@ -88,10 +126,10 @@ class ActionTokenEncoder(nn.Module):
             )
         tokens = self._project_tokens(a_plan)
         if self.temporal_difference_scale <= 0.0 or a_plan.shape[1] <= 1:
-            return tokens
+            return self._apply_temporal_mixer(tokens)
         delta_source = _build_temporal_differences(a_plan)
         delta_tokens = self._project_tokens(delta_source) - self._project_tokens(torch.zeros_like(delta_source))
-        return tokens + (self.temporal_difference_scale * delta_tokens)
+        return self._apply_temporal_mixer(tokens + (self.temporal_difference_scale * delta_tokens))
 
     def _project_tokens(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project one action tensor through the configured base and residual paths."""
@@ -101,6 +139,22 @@ class ActionTokenEncoder(nn.Module):
             residual_tokens = self.residual_net(normalized_actions)
             return base_tokens + residual_tokens
         return self.net(a_plan)
+
+    def _apply_temporal_mixer(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Optionally add a lightweight temporal residual over projected action tokens."""
+        if self.temporal_mixer is None or self.temporal_mixer_scale <= 0.0 or tokens.shape[1] <= 1:
+            return tokens
+        mixed = self.temporal_mixer(tokens.transpose(1, 2)).transpose(1, 2)
+        return tokens + (self.temporal_mixer_scale * mixed)
+
+    def allowed_missing_state_dict_keys(self) -> set[str]:
+        """List optional state-dict keys that older checkpoints may legitimately omit."""
+        if self.temporal_mixer is None:
+            return set()
+        return {
+            "temporal_mixer.weight",
+            "temporal_mixer.bias",
+        }
 
 
 class NullConditioningEncoder(nn.Module):

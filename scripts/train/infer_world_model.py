@@ -158,6 +158,18 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Optional residual scale for projecting step-to-step action deltas alongside the raw action plan.",
     )
     parser.add_argument(
+        "--action-temporal-mixer-kernel-size",
+        type=int,
+        default=defaults.action_temporal_mixer_kernel_size,
+        help="Optional odd depthwise temporal kernel over projected action tokens (0 disables).",
+    )
+    parser.add_argument(
+        "--action-temporal-mixer-scale",
+        type=float,
+        default=defaults.action_temporal_mixer_scale,
+        help="Residual scale for the optional temporal action-token mixer.",
+    )
+    parser.add_argument(
         "--prompt",
         default=defaults.prompt,
         help="Prompt text used when --conditioning-mode prompt.",
@@ -272,6 +284,8 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_mlp_dim",
         "action_mlp_residual",
         "action_temporal_difference_scale",
+        "action_temporal_mixer_kernel_size",
+        "action_temporal_mixer_scale",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:

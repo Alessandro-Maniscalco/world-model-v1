@@ -185,6 +185,38 @@ def test_build_runtime_modules_respects_action_temporal_difference_scale() -> No
     assert action_encoder.temporal_difference_scale == pytest.approx(0.75)
 
 
+def test_build_runtime_modules_respects_action_temporal_mixer_settings() -> None:
+    """Propagate temporal action-mixer settings into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_temporal_mixer_kernel_size=3,
+        action_temporal_mixer_scale=0.5,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.temporal_mixer is not None
+    assert action_encoder.temporal_mixer_kernel_size == 3
+    assert action_encoder.temporal_mixer_scale == pytest.approx(0.5)
+
+
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()
@@ -225,6 +257,50 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     first_action_key = next(iter(action_state))
     assert torch.allclose(loaded_model.state_dict()[first_model_key], model_state[first_model_key])
     assert torch.allclose(loaded_action_encoder.state_dict()[first_action_key], action_state[first_action_key])
+
+
+def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_mixer() -> None:
+    """Allow old action-encoder checkpoints to load when the new temporal mixer is enabled."""
+    prepared = _make_prepared_batch()
+    old_cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    new_cfg = replace(
+        old_cfg,
+        action_temporal_mixer_kernel_size=3,
+        action_temporal_mixer_scale=0.5,
+    )
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        old_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "action_encoder_state_dict": action_encoder.state_dict(),
+    }
+
+    _, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        new_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=checkpoint,
+    )
+
+    assert isinstance(loaded_action_encoder, ActionTokenEncoder)
+    assert loaded_action_encoder.temporal_mixer is not None
+    assert torch.count_nonzero(loaded_action_encoder.temporal_mixer.weight) == 0
 
 
 def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypatch) -> None:

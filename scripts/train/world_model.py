@@ -42,6 +42,7 @@ from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
     build_conditioning_encoder_for_model,
     build_wan_vace_model_from_config,
+    _load_action_encoder_state_dict,
 )
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.training import (
@@ -179,6 +180,18 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.action_temporal_difference_scale,
         help="Optional residual scale for projecting step-to-step action deltas alongside the raw action plan.",
     )
+    parser.add_argument(
+        "--action-temporal-mixer-kernel-size",
+        type=int,
+        default=defaults.action_temporal_mixer_kernel_size,
+        help="Optional odd depthwise temporal kernel over projected action tokens (0 disables).",
+    )
+    parser.add_argument(
+        "--action-temporal-mixer-scale",
+        type=float,
+        default=defaults.action_temporal_mixer_scale,
+        help="Residual scale for the optional temporal action-token mixer.",
+    )
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
@@ -311,8 +324,8 @@ def _resume_training_state(
     model: nn.Module,
     action_encoder: nn.Module,
     optimizer: torch.optim.Optimizer,
-) -> int:
-    """Restore training modules from checkpoint and return the completed step."""
+) -> tuple[int, bool]:
+    """Restore training modules from checkpoint and report step plus optimizer restore status."""
     model_state = checkpoint.get("model_state_dict")
     if not isinstance(model_state, dict):
         raise ValueError("Checkpoint missing model_state_dict")
@@ -330,9 +343,14 @@ def _resume_training_state(
         raise ValueError(f"Checkpoint step must be >= 0, got {step}")
 
     model.load_state_dict(model_state)
-    action_encoder.load_state_dict(action_state)
+    loaded_partial_action_state = _load_action_encoder_state_dict(
+        action_encoder=action_encoder,
+        action_state=action_state,
+    )
+    if loaded_partial_action_state:
+        return step, False
     optimizer.load_state_dict(optimizer_state)
-    return step
+    return step, True
 
 
 def _optimizer_state_to_device(optimizer: torch.optim.Optimizer, *, device: torch.device) -> None:
@@ -528,19 +546,25 @@ def main() -> None:
     optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     resumed_step = 0
+    restored_optimizer_state = True
     if cfg.resume_from:
         checkpoint = _load_training_checkpoint(cfg.resume_from)
-        resumed_step = _resume_training_state(
+        resumed_step, restored_optimizer_state = _resume_training_state(
             checkpoint=checkpoint,
             model=model,
             action_encoder=action_encoder,
             optimizer=optimizer,
         )
-        del checkpoint
         _optimizer_state_to_device(optimizer, device=device)
         if device.type == "cuda":
             torch.cuda.empty_cache()
         print(f"Resumed training state from step={resumed_step:06d}", flush=True)
+        if not restored_optimizer_state:
+            print(
+                "Resume note: checkpoint predates the temporal action mixer, so optimizer state was not restored.",
+                flush=True,
+            )
+        del checkpoint
 
     cached_batch = first_batch if (cfg.overfit_one_batch or cfg.video_path) else None
 

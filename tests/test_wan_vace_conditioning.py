@@ -111,6 +111,25 @@ def test_action_token_encoder_temporal_difference_scale_changes_varying_sequence
     assert not torch.allclose(baseline(actions), temporal(actions))
 
 
+def test_action_token_encoder_temporal_mixer_is_noop_until_trained() -> None:
+    """Keep outputs unchanged when the optional temporal mixer starts from zero weights."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    temporal = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        temporal_mixer_kernel_size=3,
+        temporal_mixer_scale=0.5,
+    )
+    temporal.load_state_dict(baseline.state_dict(), strict=False)
+
+    assert torch.allclose(baseline(actions), temporal(actions))
+    assert temporal.allowed_missing_state_dict_keys() == {"temporal_mixer.weight", "temporal_mixer.bias"}
+
+
 def test_action_token_encoder_rejects_residual_mlp_without_width() -> None:
     """Require a hidden width when enabling the residual action MLP path."""
     with pytest.raises(ValueError, match="mlp_residual requires a positive mlp_dim"):
@@ -121,6 +140,15 @@ def test_action_token_encoder_rejects_negative_temporal_difference_scale() -> No
     """Reject negative temporal-difference residual scales."""
     with pytest.raises(ValueError, match="temporal_difference_scale must be non-negative"):
         ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_difference_scale=-0.1)
+
+
+def test_action_token_encoder_rejects_invalid_temporal_mixer_config() -> None:
+    """Reject unsupported temporal mixer settings before building the module."""
+    with pytest.raises(ValueError, match="temporal_mixer_kernel_size must be odd"):
+        ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_mixer_kernel_size=4)
+
+    with pytest.raises(ValueError, match="temporal_mixer_scale requires temporal_mixer_kernel_size >= 3"):
+        ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_mixer_scale=0.5)
 
 
 def test_build_vace_control_tensor_matches_vace_channel_contract() -> None:

@@ -79,6 +79,8 @@ def build_conditioning_encoder_for_model(
         mlp_residual=bool(getattr(cfg, "action_mlp_residual", False)),
         input_layernorm=bool(getattr(cfg, "action_input_layernorm", True)),
         temporal_difference_scale=float(getattr(cfg, "action_temporal_difference_scale", 0.0)),
+        temporal_mixer_kernel_size=int(getattr(cfg, "action_temporal_mixer_kernel_size", 0) or 0),
+        temporal_mixer_scale=float(getattr(cfg, "action_temporal_mixer_scale", 0.0)),
     )
 
 
@@ -107,7 +109,7 @@ def apply_wan_vace_checkpoint_overlay(
     if not isinstance(action_state, dict):
         raise ValueError("Checkpoint missing action_encoder_state_dict")
     model.load_state_dict(model_state)
-    action_encoder.load_state_dict(action_state)
+    _load_action_encoder_state_dict(action_encoder=action_encoder, action_state=action_state)
 
 
 def build_wan_vace_runtime_modules(
@@ -195,6 +197,8 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_mlp_dim",
         "action_mlp_residual",
         "action_temporal_difference_scale",
+        "action_temporal_mixer_kernel_size",
+        "action_temporal_mixer_scale",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:
@@ -227,3 +231,24 @@ def _resolve_action_mlp_dim(cfg: Any) -> int | None:
     """Resolve non-positive config values to the encoder's default linear projection path."""
     value = int(getattr(cfg, "action_mlp_dim", 0) or 0)
     return None if value <= 0 else value
+
+
+def _load_action_encoder_state_dict(
+    *,
+    action_encoder: ActionTokenEncoder | NullConditioningEncoder,
+    action_state: dict[str, torch.Tensor],
+) -> bool:
+    """Load action-encoder weights while tolerating missing optional module params."""
+    if isinstance(action_encoder, NullConditioningEncoder):
+        return False
+
+    incompatible = action_encoder.load_state_dict(action_state, strict=False)
+    unexpected_keys = set(incompatible.unexpected_keys)
+    missing_keys = set(incompatible.missing_keys)
+    allowed_missing = action_encoder.allowed_missing_state_dict_keys()
+    if unexpected_keys:
+        raise RuntimeError(f"Unexpected action-encoder checkpoint keys: {sorted(unexpected_keys)}")
+    disallowed_missing = missing_keys - allowed_missing
+    if disallowed_missing:
+        raise RuntimeError(f"Missing required action-encoder checkpoint keys: {sorted(disallowed_missing)}")
+    return bool(missing_keys)
