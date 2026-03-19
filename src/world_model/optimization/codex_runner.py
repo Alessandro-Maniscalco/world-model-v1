@@ -31,7 +31,7 @@ DEFAULT_CODEX_BIN_CANDIDATES = (
     "/home/amaniscalco/.antigravity/extensions/openai.chatgpt-*/bin/*/codex",
 )
 DEFAULT_CODEX_LOGIN_TIMEOUT_SECONDS = 15
-DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS = 600
+DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS = 1000
 DEFAULT_CODEX_SESSION_DISCOVERY_WINDOW_MINUTES = 10
 
 
@@ -210,6 +210,7 @@ def _run_codex_exec_once(
             f" ({command_mode}, images={0 if images is None else len(images)}, "
             f"model={model or 'default'}, timeout={timeout_seconds}s): {shlex.join(command)}"
         )
+        _log_codex_debug_paths(debug_dir)
         _write_codex_debug_artifacts(
             debug_dir=debug_dir,
             prompt=prompt,
@@ -327,6 +328,7 @@ def _build_codex_command(
             "exec",
             "--cd",
             str(cwd),
+            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--json",
             "--output-schema",
@@ -341,6 +343,7 @@ def _build_codex_command(
             str(codex_bin),
             "exec",
             "resume",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--json",
             "--output-last-message",
@@ -574,6 +577,13 @@ def _write_codex_debug_artifacts(
     if debug_metadata:
         metadata.update(debug_metadata)
     (debug_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _log_codex_debug_paths(debug_dir: Path) -> None:
+    """Print the main debug artifact paths for one Codex CLI invocation."""
+    _log_codex_status(f"prompt: {debug_dir / 'prompt.txt'}")
+    _log_codex_status(f"final reply: {debug_dir / 'final_reply.txt'}")
+    _log_codex_status(f"parsed payload: {debug_dir / 'final_payload.json'}")
 
 
 def _short_hash(value: str) -> str:

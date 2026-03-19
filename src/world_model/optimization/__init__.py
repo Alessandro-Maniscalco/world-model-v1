@@ -1,21 +1,23 @@
-"""Training-optimization planning and orchestration helpers."""
+"""Shared-session training-optimization helpers."""
 
 from world_model.optimization.controller import (
-    ExperimentPlan,
-    MemoryHints,
-    extract_memory_hints,
+    DEFAULT_INSTRUCTIONS_PATH,
+    DEFAULT_MEMORY_PATH,
+    DEFAULT_PROMPT_PATH,
+    DEFAULT_STATE_PATH,
+    load_controller_state,
+    render_controller_status,
     run_training_optimization_loop,
-    select_experiment_plan,
-    summarize_metrics_rows,
-    update_memory_markdown,
+    save_controller_state,
 )
 
 __all__ = [
-    "ExperimentPlan",
-    "MemoryHints",
-    "extract_memory_hints",
+    "DEFAULT_INSTRUCTIONS_PATH",
+    "DEFAULT_MEMORY_PATH",
+    "DEFAULT_PROMPT_PATH",
+    "DEFAULT_STATE_PATH",
+    "load_controller_state",
+    "render_controller_status",
     "run_training_optimization_loop",
-    "select_experiment_plan",
-    "summarize_metrics_rows",
-    "update_memory_markdown",
+    "save_controller_state",
 ]

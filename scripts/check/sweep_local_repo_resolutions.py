@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import imageio.v2 as iio
+import importlib.util
 import json
 import numpy as np
 import os
@@ -53,10 +54,8 @@ from world_model.vendor.wan import WanVACETransformer3DModel
 DEFAULT_SWEEP_OUTPUT_DIR = Path("runs/sweep_local")
 DEFAULT_RESOLUTIONS = (
     "320x240",
-    "384x288",
-    "512x384",
 )
-DEFAULT_MODE = "base"
+DEFAULT_MODE = "checkpoint"
 DEFAULT_CHECKPOINT_REPO_ID = "lerobot/aloha_static_fork_pick_up"
 DEFAULT_CHECKPOINT_VIDEO_KEY = "observation.images.cam_high"
 DEFAULT_CONTEXT_LEN = 9
@@ -72,6 +71,8 @@ DEFAULT_BASE_GUIDANCE_SCALE = 5.0
 DEFAULT_MAX_SEQUENCE_LENGTH = 512
 DEFAULT_BASE_TOTAL_FRAMES = 9
 DEFAULT_BASE_CONDITION_FRAMES = 5
+_PLAUSIBILITY_MODULE = None
+_ARM_MOTION_MODULE = None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -133,7 +134,11 @@ def _parse_args() -> argparse.Namespace:
         "--action-source",
         choices=("auto", "sample", "sequence"),
         default=DEFAULT_ACTION_SOURCE,
-        help="Checkpoint-mode action layout. 'sample' matches the current training loader, 'sequence' uses per-frame actions.",
+        help=(
+            "Checkpoint-mode action layout. 'sequence' passes the full per-frame action "
+            "sequence through prepare_packed_batch and matches current training packing; "
+            "'sample' broadcasts the first raw action vector as a control probe."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -145,6 +150,21 @@ def _parse_args() -> argparse.Namespace:
         "--single-chunk-rollout",
         action="store_true",
         help="Use one full future chunk in checkpoint mode.",
+    )
+    parser.add_argument(
+        "--action-scale",
+        type=float,
+        default=1.0,
+        help="Scale the checkpoint-mode action sequence before encoding it.",
+    )
+    parser.add_argument(
+        "--control-scale",
+        type=float,
+        default=None,
+        help=(
+            "Optional override for the runtime control_hidden_states scale used during "
+            "base-mode or checkpoint-mode inference."
+        ),
     )
     return parser.parse_args()
 
@@ -206,6 +226,180 @@ def _resolve_output_artifacts(
         output_root / f"{label}_comparison.mp4",
         output_root / "summary.json",
     )
+
+
+def _resolve_plausibility_output_path(*, output_path: Path, resolution_count: int) -> Path:
+    """Choose the plausibility-report path for one sweep item."""
+    if resolution_count == 1:
+        return output_path.with_name("plausibility_report.json")
+    return output_path.with_name(f"{output_path.stem}_plausibility_report.json")
+
+
+def _resolve_motion_output_path(*, output_path: Path, resolution_count: int) -> Path:
+    """Choose the arm-motion-report path for one sweep item."""
+    if resolution_count == 1:
+        return output_path.with_name("arm_motion_report.json")
+    return output_path.with_name(f"{output_path.stem}_arm_motion_report.json")
+
+
+def _load_plausibility_module():
+    """Load the video plausibility checker as a reusable local module."""
+    global _PLAUSIBILITY_MODULE
+    if _PLAUSIBILITY_MODULE is not None:
+        return _PLAUSIBILITY_MODULE
+
+    module_path = REPO_ROOT / "scripts" / "check" / "check_generated_video_plausibility.py"
+    spec = importlib.util.spec_from_file_location("check_generated_video_plausibility", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load plausibility checker from {module_path}.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
+    _PLAUSIBILITY_MODULE = module
+    return module
+
+
+def _load_arm_motion_module():
+    """Load the arm-motion checker as a reusable local module."""
+    global _ARM_MOTION_MODULE
+    if _ARM_MOTION_MODULE is not None:
+        return _ARM_MOTION_MODULE
+
+    module_path = REPO_ROOT / "scripts" / "check" / "check_arm_motion_alignment.py"
+    spec = importlib.util.spec_from_file_location("check_arm_motion_alignment", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load arm-motion checker from {module_path}.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
+    _ARM_MOTION_MODULE = module
+    return module
+
+
+def _write_plausibility_report(
+    *,
+    reference_video: torch.Tensor,
+    generated_video: torch.Tensor,
+    output_json: Path,
+) -> dict[str, object]:
+    """Write the canonical plausibility report for one generated rollout."""
+    checker = _load_plausibility_module()
+    thresholds = checker.ThresholdConfig(
+        max_frame_mae=45.0,
+        max_mean_mae=30.0,
+        black_luma_threshold=12.0,
+        max_black_fraction=0.75,
+        max_colorfulness_ratio=2.5,
+        max_top2_color_share=0.85,
+        min_quantized_colors=8,
+        min_edge_ratio=0.20,
+        max_temporal_delta_ratio=4.0,
+        quantization_bin_size=32,
+    )
+    reference_rgb = np.stack(_tensor_video_to_frames(reference_video), axis=0)
+    generated_rgb = np.stack(_tensor_video_to_frames(generated_video), axis=0)
+    reference_aligned, generated_aligned = checker.align_videos(
+        reference_video=reference_rgb,
+        generated_video=generated_rgb,
+        resize_reference=False,
+    )
+    frame_metrics = [
+        checker.analyze_frame(
+            frame_index=frame_index,
+            reference_frame=reference_frame,
+            generated_frame=generated_frame,
+            thresholds=thresholds,
+        )
+        for frame_index, (reference_frame, generated_frame) in enumerate(
+            zip(reference_aligned, generated_aligned)
+        )
+    ]
+    summary = checker.build_summary(
+        reference_video=reference_aligned,
+        generated_video=generated_aligned,
+        frame_metrics=frame_metrics,
+        thresholds=thresholds,
+    )
+    report = {
+        "reference_video": "<in_memory_reference>",
+        "generated_video": "<in_memory_generated>",
+        "reference_shape": list(reference_aligned.shape),
+        "generated_shape": list(generated_aligned.shape),
+        "thresholds": checker.asdict(thresholds),
+        "summary": summary,
+        "frames": [checker.asdict(metric) for metric in frame_metrics],
+    }
+    checker.save_report(output_json=output_json, report=report)
+    return summary
+
+
+def _write_arm_motion_report(
+    *,
+    reference_video: torch.Tensor,
+    generated_video: torch.Tensor,
+    generated_video_path: Path,
+    output_json: Path,
+) -> dict[str, object]:
+    """Write the canonical arm-motion report for one generated rollout."""
+    checker = _load_arm_motion_module()
+    config = checker.MotionConfig(
+        roi_percentile=92.0,
+        min_motion_value=6.0,
+        roi_padding=24,
+        profile_floor=1.0,
+        motion_ratio_floor=0.70,
+        late_motion_ratio_floor=0.70,
+        profile_corr_floor=0.70,
+        spatial_iou_floor=0.25,
+    )
+    reference_rgb = np.stack(_tensor_video_to_frames(reference_video), axis=0)
+    generated_rgb = np.stack(_tensor_video_to_frames(generated_video), axis=0)
+    reference_aligned, generated_aligned = checker.align_videos(
+        reference_video=reference_rgb,
+        generated_video=generated_rgb,
+        resize_reference=False,
+    )
+    summary = checker.build_motion_summary(
+        reference_video=reference_aligned,
+        generated_video=generated_aligned,
+        config=config,
+    )
+    crop_path = checker.motion_crop_video_path(generated_video_path)
+    preview_path = checker.roi_preview_path(generated_video_path)
+    checker.draw_roi_preview(
+        reference_video=reference_aligned,
+        generated_video=generated_aligned,
+        roi_xyxy=summary.roi_xyxy,
+        output_path=preview_path,
+    )
+    checker.save_motion_crop_comparison(
+        reference_video=reference_aligned,
+        generated_video=generated_aligned,
+        roi_xyxy=summary.roi_xyxy,
+        output_path=crop_path,
+    )
+    report = {
+        "reference_video": "<in_memory_reference>",
+        "generated_video": str(generated_video_path),
+        "reference_shape": list(reference_aligned.shape),
+        "generated_shape": list(generated_aligned.shape),
+        "config": checker.asdict(config),
+        "summary": checker.asdict(summary),
+        "artifacts": {
+            "arm_crop_comparison_video": str(crop_path),
+            "roi_preview_image": str(preview_path),
+        },
+    }
+    checker.save_report(output_json=output_json, report=report)
+    return report
 
 
 def _load_checkpoint_runtime_config(checkpoint_path: Path) -> tuple[dict[str, object], SimpleNamespace]:
@@ -347,7 +541,7 @@ def _select_action_tensor(
     action_source: str,
     expected_action_dim: int | None,
 ) -> torch.Tensor:
-    """Choose sample-wise or per-frame actions to match the checkpoint's action encoder."""
+    """Choose a raw single-step or full per-frame action source before latent packing."""
     if action_seq.ndim != 3:
         raise ValueError(f"action_seq must be [B,T,A], got {tuple(action_seq.shape)}")
 
@@ -360,7 +554,9 @@ def _select_action_tensor(
         elif expected_action_dim == sequence_action_dim:
             resolved_source = "sequence"
         else:
-            resolved_source = "sample"
+            # Training feeds the full per-frame sequence into prepare_packed_batch,
+            # so ambiguous checkpoint widths should default to the same path.
+            resolved_source = "sequence"
 
     if resolved_source == "sample":
         return action_seq[:, 0]
@@ -1029,6 +1225,8 @@ def _run_one_checkpoint_resolution(
     height: int,
     output_path: Path,
     comparison_path: Path,
+    plausibility_output_path: Path | None,
+    motion_output_path: Path | None,
     repo_id: str,
     episode_index: int,
     start_frame: int,
@@ -1042,6 +1240,8 @@ def _run_one_checkpoint_resolution(
     single_chunk_rollout: bool,
     device_name: str,
     action_source: str,
+    action_scale: float,
+    control_scale: float | None,
     prompt: str,
     negative_prompt: str,
     guidance_scale: float,
@@ -1084,6 +1284,8 @@ def _run_one_checkpoint_resolution(
             runtime_cfg.guidance_scale = guidance_scale
             runtime_cfg.max_sequence_length = max_sequence_length
             runtime_cfg.single_chunk_rollout = True
+        if control_scale is not None:
+            runtime_cfg.control_scale = float(control_scale)
         if mode == "base":
             runtime_notes.append(
                 "Base mode uses the canonical Wan VACE pipeline with dense-prefix mask conditioning."
@@ -1092,8 +1294,15 @@ def _run_one_checkpoint_resolution(
             runtime_notes.append(
                 "Checkpoint mode uses the repo's direct chunkwise world-model inference path to match training."
             )
+            if action_scale != 1.0:
+                runtime_notes.append(f"Scaled checkpoint-mode actions by {action_scale:.3f} for this probe.")
+        if control_scale is not None:
+            runtime_notes.append(
+                f"Overrode runtime control scale to {float(control_scale):.3f} for this probe."
+            )
         device = _resolve_device(device_name=device_name)
         runtime_dtype = _select_runtime_dtype(device=device)
+        result_metadata["conditioning_scale"] = float(getattr(runtime_cfg, "control_scale", 1.0))
         total_frames = (
             context_len + horizon_len
             if mode == "checkpoint"
@@ -1142,11 +1351,12 @@ def _run_one_checkpoint_resolution(
             pred_rollout = _normalize_video_for_export(pred_rollout)
             target_rollout = _normalize_video_for_export(target_full_video)
         else:
+            scaled_action_seq = action_seq * float(action_scale)
             target_rollout, pred_rollout = _run_checkpoint_world_model(
                 runtime_cfg=runtime_cfg,
                 checkpoint=checkpoint,
                 video=video,
-                action_seq=action_seq,
+                action_seq=scaled_action_seq,
                 video_key=video_key,
                 width=width,
                 height=height,
@@ -1167,13 +1377,35 @@ def _run_one_checkpoint_resolution(
             output_video_path=str(comparison_path),
             fps=fps,
         )
+        plausibility_summary: dict[str, object] | None = None
+        motion_report: dict[str, object] | None = None
+        if plausibility_output_path is not None:
+            plausibility_summary = _write_plausibility_report(
+                reference_video=target_rollout,
+                generated_video=pred_rollout,
+                output_json=plausibility_output_path,
+            )
+        if motion_output_path is not None:
+            motion_report = _write_arm_motion_report(
+                reference_video=target_rollout,
+                generated_video=pred_rollout,
+                generated_video_path=output_path,
+                output_json=motion_output_path,
+            )
         return {
             "resolution": label,
             "status": "ok",
             "output_path": str(output_path),
             "comparison_output_path": str(comparison_path),
+            "plausibility_output_path": (
+                str(plausibility_output_path) if plausibility_output_path is not None else None
+            ),
+            "plausibility": plausibility_summary,
+            "motion_output_path": str(motion_output_path) if motion_output_path is not None else None,
+            "motion": motion_report,
             "elapsed_s": time.time() - start_time,
             "mode": mode,
+            "action_scale": action_scale,
             "notes": runtime_notes,
             **result_metadata,
         }
@@ -1191,6 +1423,7 @@ def _run_one_checkpoint_resolution(
             "error": error,
             "elapsed_s": time.time() - start_time,
             "mode": mode,
+            "action_scale": action_scale,
             "notes": runtime_notes,
             **result_metadata,
         }
@@ -1222,6 +1455,14 @@ def main() -> None:
             label=label,
             resolution_count=len(parsed_resolutions),
         )
+        plausibility_output_path = _resolve_plausibility_output_path(
+            output_path=output_path,
+            resolution_count=len(parsed_resolutions),
+        )
+        motion_output_path = _resolve_motion_output_path(
+            output_path=output_path,
+            resolution_count=len(parsed_resolutions),
+        )
         effective_inference_steps = max(args.num_inference_steps, 50)
         print(
             "Running local "
@@ -1237,6 +1478,8 @@ def main() -> None:
             height=height,
             output_path=output_path,
             comparison_path=comparison_path,
+            plausibility_output_path=plausibility_output_path,
+            motion_output_path=motion_output_path,
             repo_id=args.repo_id,
             episode_index=args.episode_index,
             start_frame=args.start_frame,
@@ -1250,6 +1493,8 @@ def main() -> None:
             single_chunk_rollout=args.single_chunk_rollout,
             device_name=args.device,
             action_source=args.action_source,
+            action_scale=args.action_scale,
+            control_scale=args.control_scale,
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
             guidance_scale=args.guidance_scale,
@@ -1262,6 +1507,17 @@ def main() -> None:
                 f"(steps={result['effective_num_inference_steps']})"
             )
             print(f"{label}: saved {result['comparison_output_path']}")
+            if result.get("plausibility_output_path"):
+                plausibility = result.get("plausibility") or {}
+                verdict = "PASS" if plausibility.get("plausible") else "FAIL"
+                print(
+                    f"{label}: plausibility {verdict} "
+                    f"-> {result['plausibility_output_path']}"
+                )
+            if result.get("motion_output_path"):
+                motion = (result.get("motion") or {}).get("summary", {})
+                verdict = str(motion.get("motion_verdict", "unknown"))
+                print(f"{label}: arm-motion {verdict} -> {result['motion_output_path']}")
         else:
             print(f"{label}: {result['error']}")
 

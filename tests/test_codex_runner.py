@@ -103,6 +103,7 @@ def test_run_codex_exec_parses_structured_output(monkeypatch, tmp_path: Path) ->
     assert "gpt-5" in result.command
     assert "-i" in result.command
     assert str(image_path) in result.command
+    assert "--dangerously-bypass-approvals-and-sandbox" in result.command
     assert "--output-schema" in result.command
     assert "--output-last-message" in result.command
     assert result.command[-1] == "-"
@@ -121,6 +122,42 @@ def test_run_codex_exec_parses_structured_output(monkeypatch, tmp_path: Path) ->
     )
     metadata = json.loads((debug_dirs[0] / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["prompt_chars"] == len("Inspect the latest run.")
+
+
+def test_run_codex_exec_logs_debug_artifact_paths(
+    monkeypatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Print the main debug artifact paths before each Codex invocation starts."""
+    codex_bin = tmp_path / "codex"
+    codex_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    codex_bin.chmod(0o755)
+    monkeypatch.setattr(codex_runner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(codex_runner, "CODEX_DEBUG_ROOT", tmp_path / "runs" / "training_optimizer" / "debug")
+    monkeypatch.setattr(codex_runner, "ensure_codex_chatgpt_login", lambda **_: codex_bin)
+    monkeypatch.setattr(codex_runner, "_discover_latest_codex_session_id", lambda **_: "session-new")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        output_flag_index = command.index("--output-last-message") + 1
+        output_path = Path(command[output_flag_index])
+        output_path.write_text('{"action_type":"stop","stop":{"reason":"done"}}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout='{"event":"done"}\n', stderr="")
+
+    monkeypatch.setattr(codex_runner.subprocess, "run", fake_run)
+
+    run_codex_exec(
+        prompt="Inspect the latest run.",
+        schema={"type": "object"},
+        codex_bin=codex_bin,
+        cwd=tmp_path,
+    )
+
+    stdout = capsys.readouterr().out
+    assert "[codex-runner] prompt:" in stdout
+    assert "prompt.txt" in stdout
+    assert "final_reply.txt" in stdout
+    assert "final_payload.json" in stdout
 
 
 def test_run_codex_exec_raises_on_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -159,6 +196,7 @@ def test_run_codex_exec_resumes_existing_session(monkeypatch, tmp_path: Path) ->
         output_path = Path(command[output_flag_index])
         output_path.write_text('{"action_type":"stop","stop":{"reason":"done"}}', encoding="utf-8")
         assert command[:3] == [str(codex_bin), "exec", "resume"]
+        assert "--dangerously-bypass-approvals-and-sandbox" in command
         assert "session-123" in command
         assert "--output-schema" not in command
         return SimpleNamespace(returncode=0, stdout='{"event":"done"}\n', stderr="")
