@@ -35,6 +35,8 @@ class TrainScriptConfig:
     weight_decay: float = 1e-4
     grad_clip_norm: float = 1.0
     weight_mode: str = "uniform"
+    motion_loss_alpha: float = 0.0
+    motion_loss_max_weight: float = 0.0
     t_min: float = 0.0
     t_max: float = 1.0
     disable_amp: bool = False
@@ -66,6 +68,9 @@ class TrainScriptConfig:
         "proj_out",
     )
     conditioning_mode: str = "none"
+    action_input_layernorm: bool = True
+    action_mlp_dim: int = 0
+    action_mlp_residual: bool = False
     frame_height: int = 0
     frame_width: int = 0
     num_workers: int = 0
@@ -123,6 +128,9 @@ class InferScriptConfig:
         "proj_out",
     )
     conditioning_mode: str = "none"
+    action_input_layernorm: bool = True
+    action_mlp_dim: int = 0
+    action_mlp_residual: bool = False
     frame_height: int = 0
     frame_width: int = 0
     prompt: str = ""

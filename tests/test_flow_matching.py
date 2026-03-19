@@ -4,6 +4,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 import pytest
 import torch
 from world_model.training.flow_matching import (
+    _compute_motion_loss_weight,
     chunkwise_teacher_forcing_loss,
     make_noisy_and_target,
     normalized_t_to_scheduler_timestep,
@@ -123,6 +124,36 @@ def test_flow_matching_validates_shapes_and_params():
         w(torch.tensor([0.1], dtype=torch.float32), mode="bad")
 
 
+def test_chunkwise_teacher_forcing_loss_rejects_negative_motion_loss_alpha():
+    """Reject negative motion weighting because it would downweight moving regions."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="motion_loss_alpha"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 2, 2),
+            z_future_video=torch.randn(1, 2, 2, 2, 2),
+            action_tokens=torch.randn(1, 2, 1),
+            k=1,
+            motion_loss_alpha=-0.1,
+        )
+
+
+def test_chunkwise_teacher_forcing_loss_rejects_fractional_motion_loss_cap():
+    """Reject motion-loss caps below 1 because they would downweight the base loss."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="motion_loss_max_weight"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 2, 2),
+            z_future_video=torch.randn(1, 2, 2, 2, 2),
+            action_tokens=torch.randn(1, 2, 1),
+            k=1,
+            motion_loss_max_weight=0.5,
+        )
+
+
 class _ChunkActionWindowRecorder:
     """Record per-chunk action-token windows during teacher forcing."""
 
@@ -166,3 +197,58 @@ def test_chunkwise_teacher_forcing_uses_current_chunk_action_window():
     assert torch.equal(model.action_windows[0], action_tokens[:, 0:2])
     assert torch.equal(model.action_windows[1], action_tokens[:, 2:4])
     assert torch.equal(model.action_windows[2], action_tokens[:, 4:5])
+
+
+class _ZeroVelocityModel:
+    """Return zero velocity predictions for deterministic loss comparisons."""
+
+    def __call__(
+        self,
+        *,
+        noisy_future_video: torch.Tensor,
+        observed_video: torch.Tensor,
+        action_tokens: torch.Tensor,
+        timestep_t: torch.Tensor,
+        block_causal_attention_mask: torch.Tensor,
+        observed_mask: torch.Tensor | None = None,
+        control_hidden_states_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Ignore inputs and emit zeros with the same shape as the noisy suffix."""
+        del observed_video, action_tokens, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        return torch.zeros_like(noisy_future_video)
+
+
+def test_motion_loss_weight_upweights_moving_regions():
+    """Assign larger per-pixel weights to moving latent regions when enabled."""
+    z_past = torch.zeros(1, 1, 1, 1, 1)
+    clean_chunk = torch.tensor([[[[[0.0]], [[3.0]]]]], dtype=torch.float32)
+
+    weight_uniform = _compute_motion_loss_weight(
+        observed_video=z_past,
+        clean_chunk=clean_chunk,
+        alpha=0.0,
+    )
+    weight_motion = _compute_motion_loss_weight(
+        observed_video=z_past,
+        clean_chunk=clean_chunk,
+        alpha=1.0,
+    )
+
+    assert torch.allclose(weight_uniform, torch.ones_like(clean_chunk))
+    assert float(weight_motion[0, 0, 1, 0, 0]) > float(weight_motion[0, 0, 0, 0, 0])
+
+
+def test_motion_loss_weight_cap_limits_peak_weight_without_removing_motion_bias():
+    """Keep moving regions upweighted while preventing unbounded motion-loss spikes."""
+    z_past = torch.zeros(1, 1, 1, 1, 1)
+    clean_chunk = torch.tensor([[[[[0.0]], [[9.0]]]]], dtype=torch.float32)
+
+    weight_capped = _compute_motion_loss_weight(
+        observed_video=z_past,
+        clean_chunk=clean_chunk,
+        alpha=1.0,
+        max_weight=2.0,
+    )
+
+    assert float(weight_capped[0, 0, 1, 0, 0]) == pytest.approx(2.0)
+    assert float(weight_capped[0, 0, 1, 0, 0]) > float(weight_capped[0, 0, 0, 0, 0])

@@ -178,6 +178,8 @@ def chunkwise_teacher_forcing_loss(
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: WeightMode = "uniform",
+    motion_loss_alpha: float = 0.0,
+    motion_loss_max_weight: float = 0.0,
     snr_clip_max: float = 5.0,
     eps: float = 1e-6,
     generator: torch.Generator | None = None,
@@ -193,6 +195,8 @@ def chunkwise_teacher_forcing_loss(
         t_min=t_min,
         t_max=t_max,
         weight_mode=weight_mode,
+        motion_loss_alpha=motion_loss_alpha,
+        motion_loss_max_weight=motion_loss_max_weight,
         snr_clip_max=snr_clip_max,
         eps=eps,
         generator=generator,
@@ -210,6 +214,8 @@ def _chunkwise_teacher_forcing_video_loss(
     t_min: float,
     t_max: float,
     weight_mode: WeightMode,
+    motion_loss_alpha: float,
+    motion_loss_max_weight: float,
     snr_clip_max: float,
     eps: float,
     generator: torch.Generator | None,
@@ -226,6 +232,9 @@ def _chunkwise_teacher_forcing_video_loss(
     assert z_past_video is not None
     assert z_future_video is not None
     assert action_tokens is not None
+    if motion_loss_alpha < 0.0:
+        raise ValueError(f"motion_loss_alpha must be >= 0, got {motion_loss_alpha}")
+    _validate_motion_loss_max_weight(motion_loss_max_weight)
 
     batch_size = z_future_video.shape[0]
     schedule = build_k_plus_one_schedule(
@@ -303,6 +312,13 @@ def _chunkwise_teacher_forcing_video_loss(
         pred_chunk = pred_suffix[:, :, :chunk_len, :, :]
 
         sq_err = (pred_chunk - target_chunk).pow(2)
+        motion_weight = _compute_motion_loss_weight(
+            observed_video=observed_video,
+            clean_chunk=clean_chunk,
+            alpha=motion_loss_alpha,
+            max_weight=motion_loss_max_weight,
+        )
+        sq_err = sq_err * motion_weight
         per_sample_elements = clean_chunk[0].numel()
         weighted_sum = weighted_sum + (sq_err * chunk_weight).sum()
         weight_mass = weight_mass + chunk_weight.sum() * per_sample_elements
@@ -350,3 +366,39 @@ def _validate_chunkwise_video_inputs(
         raise ValueError("z_future_video must have positive time dimension")
     if k < 1:
         raise ValueError(f"k must be >= 1 for K+1 chunking, got {k}")
+
+
+def _compute_motion_loss_weight(
+    *,
+    observed_video: torch.Tensor,
+    clean_chunk: torch.Tensor,
+    alpha: float,
+    max_weight: float = 0.0,
+) -> torch.Tensor:
+    """Build a per-pixel loss weight that upweights moving latent regions."""
+    _validate_motion_loss_max_weight(max_weight)
+    if alpha == 0.0:
+        return torch.ones_like(clean_chunk)
+
+    previous_frame = observed_video[:, :, -1:, :, :]
+    motion_source = torch.cat((previous_frame, clean_chunk), dim=2)
+    motion_delta = (motion_source[:, :, 1:, :, :] - motion_source[:, :, :-1, :, :]).abs()
+    motion_energy = motion_delta.mean(dim=1, keepdim=True)
+    flat = motion_energy.flatten(start_dim=1)
+    mean_energy = flat.mean(dim=1, keepdim=True).clamp_min(1e-6)
+    normalized = (flat / mean_energy).view_as(motion_energy)
+    weight = 1.0 + alpha * normalized
+    if max_weight > 0.0:
+        weight = weight.clamp(max=max_weight)
+    return weight
+
+
+def _validate_motion_loss_max_weight(max_weight: float) -> None:
+    """Reject invalid motion-loss caps before weighting the latent error."""
+    if max_weight < 0.0:
+        raise ValueError(f"motion_loss_max_weight must be >= 0, got {max_weight}")
+    if 0.0 < max_weight < 1.0:
+        raise ValueError(
+            "motion_loss_max_weight must be 0 (disabled) or >= 1, got "
+            f"{max_weight}"
+        )

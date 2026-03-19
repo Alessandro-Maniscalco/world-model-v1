@@ -90,6 +90,18 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay)
     parser.add_argument("--grad-clip-norm", type=float, default=defaults.grad_clip_norm)
     parser.add_argument("--weight-mode", choices=["uniform", "snr", "clipped_snr"], default=defaults.weight_mode)
+    parser.add_argument(
+        "--motion-loss-alpha",
+        type=float,
+        default=defaults.motion_loss_alpha,
+        help="Extra weight applied to moving latent regions; 0 disables motion-aware weighting.",
+    )
+    parser.add_argument(
+        "--motion-loss-max-weight",
+        type=float,
+        default=defaults.motion_loss_max_weight,
+        help="Optional cap on the per-region motion-aware loss multiplier; 0 disables capping.",
+    )
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
@@ -119,6 +131,36 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--lora-dropout", type=float, default=defaults.lora_dropout)
     parser.add_argument("--lora-target-modules", nargs="+", default=list(defaults.lora_target_modules))
     parser.add_argument("--conditioning-mode", choices=("none", "action"), default=defaults.conditioning_mode)
+    parser.add_argument(
+        "--action-input-layernorm",
+        action="store_true",
+        default=defaults.action_input_layernorm,
+        help="Normalize each action token with LayerNorm before projection.",
+    )
+    parser.add_argument(
+        "--no-action-input-layernorm",
+        dest="action_input_layernorm",
+        action="store_false",
+        help="Disable action-token input LayerNorm to preserve action magnitude information.",
+    )
+    parser.add_argument(
+        "--action-mlp-dim",
+        type=int,
+        default=defaults.action_mlp_dim,
+        help="Optional hidden width for a two-layer action-token MLP (0 keeps the legacy single linear projection).",
+    )
+    parser.add_argument(
+        "--action-mlp-residual",
+        action="store_true",
+        default=defaults.action_mlp_residual,
+        help="Add the optional action-token MLP as a residual path on top of the legacy linear projection.",
+    )
+    parser.add_argument(
+        "--no-action-mlp-residual",
+        dest="action_mlp_residual",
+        action="store_false",
+        help="Use the optional action-token MLP as a replacement path instead of a residual augmentation.",
+    )
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
@@ -347,6 +389,8 @@ def _evaluate_loss(
     t_min: float,
     t_max: float,
     weight_mode: str,
+    motion_loss_alpha: float,
+    motion_loss_max_weight: float,
     device: torch.device,
     disable_amp: bool,
     runtime_dtype: torch.dtype,
@@ -366,6 +410,8 @@ def _evaluate_loss(
             t_min=t_min,
             t_max=t_max,
             weight_mode=weight_mode,
+            motion_loss_alpha=motion_loss_alpha,
+            motion_loss_max_weight=motion_loss_max_weight,
         )
     return float(loss.detach().cpu().item())
 
@@ -386,14 +432,15 @@ def main() -> None:
         "cuda",
         enabled=(device.type == "cuda" and not cfg.disable_amp and runtime_dtype == torch.float16),
     )
-    print(f"Device: {device}")
+    print(f"Device: {device}", flush=True)
     print(
         f"Training config: steps={cfg.max_steps} batch={cfg.batch_size} "
-        f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}"
+        f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}",
+        flush=True,
     )
-    print(f"Training dtype: {runtime_dtype}")
+    print(f"Training dtype: {runtime_dtype}", flush=True)
     if cfg.resume_from:
-        print(f"Resume checkpoint: {cfg.resume_from}")
+        print(f"Resume checkpoint: {cfg.resume_from}", flush=True)
 
     vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
     loader = None
@@ -441,7 +488,8 @@ def main() -> None:
         "Latent window: "
         f"context={prepared.context_latent_steps} "
         f"future={prepared.horizon_latent_steps} "
-        f"total={prepared.total_latent_steps}"
+        f"total={prepared.total_latent_steps}",
+        flush=True,
     )
     cached_prepared = prepared if (cfg.overfit_one_batch or cfg.video_path) else None
     if cached_prepared is not None and device.type == "cuda":
@@ -453,7 +501,10 @@ def main() -> None:
 
     parameter_groups = _configure_trainable_parameters(cfg, model, action_encoder)
     trainable_param_count = sum(parameter.numel() for parameter in parameter_groups)
-    print(f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)")
+    print(
+        f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)",
+        flush=True,
+    )
     optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     resumed_step = 0
@@ -469,7 +520,7 @@ def main() -> None:
         _optimizer_state_to_device(optimizer, device=device)
         if device.type == "cuda":
             torch.cuda.empty_cache()
-        print(f"Resumed training state from step={resumed_step:06d}")
+        print(f"Resumed training state from step={resumed_step:06d}", flush=True)
 
     cached_batch = first_batch if (cfg.overfit_one_batch or cfg.video_path) else None
 
@@ -488,16 +539,19 @@ def main() -> None:
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
+            motion_loss_alpha=cfg.motion_loss_alpha,
+            motion_loss_max_weight=cfg.motion_loss_max_weight,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,
         )
-        print(f"Overfit baseline loss: {overfit_start_loss:.6f}")
+        print(f"Overfit baseline loss: {overfit_start_loss:.6f}", flush=True)
 
     if cfg.max_steps <= resumed_step:
         print(
             f"Requested max_steps={cfg.max_steps} is not greater than resumed step={resumed_step}; "
-            "skipping optimizer updates."
+            "skipping optimizer updates.",
+            flush=True,
         )
 
     for step in itertools.count(start=resumed_step + 1):
@@ -542,6 +596,8 @@ def main() -> None:
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
+            motion_loss_alpha=cfg.motion_loss_alpha,
+            motion_loss_max_weight=cfg.motion_loss_max_weight,
             grad_clip_norm=cfg.grad_clip_norm,
             amp_dtype=(None if cfg.disable_amp or device.type != "cuda" else runtime_dtype),
             grad_scaler=grad_scaler,
@@ -558,7 +614,8 @@ def main() -> None:
         if step % cfg.log_every == 0 or step == 1:
             print(
                 f"step={step:06d} loss={metrics.loss:.6f} grad={metrics.grad_norm:.4f} "
-                f"time={step_time_s:.3f}s chunks={metrics.per_chunk_losses}"
+                f"time={step_time_s:.3f}s chunks={metrics.per_chunk_losses}",
+                flush=True,
             )
 
         if _should_save_checkpoint(cfg, step):
@@ -570,7 +627,7 @@ def main() -> None:
                 optimizer=optimizer,
                 extra_state={"config": asdict(cfg)},
             )
-            print(f"checkpoint={path}")
+            print(f"checkpoint={path}", flush=True)
 
         if cfg.auto_stop_check_every > 0 and step % cfg.auto_stop_check_every == 0:
             block_mean_loss = sum(block_losses) / len(block_losses)
@@ -583,7 +640,8 @@ def main() -> None:
                 print(
                     "auto-stop block summary: "
                     f"steps={step - len(block_losses) + 1:06d}-{step:06d} "
-                    f"mean_loss={block_mean_loss:.6f}; continuing (first block)"
+                    f"mean_loss={block_mean_loss:.6f}; continuing (first block)",
+                    flush=True,
                 )
             else:
                 print(
@@ -591,11 +649,12 @@ def main() -> None:
                     f"steps={step - len(block_losses) + 1:06d}-{step:06d} "
                     f"mean_loss={block_mean_loss:.6f} "
                     f"relative_improvement={improvement:.4f} "
-                    f"threshold={cfg.auto_stop_min_relative_improvement:.4f}"
+                    f"threshold={cfg.auto_stop_min_relative_improvement:.4f}",
+                    flush=True,
                 )
             block_losses = []
             if not should_continue:
-                print(f"auto-stop triggered at step={step:06d}")
+                print(f"auto-stop triggered at step={step:06d}", flush=True)
                 break
 
     final_ckpt = save_checkpoint(
@@ -606,7 +665,7 @@ def main() -> None:
         optimizer=optimizer,
         extra_state={"config": asdict(cfg)},
     )
-    print(f"final_checkpoint={final_ckpt}")
+    print(f"final_checkpoint={final_ckpt}", flush=True)
 
     if cfg.overfit_one_batch:
         overfit_end_loss = _evaluate_loss(
@@ -619,6 +678,8 @@ def main() -> None:
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
+            motion_loss_alpha=cfg.motion_loss_alpha,
+            motion_loss_max_weight=cfg.motion_loss_max_weight,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,
@@ -626,7 +687,8 @@ def main() -> None:
         assert overfit_start_loss is not None
         print(
             f"overfit_loss_start={overfit_start_loss:.6f} "
-            f"overfit_loss_end={overfit_end_loss:.6f}"
+            f"overfit_loss_end={overfit_end_loss:.6f}",
+            flush=True,
         )
 
 
