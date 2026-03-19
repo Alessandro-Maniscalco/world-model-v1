@@ -28,6 +28,8 @@ Keep only the information that should change the next optimization decision.
 - The h16 scalar `motion_loss_alpha` sweep now looks exhausted. Raising the clean h16 continuation from `0.5` to `0.75` did not land at a better trade point; it snapped back into the unstable overactive family, with visible distortion on the main clip and episode `2`, main-clip MAE `15.171`, and an explicit plausibility fail on episode `2`.
 - That `0.75` failure points to a narrower next lever than more raw alpha tuning: the current motion-aware loss can let a few high-motion latent regions dominate. The smallest grounded code change is to keep motion weighting but cap the maximum per-region multiplier.
 - The first capped h16 retry confirms that direction is real but not solved yet. Resuming clean h16 step `1000` with `motion_loss_alpha=0.75` and `motion_loss_max_weight=2.0` removed the uncapped `0.75` blow-up and restored plausibility on all three windows, but it still stayed too motion-heavy on the main clip and episode `2` relative to the cleaner uncapped `0.5` reference (`main late_motion_ratio` `1.074` vs `0.517`, `ep2 late_motion_ratio` `2.514` vs `1.935`) while improving episode `1` fidelity (`mean_frame_mae_rgb_0_255` `6.008` vs `6.506`).
+- Tightening the cap alone did not produce a clean winner either. Moving from `motion_loss_max_weight=2.0` to `1.5` on the same clean h16 `motion_loss_alpha=0.75` continuation pulled the main clip back out of the overactive family (`main late_motion_ratio` `0.601`, `spatial_motion_iou` `0.658`) and improved main plausibility over the looser cap (`mean_frame_mae_rgb_0_255` `7.890` vs `9.565`), but episode `1` regressed and episode `2` stayed too late-heavy (`late_motion_ratio` `2.974`), so the cap-only sweep is now bracketed without a new best h16 trade.
+- The next grounded lever is narrower than another cap tweak: the current motion bonus still upweights average-motion regions because it uses `1 + alpha * normalized_motion`. The smallest code change is to make that bonus excess-only above the per-sample mean motion level, while keeping the existing cap available.
 - The residual branch peaks early. Nearby checkpoint probes did not reveal a clear takeover beyond step `800`:
   - Step `900` was mixed rather than better overall.
   - Steps `825`, `850`, `1000`, and `1200` did not beat step `800`.
@@ -42,18 +44,19 @@ Keep only the information that should change the next optimization decision.
 
 ## Current Exploration
 
-- The operator-directed reduced-distortion signal on the clean h16 branch still matters, and the new cap is helping: `motion_loss_max_weight=2.0` eliminates the catastrophic uncapped `0.75` instability, but the result is still too overactive on the main clip and episode `2`.
-- Best next test: keep the stronger `motion_loss_alpha=0.75` continuation from clean h16 step `1000`, but tighten the cap from `2.0` to `1.5` so the branch can be compared directly against the too-loose capped `2.0` run and the too-weak uncapped `0.5` reference.
+- The operator-directed reduced-distortion signal on the clean h16 branch still matters, but the cap-only sweep is now bracketed: `2.0` is too loose and `1.5` still does not beat the uncapped `0.5` h16 reference overall.
+- Best next test: resume the clean h16 step-`1000` checkpoint to step `1200` with `motion_loss_alpha=0.75`, `motion_loss_max_weight=2.0`, and the new excess-only motion bonus so only above-average motion regions receive extra loss weight.
 
 ## Future Explorations
 
-- If tighter capped motion weighting still cannot improve commitment without reintroducing distortion, switch to a code-level action-conditioning change such as a temporal action encoder per Wan block instead of reopening older width, rank, or continuation sweeps.
+- If excess-only capped motion weighting still cannot improve commitment without reintroducing distortion, switch to a code-level action-conditioning change such as a temporal action encoder per Wan block instead of reopening older width, rank, or continuation sweeps.
 - If a future operator review says the plain h16 image-quality gain matters more than motion on a specific downstream use case, compare the clean h16 checkpoints against the normalized image-first branch directly instead of against the motion-first residual branch.
 
 ## What Changed
 
 - Added `motion_loss_alpha` to the train config, train CLI, and flow-matching loss so training can upweight moving latent regions directly instead of only evaluating motion after the fact; `source .venv/bin/activate && pytest tests/test_flow_matching.py tests/test_train_world_model_wan_vace.py` passed (`34 passed`).
 - Commit `17ba95f` (`Cap motion-aware loss weights`): added an optional `motion_loss_max_weight` cap to the train config, train CLI, and flow-matching loss so motion weighting can stay active without letting a few high-motion latent regions dominate the loss; `source .venv/bin/activate && pytest tests/test_flow_matching.py tests/test_train_world_model_wan_vace.py` passed (`36 passed`).
+- Commit `7fe8994` (`Add excess-only motion loss weighting`): added an optional excess-only motion bonus so only above-average motion regions receive extra loss weight, instead of globally boosting average-motion regions; `source .venv/bin/activate && pytest tests/test_flow_matching.py tests/test_train_world_model_wan_vace.py` passed (`37 passed`).
 - Kept the earlier motion-first evaluation stack and prompt updates, then validated that the nearby residual-family sweep remained exhausted:
   - step-`850` continuation from the best residual branch,
   - step-`825` continuation from the best residual branch,
@@ -83,6 +86,8 @@ Keep only the information that should change the next optimization decision.
   - step `1200`: `arm_motion_verdict: overactive and artifact-heavy, not a better interpolation point`; `image_quality_verdict: regressed badly with visible distortion and an explicit plausibility fail on episode 2`; `continue_training: no, not without bounding the motion-loss spikes first`. Why: main-clip and episode-`2` comparison frames show late-frame warping and stronger ghosting than the clean h16 family, while the reports jump to main-clip MAE `15.171`, episode-`2` late-motion ratio `3.043`, and a failed plausibility frame with `extreme_color_shift`.
 - `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p75_cap2p0_resume1000to1200`:
   - step `1200`: `arm_motion_verdict: stabilized but still too overactive on the main clip and episode 2`; `image_quality_verdict: much cleaner than uncapped 0.75 and plausible on all three windows, but still not as clean or spatially aligned as the uncapped 0.5 reference`; `continue_training: yes, one tighter-cap follow-up`. Why: the capped run removes the uncapped `0.75` blow-up and restores plausibility on every window, but the main comparison still shows a longer late swing than the reference and episode `1` still stops short; quantitatively it lands between the two uncapped references, with much better plausibility than uncapped `0.75` but worse main and episode-`2` MAE and motion alignment than uncapped `0.5`.
+- `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p75_cap1p5_resume1000to1200`:
+  - step `1200`: `arm_motion_verdict: cleaner main-clip compromise than cap 2.0, but still not the best h16 trade`; `image_quality_verdict: plausible on all three windows and cleaner than cap 2.0 on the main clip, but episode 1 regresses and episode 2 remains too late-heavy`; `continue_training: no, cap-only sweep is now bracketed`. Why: visually the main comparison no longer overshoots as hard as cap `2.0`, but the arm still stops short of the reference path, episode `1` remains undercommitted, and episode `2` still swings too late; numerically it improves the main clip over cap `2.0` (`late_motion_ratio` `0.601`, MAE `7.890`) without beating the uncapped `0.5` h16 reference overall.
 - `optimizer_aloha_static_fork_pick_up_full_320x240_lora64_action_noinputln_mlp128resid`:
   - step `800`: `arm_motion_verdict: same family, slightly worse than rank-32 residual`; `image_quality_verdict: acceptable`; `continue_training: no`. Why: extra adapter capacity did not improve the best residual branch.
 - `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp64resid`:
@@ -109,6 +114,6 @@ Keep only the information that should change the next optimization decision.
   - use residual step `800` as the motion reference,
   - use normalized step `1400` as the image-quality reference,
   - use clean h16 rerun step `1000` as the reduced-distortion resume point and h16 `motion_loss_alpha=0.5` step `1200` as the best h16 motion-weighted reference so far,
-  - treat capped h16 `motion_loss_alpha=0.75`, `motion_loss_max_weight=2.0` as proof that the cap helps, but not yet as the best h16 trade,
+  - treat the capped h16 `motion_loss_alpha=0.75` runs as proof that the cap helps, but not yet as the best h16 trade,
   - do not spend another loop on nearby continuation, LR tuning, width sweeps, subset restriction, or action-input-LayerNorm restoration around the old `horizon_len=8` residual family.
-- If optimization resumes later, the next grounded move is the same capped h16 continuation but with `motion_loss_max_weight=1.5`; if that still fails, switch to a stronger action-conditioning path.
+- If optimization resumes later, the next grounded move is the excess-only capped h16 continuation from the same clean step-`1000` checkpoint; if that still fails, switch to a stronger action-conditioning path.
