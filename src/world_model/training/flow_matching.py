@@ -181,6 +181,7 @@ def chunkwise_teacher_forcing_loss(
     motion_loss_alpha: float = 0.0,
     motion_loss_max_weight: float = 0.0,
     motion_loss_excess_only: bool = False,
+    future_loss_early_bias: float = 0.0,
     snr_clip_max: float = 5.0,
     eps: float = 1e-6,
     generator: torch.Generator | None = None,
@@ -199,6 +200,7 @@ def chunkwise_teacher_forcing_loss(
         motion_loss_alpha=motion_loss_alpha,
         motion_loss_max_weight=motion_loss_max_weight,
         motion_loss_excess_only=motion_loss_excess_only,
+        future_loss_early_bias=future_loss_early_bias,
         snr_clip_max=snr_clip_max,
         eps=eps,
         generator=generator,
@@ -219,6 +221,7 @@ def _chunkwise_teacher_forcing_video_loss(
     motion_loss_alpha: float,
     motion_loss_max_weight: float,
     motion_loss_excess_only: bool,
+    future_loss_early_bias: float,
     snr_clip_max: float,
     eps: float,
     generator: torch.Generator | None,
@@ -238,10 +241,12 @@ def _chunkwise_teacher_forcing_video_loss(
     if motion_loss_alpha < 0.0:
         raise ValueError(f"motion_loss_alpha must be >= 0, got {motion_loss_alpha}")
     _validate_motion_loss_max_weight(motion_loss_max_weight)
+    _validate_future_loss_early_bias(future_loss_early_bias)
 
     batch_size = z_future_video.shape[0]
+    total_future_steps = z_future_video.shape[2]
     schedule = build_k_plus_one_schedule(
-        future_steps=z_future_video.shape[2],
+        future_steps=total_future_steps,
         k=k,
         device=z_future_video.device,
     )
@@ -322,7 +327,15 @@ def _chunkwise_teacher_forcing_video_loss(
             max_weight=motion_loss_max_weight,
             excess_only=motion_loss_excess_only,
         )
-        sq_err = sq_err * motion_weight
+        temporal_weight = _compute_future_loss_early_weight(
+            start=start,
+            end=end,
+            total_future_steps=total_future_steps,
+            bias=future_loss_early_bias,
+            device=clean_chunk.device,
+            dtype=clean_chunk.dtype,
+        )
+        sq_err = sq_err * motion_weight * temporal_weight
         per_sample_elements = clean_chunk[0].numel()
         weighted_sum = weighted_sum + (sq_err * chunk_weight).sum()
         weight_mass = weight_mass + chunk_weight.sum() * per_sample_elements
@@ -409,3 +422,32 @@ def _validate_motion_loss_max_weight(max_weight: float) -> None:
             "motion_loss_max_weight must be 0 (disabled) or >= 1, got "
             f"{max_weight}"
         )
+
+
+def _compute_future_loss_early_weight(
+    *,
+    start: int,
+    end: int,
+    total_future_steps: int,
+    bias: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build a per-frame loss weight that emphasizes earlier future positions."""
+    _validate_future_loss_early_bias(bias)
+    chunk_len = end - start
+    if bias == 0.0:
+        return torch.ones((1, 1, chunk_len, 1, 1), device=device, dtype=dtype)
+    if total_future_steps <= 1:
+        return torch.full((1, 1, chunk_len, 1, 1), 1.0 + bias, device=device, dtype=dtype)
+
+    positions = torch.arange(start, end, device=device, dtype=dtype)
+    reverse_progress = 1.0 - (positions / float(total_future_steps - 1))
+    weight = 1.0 + bias * reverse_progress
+    return weight.view(1, 1, chunk_len, 1, 1)
+
+
+def _validate_future_loss_early_bias(bias: float) -> None:
+    """Reject invalid early-horizon temporal weighting before loss computation."""
+    if bias < 0.0:
+        raise ValueError(f"future_loss_early_bias must be >= 0, got {bias}")

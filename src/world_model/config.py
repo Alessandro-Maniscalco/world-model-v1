@@ -31,6 +31,13 @@ class TrainScriptConfig:
     max_steps: int = 2000
     auto_stop_check_every: int = 0
     auto_stop_min_relative_improvement: float = 0.0
+    validation_enabled: bool = True
+    validation_every: int = 50
+    validation_episodes: tuple[int, ...] = ()
+    validation_split_ratio: float = 0.1
+    validation_max_batches: int = 8
+    validation_patience_checks: int = 3
+    validation_min_relative_improvement: float = 0.01
     lr: float = 1e-4
     weight_decay: float = 1e-4
     grad_clip_norm: float = 1.0
@@ -38,6 +45,7 @@ class TrainScriptConfig:
     motion_loss_alpha: float = 0.0
     motion_loss_max_weight: float = 0.0
     motion_loss_excess_only: bool = False
+    future_loss_early_bias: float = 0.0
     t_min: float = 0.0
     t_max: float = 1.0
     disable_amp: bool = False

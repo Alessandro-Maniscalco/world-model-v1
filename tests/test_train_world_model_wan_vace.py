@@ -13,6 +13,7 @@ from world_model.config import TrainScriptConfig, load_train_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
+from world_model.training import ChunkwiseStepMetrics
 
 
 def test_train_script_builds_wan_vace_world_model_from_config() -> None:
@@ -504,6 +505,16 @@ def test_train_script_keeps_legacy_checkpoint_schedule_when_early_window_is_disa
     assert save_steps == [100, 200, 300]
 
 
+def test_train_script_runs_validation_on_its_own_schedule() -> None:
+    """Allow validation cadence to be more frequent than checkpoint cadence."""
+    train_script = _load_train_script_module()
+    cfg = TrainScriptConfig(validation_enabled=True, validation_every=50)
+
+    validation_steps = [step for step in range(1, 161) if train_script._should_run_validation(cfg, step)]
+
+    assert validation_steps == [50, 100, 150]
+
+
 def test_train_script_continues_after_first_auto_stop_block() -> None:
     """Always continue after the first completed block because no prior block exists yet."""
     train_script = _load_train_script_module()
@@ -541,6 +552,336 @@ def test_train_script_continues_when_block_improvement_clears_threshold() -> Non
 
     assert should_continue is True
     assert improvement == pytest.approx(0.20)
+
+
+def test_train_script_rejects_validation_for_local_video_mode() -> None:
+    """Fail fast when validation is requested for local-video training."""
+    train_script = _load_train_script_module()
+
+    with pytest.raises(ValueError, match="not supported for local-video training"):
+        train_script._validate_auto_stop_config(
+            TrainScriptConfig(
+                video_path="clip.mp4",
+                validation_enabled=True,
+            )
+        )
+
+
+def test_train_script_rejects_nonpositive_validation_interval() -> None:
+    """Fail fast when validation cadence would never produce a valid check."""
+    train_script = _load_train_script_module()
+
+    with pytest.raises(ValueError, match="validation_every must be positive"):
+        train_script._validate_auto_stop_config(TrainScriptConfig(validation_every=0))
+
+
+def test_train_script_rejects_negative_future_loss_early_bias() -> None:
+    """Fail fast when the early-horizon loss bias would downweight earlier frames."""
+    train_script = _load_train_script_module()
+
+    with pytest.raises(ValueError, match="future_loss_early_bias must be >= 0"):
+        train_script._validate_auto_stop_config(TrainScriptConfig(future_loss_early_bias=-0.1))
+
+
+def test_train_script_updates_validation_tracking_with_patience() -> None:
+    """Reset or increment validation patience based on relative improvement."""
+    train_script = _load_train_script_module()
+
+    best, bad_checks, improvement = train_script._update_validation_tracking(
+        best_val_loss=0.50,
+        current_val_loss=0.48,
+        bad_checks=2,
+        min_relative_improvement=0.05,
+    )
+    assert best == pytest.approx(0.50)
+    assert bad_checks == 3
+    assert improvement == pytest.approx(0.04)
+
+    best, bad_checks, improvement = train_script._update_validation_tracking(
+        best_val_loss=0.50,
+        current_val_loss=0.40,
+        bad_checks=2,
+        min_relative_improvement=0.05,
+    )
+    assert best == pytest.approx(0.40)
+    assert bad_checks == 0
+    assert improvement == pytest.approx(0.20)
+
+
+def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch) -> None:
+    """Average only the configured prefix of validation batches."""
+    train_script = _load_train_script_module()
+    cfg = TrainScriptConfig(
+        validation_enabled=True,
+        validation_max_batches=2,
+        context_len=5,
+        horizon_len=4,
+    )
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 1, 8, 8),
+        a_plan=torch.randn(1, 1, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=3,
+        context_latent_steps=2,
+        horizon_latent_steps=1,
+    )
+    losses = iter([0.6, 0.3, 0.1])
+
+    monkeypatch.setattr(train_script, "prepare_packed_batch", lambda **_: prepared)
+    monkeypatch.setattr(train_script, "_evaluate_loss", lambda **_: next(losses))
+
+    class _FakeEncoder:
+        """Minimal encoder placeholder for validation-loss tests."""
+
+    val_loss, num_batches = train_script._evaluate_validation_loss(
+        model=torch.nn.Identity(),
+        action_encoder=torch.nn.Identity(),
+        validation_loader=[{"batch": 1}, {"batch": 2}, {"batch": 3}],
+        encoder=_FakeEncoder(),
+        cfg=cfg,
+        device=torch.device("cpu"),
+        runtime_dtype=torch.float32,
+    )
+
+    assert num_batches == 2
+    assert val_loss == pytest.approx(0.45)
+
+
+def test_train_script_restores_validation_state_from_checkpoint() -> None:
+    """Recover best validation loss and patience counters from checkpoint extra state."""
+    train_script = _load_train_script_module()
+
+    best_val_loss, val_bad_checks = train_script._load_validation_state_from_checkpoint(
+        {
+            "extra_state": {
+                "validation_state": {
+                    "best_val_loss": 0.123,
+                    "val_bad_checks": 2,
+                }
+            }
+        }
+    )
+
+    assert best_val_loss == pytest.approx(0.123)
+    assert val_bad_checks == 2
+
+
+def test_train_script_logs_validation_metrics_on_validation_rows(monkeypatch, tmp_path: Path) -> None:
+    """Emit validation fields on the independent validation cadence, not just checkpoints."""
+    train_script = _load_train_script_module()
+    output_dir = tmp_path / "train_run"
+    captured_logs: list[dict[str, object]] = []
+
+    cfg = TrainScriptConfig(
+        output_dir=str(output_dir),
+        repo_id="repo/x",
+        video_key="video",
+        context_len=5,
+        horizon_len=4,
+        batch_size=1,
+        max_steps=2,
+        checkpoint_every=2,
+        checkpoint_early_every=0,
+        checkpoint_early_until=0,
+        validation_every=1,
+        log_every=10,
+        load_pretrained_backbone=False,
+        validation_enabled=True,
+        validation_episodes=(9,),
+        validation_max_batches=2,
+    )
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 1, 8, 8),
+        a_plan=torch.randn(1, 1, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=3,
+        context_latent_steps=2,
+        horizon_latent_steps=1,
+    )
+    train_batches = [{"video": torch.randn(1, 9, 3, 8, 8), "action": torch.randn(1, 9, 6)}]
+    val_batches = [{"video": torch.randn(1, 9, 3, 8, 8), "action": torch.randn(1, 9, 6)}]
+
+    class _FakeEncoder:
+        """Minimal VAE placeholder for patched training-loop tests."""
+
+        def encode(self, video: torch.Tensor) -> torch.Tensor:
+            """Return a structured latent tensor with valid Wan temporal packing."""
+            batch_size = video.shape[0]
+            return torch.zeros(batch_size, 16, 3, 8, 8)
+
+    class _FakeModel(torch.nn.Module):
+        """Small trainable model placeholder for patched training-loop tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class _FakeActionEncoder(torch.nn.Module):
+        """Small action encoder placeholder for patched training-loop tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    checkpoint_steps: list[int] = []
+
+    def _fake_build_loader(**kwargs):
+        if kwargs["episodes"] == [9]:
+            return val_batches
+        return train_batches
+
+    monkeypatch.setattr(train_script, "_load_args", lambda: cfg)
+    monkeypatch.setattr(train_script, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(train_script.WanVAE, "from_pretrained", lambda **_: _FakeEncoder())
+    monkeypatch.setattr(train_script, "resolve_lerobot_episode_ids", lambda repo_id: [0, 1, 9])
+    monkeypatch.setattr(train_script, "build_lerobot_dataloader", _fake_build_loader)
+    monkeypatch.setattr(train_script, "prepare_packed_batch", lambda **_: prepared)
+    monkeypatch.setattr(train_script, "_validate_chunk_schedule", lambda cfg, prepared: None)
+    monkeypatch.setattr(train_script, "build_model_from_config", lambda cfg, prepared: _FakeModel())
+    monkeypatch.setattr(
+        train_script,
+        "build_action_encoder_from_config",
+        lambda cfg, prepared, model: _FakeActionEncoder(),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "_configure_trainable_parameters",
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "train_chunkwise_batch",
+        lambda **_: ChunkwiseStepMetrics(
+            loss=0.5,
+            grad_norm=0.1,
+            per_chunk_losses=(0.5,),
+            per_chunk_lengths=(1,),
+        ),
+    )
+    monkeypatch.setattr(train_script, "_evaluate_validation_loss", lambda **_: (0.25, 1))
+    monkeypatch.setattr(
+        train_script,
+        "append_jsonl",
+        lambda path, payload: captured_logs.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "save_checkpoint",
+        lambda **kwargs: checkpoint_steps.append(int(kwargs["step"])) or (output_dir / f"step_{int(kwargs['step']):07d}.pt"),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    train_script.main()
+
+    assert checkpoint_steps == [2, 2]
+    assert len(captured_logs) == 2
+    assert captured_logs[0]["val_loss"] == pytest.approx(0.25)
+    assert captured_logs[0]["val_num_batches"] == 1
+    assert captured_logs[1]["val_loss"] == pytest.approx(0.25)
+    assert captured_logs[1]["val_num_batches"] == 1
+    assert captured_logs[1]["best_val_loss"] == pytest.approx(0.25)
+    assert captured_logs[1]["val_bad_checks"] == 1
+
+
+def test_train_script_preserves_logs_when_validation_is_disabled(monkeypatch, tmp_path: Path) -> None:
+    """Keep metrics rows free of validation fields when validation is disabled."""
+    train_script = _load_train_script_module()
+    output_dir = tmp_path / "train_run"
+    captured_logs: list[dict[str, object]] = []
+
+    cfg = TrainScriptConfig(
+        output_dir=str(output_dir),
+        repo_id="repo/x",
+        video_key="video",
+        context_len=5,
+        horizon_len=4,
+        batch_size=1,
+        max_steps=2,
+        checkpoint_every=2,
+        checkpoint_early_every=0,
+        checkpoint_early_until=0,
+        log_every=10,
+        load_pretrained_backbone=False,
+        validation_enabled=False,
+    )
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 1, 8, 8),
+        a_plan=torch.randn(1, 1, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=3,
+        context_latent_steps=2,
+        horizon_latent_steps=1,
+    )
+    train_batches = [{"video": torch.randn(1, 9, 3, 8, 8), "action": torch.randn(1, 9, 6)}]
+
+    class _FakeEncoder:
+        """Minimal VAE placeholder for validation-disabled tests."""
+
+        def encode(self, video: torch.Tensor) -> torch.Tensor:
+            """Return a structured latent tensor with valid Wan temporal packing."""
+            batch_size = video.shape[0]
+            return torch.zeros(batch_size, 16, 3, 8, 8)
+
+    class _FakeModel(torch.nn.Module):
+        """Small trainable model placeholder for validation-disabled tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class _FakeActionEncoder(torch.nn.Module):
+        """Small action encoder placeholder for validation-disabled tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    monkeypatch.setattr(train_script, "_load_args", lambda: cfg)
+    monkeypatch.setattr(train_script, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(train_script.WanVAE, "from_pretrained", lambda **_: _FakeEncoder())
+    monkeypatch.setattr(train_script, "build_lerobot_dataloader", lambda **kwargs: train_batches)
+    monkeypatch.setattr(train_script, "prepare_packed_batch", lambda **_: prepared)
+    monkeypatch.setattr(train_script, "_validate_chunk_schedule", lambda cfg, prepared: None)
+    monkeypatch.setattr(train_script, "build_model_from_config", lambda cfg, prepared: _FakeModel())
+    monkeypatch.setattr(
+        train_script,
+        "build_action_encoder_from_config",
+        lambda cfg, prepared, model: _FakeActionEncoder(),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "_configure_trainable_parameters",
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "train_chunkwise_batch",
+        lambda **_: ChunkwiseStepMetrics(
+            loss=0.5,
+            grad_norm=0.1,
+            per_chunk_losses=(0.5,),
+            per_chunk_lengths=(1,),
+        ),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "append_jsonl",
+        lambda path, payload: captured_logs.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "save_checkpoint",
+        lambda **kwargs: output_dir / f"step_{int(kwargs['step']):07d}.pt",
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    train_script.main()
+
+    assert len(captured_logs) == 2
+    assert all("val_loss" not in payload for payload in captured_logs)
 
 
 def test_train_script_freezes_non_vace_backbone_params_in_vace_mode() -> None:

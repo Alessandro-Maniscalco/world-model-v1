@@ -4,6 +4,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 import pytest
 import torch
 from world_model.training.flow_matching import (
+    _compute_future_loss_early_weight,
     _compute_motion_loss_weight,
     chunkwise_teacher_forcing_loss,
     make_noisy_and_target,
@@ -154,6 +155,21 @@ def test_chunkwise_teacher_forcing_loss_rejects_fractional_motion_loss_cap():
         )
 
 
+def test_chunkwise_teacher_forcing_loss_rejects_negative_future_loss_early_bias():
+    """Reject negative early-horizon loss bias because it would downweight early frames."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="future_loss_early_bias"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 2, 2),
+            z_future_video=torch.randn(1, 2, 2, 2, 2),
+            action_tokens=torch.randn(1, 2, 1),
+            k=1,
+            future_loss_early_bias=-0.1,
+        )
+
+
 class _ChunkActionWindowRecorder:
     """Record per-chunk action-token windows during teacher forcing."""
 
@@ -274,3 +290,20 @@ def test_motion_loss_weight_excess_only_leaves_average_motion_at_base_weight():
     assert float(weight_default[0, 0, 0, 0, 0]) > 1.0
     assert float(weight_excess[0, 0, 0, 0, 0]) == pytest.approx(1.0)
     assert float(weight_excess[0, 0, 1, 0, 0]) > 1.0
+
+
+def test_future_loss_early_weight_prefers_earlier_future_positions():
+    """Apply larger loss weights to earlier future steps when enabled."""
+    weight = _compute_future_loss_early_weight(
+        start=1,
+        end=4,
+        total_future_steps=5,
+        bias=0.5,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert weight.shape == (1, 1, 3, 1, 1)
+    assert float(weight[0, 0, 0, 0, 0]) > float(weight[0, 0, 1, 0, 0]) > float(weight[0, 0, 2, 0, 0])
+    assert float(weight[0, 0, 0, 0, 0]) == pytest.approx(1.375)
+    assert float(weight[0, 0, 2, 0, 0]) == pytest.approx(1.125)
