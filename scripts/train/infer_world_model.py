@@ -122,6 +122,42 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Use null tokens, action-plan tokens, or prompt tokens for cross-attention conditioning.",
     )
     parser.add_argument(
+        "--action-input-layernorm",
+        action="store_true",
+        default=defaults.action_input_layernorm,
+        help="Normalize each action token with LayerNorm before projection.",
+    )
+    parser.add_argument(
+        "--no-action-input-layernorm",
+        dest="action_input_layernorm",
+        action="store_false",
+        help="Disable action-token input LayerNorm to preserve action magnitude information.",
+    )
+    parser.add_argument(
+        "--action-mlp-dim",
+        type=int,
+        default=defaults.action_mlp_dim,
+        help="Optional hidden width for a two-layer action-token MLP (0 keeps the legacy single linear projection).",
+    )
+    parser.add_argument(
+        "--action-mlp-residual",
+        action="store_true",
+        default=defaults.action_mlp_residual,
+        help="Add the optional action-token MLP as a residual path on top of the legacy linear projection.",
+    )
+    parser.add_argument(
+        "--no-action-mlp-residual",
+        dest="action_mlp_residual",
+        action="store_false",
+        help="Use the optional action-token MLP as a replacement path instead of a residual augmentation.",
+    )
+    parser.add_argument(
+        "--action-temporal-difference-scale",
+        type=float,
+        default=defaults.action_temporal_difference_scale,
+        help="Optional residual scale for projecting step-to-step action deltas alongside the raw action plan.",
+    )
+    parser.add_argument(
         "--prompt",
         default=defaults.prompt,
         help="Prompt text used when --conditioning-mode prompt.",
@@ -232,6 +268,10 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "lora_alpha",
         "lora_dropout",
         "lora_target_modules",
+        "action_input_layernorm",
+        "action_mlp_dim",
+        "action_mlp_residual",
+        "action_temporal_difference_scale",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:

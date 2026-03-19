@@ -56,6 +56,7 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     parser = infer_script._build_parser(load_infer_config())
     option_strings = {option for action in parser._actions for option in action.option_strings}
 
+    assert "--action-temporal-difference-scale" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -151,6 +152,128 @@ def test_infer_script_builds_action_encoder_when_requested() -> None:
     assert isinstance(action_encoder, ActionTokenEncoder)
 
 
+def test_infer_script_builds_action_encoder_with_mlp_when_requested() -> None:
+    """Allow the infer config to request a deeper action-token encoder."""
+    infer_script = _load_infer_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_mlp_dim=10,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, action_encoder = infer_script.build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.net[1].out_features == 10
+    assert action_encoder.net[4].out_features == 16
+
+
+def test_infer_script_builds_action_encoder_with_residual_mlp_when_requested() -> None:
+    """Allow the infer config to request a residual action-token MLP."""
+    infer_script = _load_infer_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_mlp_dim=10,
+        action_mlp_residual=True,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, action_encoder = infer_script.build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.mlp_residual is True
+    assert action_encoder.residual_net is not None
+    assert action_encoder.net[1].out_features == 16
+    assert action_encoder.residual_net[0].out_features == 10
+
+
+def test_infer_script_builds_action_encoder_with_temporal_difference_scale_when_requested() -> None:
+    """Allow the infer config to request temporal-difference-aware action tokens."""
+    infer_script = _load_infer_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_temporal_difference_scale=0.75,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, action_encoder = infer_script.build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.temporal_difference_scale == pytest.approx(0.75)
+
+
 def test_infer_script_restores_lora_runtime_settings_from_checkpoint_defaults() -> None:
     """Reuse saved LoRA and conditioning settings when the infer config still uses defaults."""
     infer_script = _load_infer_script_module()
@@ -176,6 +299,25 @@ def test_infer_script_restores_lora_runtime_settings_from_checkpoint_defaults() 
     assert restored.lora_alpha == 8
     assert restored.lora_dropout == pytest.approx(0.1)
     assert restored.lora_target_modules == ("to_q", "to_k", "to_v")
+
+
+def test_infer_script_restores_action_temporal_difference_scale_from_checkpoint_defaults() -> None:
+    """Reuse saved temporal-difference action settings when infer config uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_temporal_difference_scale": 0.75,
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_temporal_difference_scale == pytest.approx(0.75)
 
 
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:

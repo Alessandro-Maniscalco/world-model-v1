@@ -173,6 +173,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         action="store_false",
         help="Use the optional action-token MLP as a replacement path instead of a residual augmentation.",
     )
+    parser.add_argument(
+        "--action-temporal-difference-scale",
+        type=float,
+        default=defaults.action_temporal_difference_scale,
+        help="Optional residual scale for projecting step-to-step action deltas alongside the raw action plan.",
+    )
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)

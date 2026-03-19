@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from world_model.models.wan_vace_conditioning import ActionTokenEncoder, build_vace_control_tensor
@@ -13,6 +14,113 @@ def test_action_token_encoder_projects_actions_to_wan_text_width() -> None:
     tokens = encoder(torch.randn(2, 4, 7))
 
     assert tokens.shape == (2, 4, 4096)
+
+
+def test_action_token_encoder_supports_two_layer_mlp_projection() -> None:
+    """Use the optional hidden MLP width when a deeper action encoder is requested."""
+    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, mlp_dim=11, input_layernorm=False)
+    tokens = encoder(torch.randn(2, 4, 7))
+
+    assert tokens.shape == (2, 4, 32)
+    assert encoder.net[1].out_features == 11
+    assert encoder.net[4].out_features == 32
+
+
+def test_action_token_encoder_supports_residual_mlp_projection() -> None:
+    """Allow the optional action MLP to augment the legacy linear path residually."""
+    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, mlp_dim=11, mlp_residual=True, input_layernorm=False)
+    tokens = encoder(torch.randn(2, 4, 7))
+
+    assert tokens.shape == (2, 4, 32)
+    assert encoder.net[1].out_features == 32
+    assert encoder.residual_net is not None
+    assert encoder.residual_net[0].out_features == 11
+    assert encoder.residual_net[3].out_features == 32
+
+
+def test_action_token_encoder_residual_mlp_preserves_linear_path_when_zeroed() -> None:
+    """Keep the legacy linear projection exactly when the residual MLP contributes zero."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+
+    linear_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    residual_encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        mlp_dim=11,
+        mlp_residual=True,
+        input_layernorm=False,
+    )
+    residual_encoder.net.load_state_dict(linear_encoder.net.state_dict())
+    for parameter in residual_encoder.residual_net.parameters():
+        parameter.data.zero_()
+
+    assert torch.allclose(linear_encoder(actions), residual_encoder(actions))
+
+
+def test_action_token_encoder_scale_invariance_depends_on_input_layernorm() -> None:
+    """Show how the optional input LayerNorm changes positive scale sensitivity."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+    scaled = actions * 1.5
+
+    normalized_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=True)
+    unnormalized_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    unnormalized_encoder.load_state_dict(normalized_encoder.state_dict(), strict=False)
+
+    normalized_tokens = normalized_encoder(actions)
+    normalized_scaled_tokens = normalized_encoder(scaled)
+    unnormalized_tokens = unnormalized_encoder(actions)
+    unnormalized_scaled_tokens = unnormalized_encoder(scaled)
+
+    assert torch.allclose(normalized_tokens, normalized_scaled_tokens, atol=1e-4, rtol=1e-4)
+    assert not torch.allclose(unnormalized_tokens, unnormalized_scaled_tokens)
+
+
+def test_action_token_encoder_temporal_difference_scale_is_noop_for_constant_actions() -> None:
+    """Keep outputs unchanged when temporal differences are identically zero."""
+    torch.manual_seed(0)
+    actions = torch.ones(2, 4, 7)
+
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    temporal = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        temporal_difference_scale=0.75,
+    )
+    temporal.load_state_dict(baseline.state_dict(), strict=False)
+
+    assert torch.allclose(baseline(actions), temporal(actions))
+
+
+def test_action_token_encoder_temporal_difference_scale_changes_varying_sequences() -> None:
+    """Let the optional temporal-difference path change outputs for non-constant plans."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    temporal = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        temporal_difference_scale=0.75,
+    )
+    temporal.load_state_dict(baseline.state_dict(), strict=False)
+
+    assert not torch.allclose(baseline(actions), temporal(actions))
+
+
+def test_action_token_encoder_rejects_residual_mlp_without_width() -> None:
+    """Require a hidden width when enabling the residual action MLP path."""
+    with pytest.raises(ValueError, match="mlp_residual requires a positive mlp_dim"):
+        ActionTokenEncoder(action_dim=7, hidden_dim=32, mlp_residual=True)
+
+
+def test_action_token_encoder_rejects_negative_temporal_difference_scale() -> None:
+    """Reject negative temporal-difference residual scales."""
+    with pytest.raises(ValueError, match="temporal_difference_scale must be non-negative"):
+        ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_difference_scale=-0.1)
 
 
 def test_build_vace_control_tensor_matches_vace_channel_contract() -> None:

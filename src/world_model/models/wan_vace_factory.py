@@ -75,6 +75,10 @@ def build_conditioning_encoder_for_model(
     return ActionTokenEncoder(
         action_dim=int(prepared_batch.a_plan.shape[-1]),
         hidden_dim=int(model.backbone.config.text_dim),
+        mlp_dim=_resolve_action_mlp_dim(cfg),
+        mlp_residual=bool(getattr(cfg, "action_mlp_residual", False)),
+        input_layernorm=bool(getattr(cfg, "action_input_layernorm", True)),
+        temporal_difference_scale=float(getattr(cfg, "action_temporal_difference_scale", 0.0)),
     )
 
 
@@ -187,6 +191,10 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "lora_alpha",
         "lora_dropout",
         "lora_target_modules",
+        "action_input_layernorm",
+        "action_mlp_dim",
+        "action_mlp_residual",
+        "action_temporal_difference_scale",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:
@@ -213,3 +221,9 @@ def _make_default_config_like(cfg: Any) -> Any:
         return cfg_type()
     except TypeError:
         return SimpleNamespace()
+
+
+def _resolve_action_mlp_dim(cfg: Any) -> int | None:
+    """Resolve non-positive config values to the encoder's default linear projection path."""
+    value = int(getattr(cfg, "action_mlp_dim", 0) or 0)
+    return None if value <= 0 else value

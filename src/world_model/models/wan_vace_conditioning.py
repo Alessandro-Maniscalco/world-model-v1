@@ -15,7 +15,10 @@ class ActionTokenEncoder(nn.Module):
         hidden_dim: int,
         *,
         mlp_dim: int | None = None,
+        mlp_residual: bool = False,
         dropout: float = 0.0,
+        input_layernorm: bool = True,
+        temporal_difference_scale: float = 0.0,
     ) -> None:
         """Initialize an action-token projection stack."""
         super().__init__()
@@ -25,27 +28,55 @@ class ActionTokenEncoder(nn.Module):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if dropout < 0:
             raise ValueError(f"dropout must be non-negative, got {dropout}")
+        if temporal_difference_scale < 0:
+            raise ValueError(
+                "temporal_difference_scale must be non-negative, got "
+                f"{temporal_difference_scale}"
+            )
 
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
+        self.input_layernorm = bool(input_layernorm)
+        self.mlp_residual = bool(mlp_residual)
+        self.temporal_difference_scale = float(temporal_difference_scale)
+        input_norm = nn.LayerNorm(self.action_dim) if self.input_layernorm else nn.Identity()
+
+        if self.mlp_residual and mlp_dim is None:
+            raise ValueError("mlp_residual requires a positive mlp_dim")
 
         if mlp_dim is None:
             self.net = nn.Sequential(
-                nn.LayerNorm(self.action_dim),
+                input_norm,
                 nn.Linear(self.action_dim, self.hidden_dim),
                 nn.Dropout(dropout),
             )
+            self.residual_net: nn.Sequential | None = None
         else:
             if mlp_dim <= 0:
                 raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
-            self.net = nn.Sequential(
-                nn.LayerNorm(self.action_dim),
-                nn.Linear(self.action_dim, int(mlp_dim)),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(int(mlp_dim), self.hidden_dim),
-                nn.Dropout(dropout),
-            )
+            if self.mlp_residual:
+                self.net = nn.Sequential(
+                    input_norm,
+                    nn.Linear(self.action_dim, self.hidden_dim),
+                    nn.Dropout(dropout),
+                )
+                self.residual_net = nn.Sequential(
+                    nn.Linear(self.action_dim, int(mlp_dim)),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(int(mlp_dim), self.hidden_dim),
+                    nn.Dropout(dropout),
+                )
+            else:
+                self.net = nn.Sequential(
+                    input_norm,
+                    nn.Linear(self.action_dim, int(mlp_dim)),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(int(mlp_dim), self.hidden_dim),
+                    nn.Dropout(dropout),
+                )
+                self.residual_net = None
 
     def forward(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project `[B, T, A]` actions to `[B, T, D]` Wan cross-attention tokens."""
@@ -55,6 +86,20 @@ class ActionTokenEncoder(nn.Module):
             raise ValueError(
                 f"a_plan last dim A={a_plan.shape[-1]} does not match action_dim={self.action_dim}"
             )
+        tokens = self._project_tokens(a_plan)
+        if self.temporal_difference_scale <= 0.0 or a_plan.shape[1] <= 1:
+            return tokens
+        delta_source = _build_temporal_differences(a_plan)
+        delta_tokens = self._project_tokens(delta_source) - self._project_tokens(torch.zeros_like(delta_source))
+        return tokens + (self.temporal_difference_scale * delta_tokens)
+
+    def _project_tokens(self, a_plan: torch.Tensor) -> torch.Tensor:
+        """Project one action tensor through the configured base and residual paths."""
+        if self.residual_net is not None:
+            normalized_actions = self.net[0](a_plan)
+            base_tokens = self.net[1:](normalized_actions)
+            residual_tokens = self.residual_net(normalized_actions)
+            return base_tokens + residual_tokens
         return self.net(a_plan)
 
 
@@ -119,6 +164,13 @@ def build_vace_control_tensor(
     reactive = torch.where(mask_bool, observed_latents, reactive_fill_latents)
     mask_features = mask.expand(-1, mask_channels, -1, -1, -1)
     return torch.cat([inactive, reactive, mask_features], dim=1)
+
+
+def _build_temporal_differences(a_plan: torch.Tensor) -> torch.Tensor:
+    """Encode step-to-step action deltas with a zero first frame for alignment."""
+    deltas = torch.zeros_like(a_plan)
+    deltas[:, 1:] = a_plan[:, 1:] - a_plan[:, :-1]
+    return deltas
 
 
 def _resolve_control_fill_latents(

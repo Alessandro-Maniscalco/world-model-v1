@@ -65,6 +65,126 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer", False)]
 
 
+def test_build_runtime_modules_respects_action_input_layernorm_flag() -> None:
+    """Propagate the action-input normalization flag into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.input_layernorm is False
+
+
+def test_build_runtime_modules_respects_action_mlp_dim_flag() -> None:
+    """Propagate the optional action-token MLP width into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_mlp_dim=12,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.net[1].out_features == 12
+    assert action_encoder.net[4].out_features == 16
+
+
+def test_build_runtime_modules_respects_action_mlp_residual_flag() -> None:
+    """Propagate the residual action-MLP mode into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_mlp_dim=12,
+        action_mlp_residual=True,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.mlp_residual is True
+    assert action_encoder.residual_net is not None
+    assert action_encoder.net[1].out_features == 16
+    assert action_encoder.residual_net[0].out_features == 12
+
+
+def test_build_runtime_modules_respects_action_temporal_difference_scale() -> None:
+    """Propagate the temporal-difference action residual scale into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_temporal_difference_scale=0.75,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.temporal_difference_scale == pytest.approx(0.75)
+
+
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()
