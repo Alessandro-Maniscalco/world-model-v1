@@ -46,11 +46,18 @@ from world_model.data.schema import PreparedPackedBatch
 from world_model.latents import WanVAE
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
+    build_action_control_projector_for_model,
     build_conditioning_encoder_for_model,
     build_wan_vace_model_from_config,
+    _load_action_control_projector_state_dict,
     _load_action_encoder_state_dict,
 )
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
+from world_model.models.wan_vace_conditioning import (
+    ActionControlProjector,
+    ActionTokenEncoder,
+    NullActionControlProjector,
+    NullConditioningEncoder,
+)
 from world_model.training import (
     append_jsonl,
     chunkwise_teacher_forcing_loss,
@@ -176,6 +183,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.future_loss_early_bias,
         help="Optional linear loss bonus for earlier future timesteps; 0 disables temporal early bias.",
     )
+    parser.add_argument(
+        "--future-chunk-early-bias",
+        type=float,
+        default=defaults.future_chunk_early_bias,
+        help="Optional linear loss bonus for earlier autoregressive chunks; 0 disables chunk-position bias.",
+    )
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
@@ -206,6 +219,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--lora-target-modules", nargs="+", default=list(defaults.lora_target_modules))
     parser.add_argument("--conditioning-mode", choices=("none", "action"), default=defaults.conditioning_mode)
     parser.add_argument(
+        "--action-conditioning-window",
+        choices=("chunk", "full"),
+        default=defaults.action_conditioning_window,
+        help="Use only the active chunk's action tokens or the full future plan on every denoising call.",
+    )
+    parser.add_argument(
         "--action-input-layernorm",
         action="store_true",
         default=defaults.action_input_layernorm,
@@ -234,6 +253,24 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         dest="action_mlp_residual",
         action="store_false",
         help="Use the optional action-token MLP as a replacement path instead of a residual augmentation.",
+    )
+    parser.add_argument(
+        "--action-order-conditioning",
+        action="store_true",
+        default=defaults.action_order_conditioning,
+        help="Add learned continuous position features to action tokens before temporal mixing.",
+    )
+    parser.add_argument(
+        "--no-action-order-conditioning",
+        dest="action_order_conditioning",
+        action="store_false",
+        help="Disable learned action-order features and keep order-unaware token projections.",
+    )
+    parser.add_argument(
+        "--action-control-prior-scale",
+        type=float,
+        default=defaults.action_control_prior_scale,
+        help="Scale for the action-derived latent control prior added to future VACE filler latents.",
     )
     parser.add_argument(
         "--action-temporal-difference-scale",
@@ -349,6 +386,16 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "future_loss_early_bias must be >= 0, got "
             f"{cfg.future_loss_early_bias}."
         )
+    if cfg.future_chunk_early_bias < 0.0:
+        raise ValueError(
+            "future_chunk_early_bias must be >= 0, got "
+            f"{cfg.future_chunk_early_bias}."
+        )
+    if cfg.action_control_prior_scale < 0.0:
+        raise ValueError(
+            "action_control_prior_scale must be >= 0, got "
+            f"{cfg.action_control_prior_scale}."
+        )
     if cfg.validation_enabled and cfg.video_path:
         raise ValueError("Validation loss is not supported for local-video training in v1.")
 
@@ -443,6 +490,7 @@ def _resume_training_state(
     checkpoint: dict[str, object],
     model: nn.Module,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
 ) -> tuple[int, bool]:
     """Restore training modules from checkpoint and report step plus optimizer restore status."""
@@ -467,7 +515,13 @@ def _resume_training_state(
         action_encoder=action_encoder,
         action_state=action_state,
     )
-    if loaded_partial_action_state:
+    loaded_partial_projector_state = False
+    if action_control_projector is not None:
+        loaded_partial_projector_state = _load_action_control_projector_state_dict(
+            action_control_projector=action_control_projector,
+            projector_state=checkpoint.get("action_control_projector_state_dict"),
+        )
+    if loaded_partial_action_state or loaded_partial_projector_state:
         return step, False
     optimizer.load_state_dict(optimizer_state)
     return step, True
@@ -487,6 +541,7 @@ def _configure_trainable_parameters(
     cfg: TrainScriptConfig,
     model: WanVACEWorldModel,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
 ) -> list[nn.Parameter]:
     """Apply the requested trainable-parameter policy and return optimizer params."""
     for parameter in model.parameters():
@@ -512,8 +567,16 @@ def _configure_trainable_parameters(
 
     for parameter in action_encoder.parameters():
         parameter.requires_grad_(True)
+    if action_control_projector is not None:
+        for parameter in action_control_projector.parameters():
+            parameter.requires_grad_(True)
 
-    parameters = [parameter for parameter in itertools.chain(model.parameters(), action_encoder.parameters()) if parameter.requires_grad]
+    chained_parameters = itertools.chain(
+        model.parameters(),
+        action_encoder.parameters(),
+        () if action_control_projector is None else action_control_projector.parameters(),
+    )
+    parameters = [parameter for parameter in chained_parameters if parameter.requires_grad]
     if not parameters:
         raise ValueError("No trainable parameters remain after applying trainable_backbone policy")
     return parameters
@@ -533,15 +596,27 @@ def build_action_encoder_from_config(
     return build_conditioning_encoder_for_model(cfg, prepared_batch, model)
 
 
+def build_action_control_projector_from_config(
+    cfg: TrainScriptConfig,
+    prepared_batch: PreparedPackedBatch,
+    model: WanVACEWorldModel,
+) -> ActionControlProjector | NullActionControlProjector:
+    """Build the configured action-to-latent future-control prior projector."""
+    return build_action_control_projector_for_model(cfg, prepared_batch, model)
+
+
 @torch.no_grad()
 def _evaluate_loss(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
     z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
     a_plan: torch.Tensor,
     k: int,
+    action_conditioning_window: str,
+    action_control_prior_scale: float,
     t_min: float,
     t_max: float,
     weight_mode: str,
@@ -549,6 +624,7 @@ def _evaluate_loss(
     motion_loss_max_weight: float,
     motion_loss_excess_only: bool,
     future_loss_early_bias: float,
+    future_chunk_early_bias: float,
     device: torch.device,
     disable_amp: bool,
     runtime_dtype: torch.dtype,
@@ -556,14 +632,25 @@ def _evaluate_loss(
     """Compute one eval-mode chunkwise loss for overfit diagnostics."""
     model.eval()
     action_encoder.eval()
+    if action_control_projector is not None:
+        action_control_projector.eval()
 
     with _training_autocast_context(device=device, disable_amp=disable_amp, dtype=runtime_dtype):
         action_tokens = action_encoder(a_plan)
+        action_control_prior = None
+        if action_control_projector is not None and action_control_prior_scale > 0.0:
+            action_control_prior = action_control_projector(
+                a_plan,
+                latent_height=z_future_video.shape[3],
+                latent_width=z_future_video.shape[4],
+            )
         loss = chunkwise_teacher_forcing_loss(
             model,
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
+            action_control_prior=action_control_prior,
+            action_conditioning_window=action_conditioning_window,
             k=k,
             t_min=t_min,
             t_max=t_max,
@@ -572,6 +659,7 @@ def _evaluate_loss(
             motion_loss_max_weight=motion_loss_max_weight,
             motion_loss_excess_only=motion_loss_excess_only,
             future_loss_early_bias=future_loss_early_bias,
+            future_chunk_early_bias=future_chunk_early_bias,
         )
     return float(loss.detach().cpu().item())
 
@@ -581,6 +669,7 @@ def _evaluate_validation_loss(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
     validation_loader,
     encoder: WanVAE,
     cfg: TrainScriptConfig,
@@ -605,10 +694,13 @@ def _evaluate_validation_loss(
         total_loss += _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
+            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
             k=cfg.k,
+            action_conditioning_window=cfg.action_conditioning_window,
+            action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -616,6 +708,7 @@ def _evaluate_validation_loss(
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
             future_loss_early_bias=cfg.future_loss_early_bias,
+            future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,
@@ -784,8 +877,14 @@ def main() -> None:
 
     model = build_model_from_config(cfg, prepared).to(device)
     action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
+    action_control_projector = build_action_control_projector_from_config(cfg, prepared, model).to(device)
 
-    parameter_groups = _configure_trainable_parameters(cfg, model, action_encoder)
+    parameter_groups = _configure_trainable_parameters(
+        cfg,
+        model,
+        action_encoder,
+        action_control_projector,
+    )
     trainable_param_count = sum(parameter.numel() for parameter in parameter_groups)
     print(
         f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)",
@@ -803,6 +902,7 @@ def main() -> None:
             checkpoint=checkpoint,
             model=model,
             action_encoder=action_encoder,
+            action_control_projector=action_control_projector,
             optimizer=optimizer,
         )
         best_val_loss, val_bad_checks = _load_validation_state_from_checkpoint(checkpoint)
@@ -812,7 +912,8 @@ def main() -> None:
         print(f"Resumed training state from step={resumed_step:06d}", flush=True)
         if not restored_optimizer_state:
             print(
-                "Resume note: checkpoint predates the temporal action mixer, so optimizer state was not restored.",
+                "Resume note: checkpoint predates one or more optional conditioning modules, "
+                "so optimizer state was not restored.",
                 flush=True,
             )
         if best_val_loss is not None:
@@ -833,10 +934,13 @@ def main() -> None:
         overfit_start_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
+            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
             k=cfg.k,
+            action_conditioning_window=cfg.action_conditioning_window,
+            action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -844,6 +948,7 @@ def main() -> None:
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
             future_loss_early_bias=cfg.future_loss_early_bias,
+            future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,
@@ -891,11 +996,14 @@ def main() -> None:
         metrics = train_chunkwise_batch(
             model=model,
             action_encoder=action_encoder,
+            action_control_projector=action_control_projector,
             optimizer=optimizer,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
             k=cfg.k,
+            action_conditioning_window=cfg.action_conditioning_window,
+            action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -903,6 +1011,7 @@ def main() -> None:
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
             future_loss_early_bias=cfg.future_loss_early_bias,
+            future_chunk_early_bias=cfg.future_chunk_early_bias,
             grad_clip_norm=cfg.grad_clip_norm,
             amp_dtype=(None if cfg.disable_amp or device.type != "cuda" else runtime_dtype),
             grad_scaler=grad_scaler,
@@ -931,6 +1040,7 @@ def main() -> None:
             val_loss, val_num_batches = _evaluate_validation_loss(
                 model=model,
                 action_encoder=action_encoder,
+                action_control_projector=action_control_projector,
                 validation_loader=validation_loader,
                 encoder=vae,
                 cfg=cfg,
@@ -970,6 +1080,7 @@ def main() -> None:
                 step=step,
                 model=model,
                 action_encoder=action_encoder,
+                action_control_projector=action_control_projector,
                 optimizer=optimizer,
                 extra_state=_build_checkpoint_extra_state(
                     cfg=cfg,
@@ -1017,6 +1128,7 @@ def main() -> None:
         step=completed_steps,
         model=model,
         action_encoder=action_encoder,
+        action_control_projector=action_control_projector,
         optimizer=optimizer,
         extra_state=_build_checkpoint_extra_state(
             cfg=cfg,
@@ -1030,10 +1142,13 @@ def main() -> None:
         overfit_end_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
+            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
             k=cfg.k,
+            action_conditioning_window=cfg.action_conditioning_window,
+            action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1041,6 +1156,7 @@ def main() -> None:
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
             future_loss_early_bias=cfg.future_loss_early_bias,
+            future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,
             disable_amp=cfg.disable_amp,
             runtime_dtype=runtime_dtype,

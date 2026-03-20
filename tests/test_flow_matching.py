@@ -4,6 +4,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 import pytest
 import torch
 from world_model.training.flow_matching import (
+    _compute_future_chunk_early_weight,
     _compute_future_loss_early_weight,
     _compute_motion_loss_weight,
     chunkwise_teacher_forcing_loss,
@@ -170,12 +171,128 @@ def test_chunkwise_teacher_forcing_loss_rejects_negative_future_loss_early_bias(
         )
 
 
+def test_chunkwise_teacher_forcing_loss_rejects_negative_future_chunk_early_bias():
+    """Reject negative early-chunk bias because it would downweight earlier chunks."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="future_chunk_early_bias"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 2, 2),
+            z_future_video=torch.randn(1, 2, 2, 2, 2),
+            action_tokens=torch.randn(1, 2, 1),
+            k=1,
+            future_chunk_early_bias=-0.1,
+        )
+
+
+def test_compute_future_chunk_early_weight_emphasizes_earlier_chunks() -> None:
+    """Give the first autoregressive chunk the largest scalar weight."""
+    early = _compute_future_chunk_early_weight(
+        chunk_index=0,
+        num_chunks=3,
+        bias=0.6,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    middle = _compute_future_chunk_early_weight(
+        chunk_index=1,
+        num_chunks=3,
+        bias=0.6,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    late = _compute_future_chunk_early_weight(
+        chunk_index=2,
+        num_chunks=3,
+        bias=0.6,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert early.item() == pytest.approx(1.6)
+    assert middle.item() == pytest.approx(1.3)
+    assert late.item() == pytest.approx(1.0)
+
+
+def test_chunkwise_teacher_forcing_loss_chunk_bias_favors_earlier_chunk_errors(monkeypatch) -> None:
+    """Increase the loss more when the same error sits in an earlier chunk."""
+
+    def _fake_make_noisy_and_target(z_clean: torch.Tensor, t: torch.Tensor, *, noise=None):
+        del t, noise
+        return z_clean.clone(), z_clean.clone()
+
+    class _ZeroPredictor:
+        """Return zero velocity so the target magnitude controls the loss."""
+
+        def __call__(
+            self,
+            *,
+            noisy_future_video: torch.Tensor,
+            observed_video: torch.Tensor,
+            action_tokens: torch.Tensor,
+            timestep_t: torch.Tensor,
+            block_causal_attention_mask: torch.Tensor,
+            observed_mask: torch.Tensor | None = None,
+            future_action_control_prior: torch.Tensor | None = None,
+            control_hidden_states_scale: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del (
+                observed_video,
+                action_tokens,
+                timestep_t,
+                block_causal_attention_mask,
+                observed_mask,
+                future_action_control_prior,
+                control_hidden_states_scale,
+            )
+            return torch.zeros_like(noisy_future_video)
+
+    monkeypatch.setattr("world_model.training.flow_matching.make_noisy_and_target", _fake_make_noisy_and_target)
+
+    common_kwargs = {
+        "model": _ZeroPredictor(),
+        "z_past_video": torch.zeros(1, 1, 1, 1, 1),
+        "action_tokens": torch.zeros(1, 3, 1),
+        "k": 2,
+        "t_min": 0.0,
+        "t_max": 0.0,
+    }
+    early_error = torch.tensor([[[[[1.0]], [[0.0]], [[0.0]]]]])
+    late_error = torch.tensor([[[[[0.0]], [[0.0]], [[1.0]]]]])
+
+    unbiased_early = chunkwise_teacher_forcing_loss(
+        z_future_video=early_error,
+        future_chunk_early_bias=0.0,
+        **common_kwargs,
+    )
+    unbiased_late = chunkwise_teacher_forcing_loss(
+        z_future_video=late_error,
+        future_chunk_early_bias=0.0,
+        **common_kwargs,
+    )
+    biased_early = chunkwise_teacher_forcing_loss(
+        z_future_video=early_error,
+        future_chunk_early_bias=1.0,
+        **common_kwargs,
+    )
+    biased_late = chunkwise_teacher_forcing_loss(
+        z_future_video=late_error,
+        future_chunk_early_bias=1.0,
+        **common_kwargs,
+    )
+
+    assert unbiased_early.item() == pytest.approx(unbiased_late.item())
+    assert biased_early.item() > biased_late.item()
+
+
 class _ChunkActionWindowRecorder:
     """Record per-chunk action-token windows during teacher forcing."""
 
     def __init__(self) -> None:
         """Initialize captured action-window storage."""
         self.action_windows: list[torch.Tensor] = []
+        self.action_control_priors: list[torch.Tensor | None] = []
 
     def __call__(
         self,
@@ -186,11 +303,15 @@ class _ChunkActionWindowRecorder:
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Capture the active action window and emit zero velocities."""
         del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
         self.action_windows.append(action_tokens.detach().clone())
+        self.action_control_priors.append(
+            None if future_action_control_prior is None else future_action_control_prior.detach().clone()
+        )
         return torch.zeros_like(noisy_future_video)
 
 
@@ -215,6 +336,72 @@ def test_chunkwise_teacher_forcing_uses_current_chunk_action_window():
     assert torch.equal(model.action_windows[2], action_tokens[:, 4:5])
 
 
+def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> None:
+    """Reuse the full future action plan when full-plan conditioning is requested."""
+    model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=torch.randn(1, 2, 3, 1, 1),
+        z_future_video=torch.randn(1, 2, 5, 1, 1),
+        action_tokens=action_tokens,
+        action_conditioning_window="full",
+        k=2,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert len(model.action_windows) == 3
+    assert all(torch.equal(window, action_tokens) for window in model.action_windows)
+
+
+def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes() -> None:
+    """Align chunk-mode priors to the active chunk and full-mode priors to the future suffix."""
+    chunk_model = _ChunkActionWindowRecorder()
+    full_model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(4, dtype=torch.float32).view(1, 4, 1)
+    action_control_prior = torch.arange(1 * 2 * 4 * 1 * 1, dtype=torch.float32).view(1, 2, 4, 1, 1)
+
+    chunkwise_teacher_forcing_loss(
+        chunk_model,
+        z_past_video=torch.randn(1, 2, 2, 1, 1),
+        z_future_video=torch.randn(1, 2, 4, 1, 1),
+        action_tokens=action_tokens,
+        action_control_prior=action_control_prior,
+        action_conditioning_window="chunk",
+        k=1,
+        t_min=0.4,
+        t_max=0.4,
+    )
+    chunkwise_teacher_forcing_loss(
+        full_model,
+        z_past_video=torch.randn(1, 2, 2, 1, 1),
+        z_future_video=torch.randn(1, 2, 4, 1, 1),
+        action_tokens=action_tokens,
+        action_control_prior=action_control_prior,
+        action_conditioning_window="full",
+        k=1,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert chunk_model.action_control_priors[0] is not None
+    expected_first_chunk_prior = torch.cat(
+        [
+            action_control_prior[:, :, 0:2],
+            torch.zeros_like(action_control_prior[:, :, 0:2]),
+        ],
+        dim=2,
+    )
+    assert torch.equal(chunk_model.action_control_priors[0], expected_first_chunk_prior)
+    assert chunk_model.action_control_priors[1] is not None
+    assert chunk_model.action_control_priors[1].shape[2] == 2
+    assert torch.equal(chunk_model.action_control_priors[1], action_control_prior[:, :, 2:4])
+    assert torch.equal(full_model.action_control_priors[0], action_control_prior[:, :, 0:4])
+    assert torch.equal(full_model.action_control_priors[1], action_control_prior[:, :, 2:4])
+
+
 class _ZeroVelocityModel:
     """Return zero velocity predictions for deterministic loss comparisons."""
 
@@ -227,10 +414,19 @@ class _ZeroVelocityModel:
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Ignore inputs and emit zeros with the same shape as the noisy suffix."""
-        del observed_video, action_tokens, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        del (
+            observed_video,
+            action_tokens,
+            timestep_t,
+            block_causal_attention_mask,
+            observed_mask,
+            future_action_control_prior,
+            control_hidden_states_scale,
+        )
         return torch.zeros_like(noisy_future_video)
 
 

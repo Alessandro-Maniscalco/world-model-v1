@@ -42,11 +42,14 @@ def train_chunkwise_batch(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
     z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
     a_plan: torch.Tensor,
     k: int,
+    action_conditioning_window: str = "chunk",
+    action_control_prior_scale: float = 0.0,
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: str = "uniform",
@@ -54,6 +57,7 @@ def train_chunkwise_batch(
     motion_loss_max_weight: float = 0.0,
     motion_loss_excess_only: bool = False,
     future_loss_early_bias: float = 0.0,
+    future_chunk_early_bias: float = 0.0,
     grad_clip_norm: float | None = 1.0,
     snr_clip_max: float = 5.0,
     eps: float = 1e-6,
@@ -64,17 +68,30 @@ def train_chunkwise_batch(
     """Run one optimizer step using chunkwise teacher-forced flow matching."""
     model.train()
     action_encoder.train()
+    if action_control_projector is not None:
+        action_control_projector.train()
 
     optimizer.zero_grad(set_to_none=True)
     trainable_params = list(model.parameters()) + list(action_encoder.parameters())
+    if action_control_projector is not None:
+        trainable_params += list(action_control_projector.parameters())
     autocast_context = _build_training_autocast_context(z_past_video=z_past_video, amp_dtype=amp_dtype)
     with autocast_context:
         action_tokens = action_encoder(a_plan)
+        action_control_prior = None
+        if action_control_projector is not None and action_control_prior_scale > 0.0:
+            action_control_prior = action_control_projector(
+                a_plan,
+                latent_height=z_future_video.shape[3],
+                latent_width=z_future_video.shape[4],
+            )
         info = chunkwise_teacher_forcing_loss(
             model,
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
+            action_control_prior=action_control_prior,
+            action_conditioning_window=action_conditioning_window,
             k=k,
             t_min=t_min,
             t_max=t_max,
@@ -83,6 +100,7 @@ def train_chunkwise_batch(
             motion_loss_max_weight=motion_loss_max_weight,
             motion_loss_excess_only=motion_loss_excess_only,
             future_loss_early_bias=future_loss_early_bias,
+            future_chunk_early_bias=future_chunk_early_bias,
             snr_clip_max=snr_clip_max,
             eps=eps,
             generator=generator,
@@ -127,6 +145,7 @@ def save_checkpoint(
     step: int,
     model: nn.Module,
     action_encoder: nn.Module,
+    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
     extra_state: dict[str, Any] | None = None,
 ) -> Path:
@@ -138,6 +157,9 @@ def save_checkpoint(
         "step": int(step),
         "model_state_dict": model.state_dict(),
         "action_encoder_state_dict": action_encoder.state_dict(),
+        "action_control_projector_state_dict": (
+            None if action_control_projector is None else action_control_projector.state_dict()
+        ),
         "optimizer_state_dict": optimizer.state_dict(),
     }
     if extra_state:

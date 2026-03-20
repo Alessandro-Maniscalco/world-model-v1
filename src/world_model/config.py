@@ -46,6 +46,7 @@ class TrainScriptConfig:
     motion_loss_max_weight: float = 0.0
     motion_loss_excess_only: bool = False
     future_loss_early_bias: float = 0.0
+    future_chunk_early_bias: float = 0.0
     t_min: float = 0.0
     t_max: float = 1.0
     disable_amp: bool = False
@@ -77,9 +78,12 @@ class TrainScriptConfig:
         "proj_out",
     )
     conditioning_mode: str = "none"
+    action_conditioning_window: str = "chunk"
     action_input_layernorm: bool = True
     action_mlp_dim: int = 0
     action_mlp_residual: bool = False
+    action_order_conditioning: bool = False
+    action_control_prior_scale: float = 0.0
     action_temporal_difference_scale: float = 0.0
     action_temporal_mixer_kernel_size: int = 0
     action_temporal_mixer_scale: float = 0.0
@@ -140,9 +144,12 @@ class InferScriptConfig:
         "proj_out",
     )
     conditioning_mode: str = "none"
+    action_conditioning_window: str = "chunk"
     action_input_layernorm: bool = True
     action_mlp_dim: int = 0
     action_mlp_residual: bool = False
+    action_order_conditioning: bool = False
+    action_control_prior_scale: float = 0.0
     action_temporal_difference_scale: float = 0.0
     action_temporal_mixer_kernel_size: int = 0
     action_temporal_mixer_scale: float = 0.0
