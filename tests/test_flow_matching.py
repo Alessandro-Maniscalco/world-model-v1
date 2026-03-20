@@ -400,6 +400,79 @@ def test_chunkwise_teacher_forcing_can_hide_future_prefix_from_later_chunks() ->
     assert all(torch.equal(observed, z_past_video) for observed in past_only_model.observed_videos)
 
 
+def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(monkeypatch) -> None:
+    """Feed detached predicted chunks back as the observed prefix when requested."""
+
+    def _fake_make_noisy_and_target(
+        z_clean: torch.Tensor,
+        t: torch.Tensor,
+        *,
+        noise: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del t, noise
+        return z_clean.clone(), torch.zeros_like(z_clean)
+
+    class _PredictedPrefixRecorder:
+        """Record observed prefixes while returning a constant velocity field."""
+
+        def __init__(self) -> None:
+            """Initialize observed-prefix storage."""
+            self.observed_videos: list[torch.Tensor] = []
+
+        def __call__(
+            self,
+            *,
+            noisy_future_video: torch.Tensor,
+            observed_video: torch.Tensor,
+            action_tokens: torch.Tensor,
+            timestep_t: torch.Tensor,
+            block_causal_attention_mask: torch.Tensor,
+            observed_mask: torch.Tensor | None = None,
+            future_action_control_prior: torch.Tensor | None = None,
+            control_hidden_states_scale: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            """Capture observed prefixes and return a constant unit velocity."""
+            del (
+                action_tokens,
+                timestep_t,
+                block_causal_attention_mask,
+                observed_mask,
+                future_action_control_prior,
+                control_hidden_states_scale,
+            )
+            self.observed_videos.append(observed_video.detach().clone())
+            return torch.ones_like(noisy_future_video)
+
+    monkeypatch.setattr("world_model.training.flow_matching.make_noisy_and_target", _fake_make_noisy_and_target)
+
+    model = _PredictedPrefixRecorder()
+    z_past_video = torch.tensor([[[[[10.0]], [[11.0]]]]])
+    z_future_video = torch.tensor([[[[[20.0]], [[21.0]], [[22.0]], [[23.0]], [[24.0]]]]])
+    action_tokens = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        action_tokens=action_tokens,
+        teacher_forcing_observation_mode="predicted_prefix",
+        k=2,
+        t_min=0.5,
+        t_max=0.5,
+    )
+
+    assert len(model.observed_videos) == 3
+    assert torch.equal(model.observed_videos[0], z_past_video)
+    assert torch.equal(
+        model.observed_videos[1],
+        torch.cat((z_past_video, z_future_video[:, :, :2, :, :] - 0.5), dim=2),
+    )
+    assert torch.equal(
+        model.observed_videos[2],
+        torch.cat((z_past_video, z_future_video[:, :, :4, :, :] - 0.5), dim=2),
+    )
+
+
 def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes() -> None:
     """Align chunk-mode priors to the active chunk and full-mode priors to the future suffix."""
     chunk_model = _ChunkActionWindowRecorder()

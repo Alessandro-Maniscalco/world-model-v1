@@ -642,6 +642,15 @@ def test_train_script_rejects_unknown_teacher_forcing_observation_mode() -> None
         )
 
 
+def test_train_script_accepts_predicted_prefix_teacher_forcing_observation_mode() -> None:
+    """Allow the stronger rollout-prefix mode for bounded structural experiments."""
+    train_script = _load_train_script_module()
+
+    train_script._validate_auto_stop_config(
+        TrainScriptConfig(teacher_forcing_observation_mode="predicted_prefix")
+    )
+
+
 def test_train_script_updates_validation_tracking_with_patience() -> None:
     """Reset or increment validation patience based on relative improvement."""
     train_script = _load_train_script_module()

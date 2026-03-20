@@ -191,7 +191,7 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--teacher-forcing-observation-mode",
-        choices=("full_prefix", "past_only"),
+        choices=("full_prefix", "past_only", "predicted_prefix"),
         default=defaults.teacher_forcing_observation_mode,
         help="Whether later teacher-forced chunks observe the true future prefix or only the true past.",
     )
@@ -397,10 +397,14 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "future_chunk_early_bias must be >= 0, got "
             f"{cfg.future_chunk_early_bias}."
         )
-    if cfg.teacher_forcing_observation_mode not in {"full_prefix", "past_only"}:
+    if cfg.teacher_forcing_observation_mode not in {
+        "full_prefix",
+        "past_only",
+        "predicted_prefix",
+    }:
         raise ValueError(
-            "teacher_forcing_observation_mode must be 'full_prefix' or 'past_only', got "
-            f"{cfg.teacher_forcing_observation_mode!r}."
+            "teacher_forcing_observation_mode must be 'full_prefix', 'past_only', or "
+            f"'predicted_prefix', got {cfg.teacher_forcing_observation_mode!r}."
         )
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(

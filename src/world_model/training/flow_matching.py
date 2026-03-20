@@ -15,7 +15,7 @@ from world_model.masking import build_block_causal_mask
 
 
 WeightMode = Literal["uniform", "snr", "clipped_snr"]
-TeacherForcingObservationMode = Literal["full_prefix", "past_only"]
+TeacherForcingObservationMode = Literal["full_prefix", "past_only", "predicted_prefix"]
 DEFAULT_NUM_TRAIN_TIMESTEPS = 1000.0
 
 
@@ -273,6 +273,7 @@ def _chunkwise_teacher_forcing_video_loss(
     weight_mass = z_future_video.new_tensor(0.0)
     per_chunk_losses: list[float] = []
     per_chunk_lengths: list[int] = []
+    predicted_future_prefix: torch.Tensor | None = None
 
     for chunk_index, (start, end) in enumerate(schedule.boundaries):
         chunk_len = end - start
@@ -306,6 +307,7 @@ def _chunkwise_teacher_forcing_video_loss(
             z_future_video=z_future_video,
             start=start,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+            predicted_future_prefix=predicted_future_prefix,
         )
         observed_mask = torch.zeros(
             observed_video.shape[0],
@@ -354,6 +356,13 @@ def _chunkwise_teacher_forcing_video_loss(
             control_hidden_states_scale=None,
         )
         pred_chunk = pred_suffix[:, :, :chunk_len, :, :]
+        predicted_future_prefix = _update_predicted_future_prefix(
+            predicted_future_prefix=predicted_future_prefix,
+            noisy_chunk=noisy_chunk,
+            pred_chunk=pred_chunk,
+            t=t,
+            teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+        )
 
         sq_err = (pred_chunk - target_chunk).pow(2)
         motion_weight = _compute_motion_loss_weight(
@@ -442,9 +451,14 @@ def _validate_chunkwise_video_inputs(
             "action_conditioning_window must be 'chunk' or 'full', "
             f"got {action_conditioning_window!r}"
         )
-    if teacher_forcing_observation_mode not in {"full_prefix", "past_only"}:
+    if teacher_forcing_observation_mode not in {
+        "full_prefix",
+        "past_only",
+        "predicted_prefix",
+    }:
         raise ValueError(
-            "teacher_forcing_observation_mode must be 'full_prefix' or 'past_only', "
+            "teacher_forcing_observation_mode must be 'full_prefix', 'past_only', or "
+            "'predicted_prefix', "
             f"got {teacher_forcing_observation_mode!r}"
         )
     if z_future_video.shape[2] <= 0:
@@ -472,11 +486,59 @@ def _select_observed_video(
     z_future_video: torch.Tensor,
     start: int,
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
+    predicted_future_prefix: torch.Tensor | None,
 ) -> torch.Tensor:
     """Select the observed latent prefix for one teacher-forced chunk."""
     if teacher_forcing_observation_mode == "past_only":
         return z_past_video
+    if teacher_forcing_observation_mode == "predicted_prefix":
+        if predicted_future_prefix is None:
+            return z_past_video
+        if predicted_future_prefix.shape[2] != start:
+            raise ValueError(
+                "predicted_future_prefix time length must match chunk start, got "
+                f"{predicted_future_prefix.shape[2]} and start={start}"
+            )
+        return torch.cat([z_past_video, predicted_future_prefix], dim=2)
     return torch.cat([z_past_video, z_future_video[:, :, :start, :, :]], dim=2)
+
+
+def _update_predicted_future_prefix(
+    *,
+    predicted_future_prefix: torch.Tensor | None,
+    noisy_chunk: torch.Tensor,
+    pred_chunk: torch.Tensor,
+    t: torch.Tensor,
+    teacher_forcing_observation_mode: TeacherForcingObservationMode,
+) -> torch.Tensor | None:
+    """Append the detached clean chunk estimate when predicted-prefix mode is active."""
+    if teacher_forcing_observation_mode != "predicted_prefix":
+        return predicted_future_prefix
+    clean_chunk = _estimate_clean_chunk_from_velocity(
+        noisy_chunk=noisy_chunk,
+        pred_chunk=pred_chunk,
+        t=t,
+    ).detach()
+    if predicted_future_prefix is None:
+        return clean_chunk
+    return torch.cat([predicted_future_prefix, clean_chunk], dim=2)
+
+
+def _estimate_clean_chunk_from_velocity(
+    *,
+    noisy_chunk: torch.Tensor,
+    pred_chunk: torch.Tensor,
+    t: torch.Tensor,
+) -> torch.Tensor:
+    """Recover the clean latent chunk implied by a flow-matching velocity prediction."""
+    t_broadcast = t.to(device=noisy_chunk.device, dtype=noisy_chunk.dtype).view(
+        noisy_chunk.shape[0],
+        1,
+        1,
+        1,
+        1,
+    )
+    return noisy_chunk - (t_broadcast * pred_chunk)
 
 
 def _select_action_control_prior(
