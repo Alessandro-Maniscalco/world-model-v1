@@ -280,6 +280,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" in option_strings
     assert "--teacher-forcing-observation-mode" in option_strings
+    assert "--teacher-forcing-future-input-mode" in option_strings
     assert "--action-temporal-difference-scale" in option_strings
     assert "--action-temporal-mixer-kernel-size" in option_strings
     assert "--action-temporal-mixer-scale" in option_strings
@@ -648,6 +649,25 @@ def test_train_script_accepts_predicted_prefix_teacher_forcing_observation_mode(
 
     train_script._validate_auto_stop_config(
         TrainScriptConfig(teacher_forcing_observation_mode="predicted_prefix")
+    )
+
+
+def test_train_script_rejects_unknown_teacher_forcing_future_input_mode() -> None:
+    """Fail fast when teacher forcing future-input mode would silently change rollout matching."""
+    train_script = _load_train_script_module()
+
+    with pytest.raises(ValueError, match="teacher_forcing_future_input_mode must be"):
+        train_script._validate_auto_stop_config(
+            TrainScriptConfig(teacher_forcing_future_input_mode="bad")
+        )
+
+
+def test_train_script_accepts_active_chunk_teacher_forcing_future_input_mode() -> None:
+    """Allow rollout-matched future inputs for bounded teacher-forcing experiments."""
+    train_script = _load_train_script_module()
+
+    train_script._validate_auto_stop_config(
+        TrainScriptConfig(teacher_forcing_future_input_mode="active_chunk")
     )
 
 

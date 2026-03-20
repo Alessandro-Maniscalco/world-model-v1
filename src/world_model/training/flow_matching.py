@@ -16,6 +16,7 @@ from world_model.masking import build_block_causal_mask
 
 WeightMode = Literal["uniform", "snr", "clipped_snr"]
 TeacherForcingObservationMode = Literal["full_prefix", "past_only", "predicted_prefix"]
+TeacherForcingFutureInputMode = Literal["full_suffix", "active_chunk"]
 DEFAULT_NUM_TRAIN_TIMESTEPS = 1000.0
 
 
@@ -179,6 +180,7 @@ def chunkwise_teacher_forcing_loss(
     action_control_prior: torch.Tensor | None = None,
     action_conditioning_window: Literal["chunk", "full"] = "chunk",
     teacher_forcing_observation_mode: TeacherForcingObservationMode = "full_prefix",
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode = "full_suffix",
     k: int,
     t_min: float = 0.0,
     t_max: float = 1.0,
@@ -202,6 +204,7 @@ def chunkwise_teacher_forcing_loss(
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+        teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
         k=k,
         t_min=t_min,
         t_max=t_max,
@@ -227,6 +230,7 @@ def _chunkwise_teacher_forcing_video_loss(
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
     k: int,
     t_min: float,
     t_max: float,
@@ -249,6 +253,7 @@ def _chunkwise_teacher_forcing_video_loss(
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+        teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
         k=k,
     )
 
@@ -298,9 +303,13 @@ def _chunkwise_teacher_forcing_video_loss(
         clean_chunk = z_future_video[:, :, start:end, :, :]
         noisy_chunk, target_chunk = make_noisy_and_target(clean_chunk, t)
 
-        clean_suffix = z_future_video[:, :, start:, :, :]
-        noisy_suffix = clean_suffix.clone()
-        noisy_suffix[:, :, :chunk_len, :, :] = noisy_chunk
+        noisy_future_input = _select_teacher_forcing_future_input(
+            z_future_video=z_future_video,
+            noisy_chunk=noisy_chunk,
+            start=start,
+            end=end,
+            teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+        )
 
         observed_video = _select_observed_video(
             z_past_video=z_past_video,
@@ -318,7 +327,12 @@ def _chunkwise_teacher_forcing_video_loss(
             device=observed_video.device,
             dtype=observed_video.dtype,
         )
-        suffix_chunk_ids = schedule.chunk_ids[start:]
+        future_chunk_ids = _select_teacher_forcing_future_chunk_ids(
+            schedule_chunk_ids=schedule.chunk_ids,
+            start=start,
+            end=end,
+            teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+        )
         full_chunk_ids = torch.cat(
             [
                 torch.full(
@@ -327,14 +341,14 @@ def _chunkwise_teacher_forcing_video_loss(
                     device=z_future_video.device,
                     dtype=torch.long,
                 ),
-                suffix_chunk_ids,
+                future_chunk_ids,
             ],
             dim=0,
         )
         attn_mask = build_block_causal_mask(full_chunk_ids, mask_format="additive")
 
         pred_suffix = model(
-            noisy_future_video=noisy_suffix,
+            noisy_future_video=noisy_future_input,
             observed_video=observed_video,
             action_tokens=_select_action_tokens(
                 action_tokens=action_tokens,
@@ -351,7 +365,8 @@ def _chunkwise_teacher_forcing_video_loss(
                 end=end,
                 total_future_steps=total_future_steps,
                 action_conditioning_window=action_conditioning_window,
-                reference_suffix=noisy_suffix,
+                teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+                reference_future_input=noisy_future_input,
             ),
             control_hidden_states_scale=None,
         )
@@ -413,6 +428,7 @@ def _validate_chunkwise_video_inputs(
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
     k: int,
 ) -> None:
     """Validate structured latent-video chunkwise training inputs."""
@@ -461,6 +477,11 @@ def _validate_chunkwise_video_inputs(
             "'predicted_prefix', "
             f"got {teacher_forcing_observation_mode!r}"
         )
+    if teacher_forcing_future_input_mode not in {"full_suffix", "active_chunk"}:
+        raise ValueError(
+            "teacher_forcing_future_input_mode must be 'full_suffix' or "
+            f"'active_chunk', got {teacher_forcing_future_input_mode!r}"
+        )
     if z_future_video.shape[2] <= 0:
         raise ValueError("z_future_video must have positive time dimension")
     if k < 1:
@@ -501,6 +522,42 @@ def _select_observed_video(
             )
         return torch.cat([z_past_video, predicted_future_prefix], dim=2)
     return torch.cat([z_past_video, z_future_video[:, :, :start, :, :]], dim=2)
+
+
+def _select_teacher_forcing_future_input(
+    *,
+    z_future_video: torch.Tensor,
+    noisy_chunk: torch.Tensor,
+    start: int,
+    end: int,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+) -> torch.Tensor:
+    """Select the future video window denoised during teacher forcing.
+
+    `full_suffix` preserves the historical training path, where the active chunk
+    is denoised inside the full remaining suffix. `active_chunk` matches
+    rollout-time inference by exposing only the active chunk to the model.
+    """
+    if teacher_forcing_future_input_mode == "active_chunk":
+        return noisy_chunk
+
+    clean_suffix = z_future_video[:, :, start:, :, :]
+    noisy_suffix = clean_suffix.clone()
+    noisy_suffix[:, :, : end - start, :, :] = noisy_chunk
+    return noisy_suffix
+
+
+def _select_teacher_forcing_future_chunk_ids(
+    *,
+    schedule_chunk_ids: torch.Tensor,
+    start: int,
+    end: int,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+) -> torch.Tensor:
+    """Build chunk ids that match the future video window consumed by the model."""
+    if teacher_forcing_future_input_mode == "active_chunk":
+        return torch.zeros((end - start,), device=schedule_chunk_ids.device, dtype=torch.long)
+    return schedule_chunk_ids[start:]
 
 
 def _update_predicted_future_prefix(
@@ -548,16 +605,20 @@ def _select_action_control_prior(
     end: int,
     total_future_steps: int,
     action_conditioning_window: Literal["chunk", "full"],
-    reference_suffix: torch.Tensor,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+    reference_future_input: torch.Tensor,
 ) -> torch.Tensor | None:
     """Align future control priors to the suffix video window consumed by the model."""
     if action_control_prior is None:
         return None
+    if teacher_forcing_future_input_mode == "active_chunk":
+        return action_control_prior[:, :, start:end, :, :]
+
     suffix_len = total_future_steps - start
     if action_conditioning_window == "full":
         return action_control_prior[:, :, start:, :, :]
 
-    aligned_prior = reference_suffix.new_zeros(
+    aligned_prior = reference_future_input.new_zeros(
         action_control_prior.shape[0],
         action_control_prior.shape[1],
         suffix_len,

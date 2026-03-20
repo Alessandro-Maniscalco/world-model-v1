@@ -195,6 +195,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.teacher_forcing_observation_mode,
         help="Whether later teacher-forced chunks observe the true future prefix or only the true past.",
     )
+    parser.add_argument(
+        "--teacher-forcing-future-input-mode",
+        choices=("full_suffix", "active_chunk"),
+        default=defaults.teacher_forcing_future_input_mode,
+        help="Whether teacher forcing denoises the full future suffix or only the active chunk to match rollout.",
+    )
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
@@ -405,6 +411,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "teacher_forcing_observation_mode must be 'full_prefix', 'past_only', or "
             f"'predicted_prefix', got {cfg.teacher_forcing_observation_mode!r}."
+        )
+    if cfg.teacher_forcing_future_input_mode not in {"full_suffix", "active_chunk"}:
+        raise ValueError(
+            "teacher_forcing_future_input_mode must be 'full_suffix' or "
+            f"'active_chunk', got {cfg.teacher_forcing_future_input_mode!r}."
         )
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(
@@ -632,6 +643,7 @@ def _evaluate_loss(
     k: int,
     action_conditioning_window: str,
     teacher_forcing_observation_mode: str,
+    teacher_forcing_future_input_mode: str,
     action_control_prior_scale: float,
     t_min: float,
     t_max: float,
@@ -668,6 +680,7 @@ def _evaluate_loss(
             action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
             k=k,
             t_min=t_min,
             t_max=t_max,
@@ -718,6 +731,7 @@ def _evaluate_validation_loss(
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -959,6 +973,7 @@ def main() -> None:
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1023,6 +1038,7 @@ def main() -> None:
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,

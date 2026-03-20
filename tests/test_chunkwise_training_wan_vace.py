@@ -28,10 +28,11 @@ class _RecordingVideoModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Record structured video-path inputs and return a scaled prediction."""
-        del action_tokens, observed_mask, control_hidden_states_scale
+        del action_tokens, observed_mask, future_action_control_prior, control_hidden_states_scale
         self.calls.append(
             {
                 "observed_frames": torch.tensor(observed_video.shape[2]),
@@ -120,10 +121,18 @@ class _ActionTokenOnlyVideoModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Project active-window action tokens into the leading latent frames."""
-        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        del (
+            observed_video,
+            timestep_t,
+            block_causal_attention_mask,
+            observed_mask,
+            future_action_control_prior,
+            control_hidden_states_scale,
+        )
         channels = noisy_future_video.shape[1]
         token_steps = action_tokens.shape[1]
         prediction = torch.zeros_like(noisy_future_video)
@@ -185,3 +194,31 @@ def test_train_chunkwise_batch_reports_unclipped_grad_norm_when_disabled() -> No
 
     assert metrics.loss > 0.0
     assert metrics.grad_norm > 0.0
+
+
+def test_train_chunkwise_batch_can_match_rollout_future_inputs_with_active_chunk_mode() -> None:
+    """Use only the active future chunk during teacher forcing when requested."""
+    torch.manual_seed(0)
+    model = _RecordingVideoModel()
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(action_encoder.parameters()),
+        lr=1e-2,
+    )
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 8, 8, 8),
+        a_plan=torch.randn(2, 8, 6),
+        k=1,
+        teacher_forcing_future_input_mode="active_chunk",
+        t_min=0.5,
+        t_max=0.5,
+    )
+
+    assert metrics.loss > 0.0
+    assert len(model.calls) == 2
+    assert [call["future_frames"].item() for call in model.calls] == [4, 4]

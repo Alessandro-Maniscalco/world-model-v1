@@ -48,6 +48,7 @@ class TrainScriptConfig:
     future_loss_early_bias: float = 0.0
     future_chunk_early_bias: float = 0.0
     teacher_forcing_observation_mode: str = "full_prefix"
+    teacher_forcing_future_input_mode: str = "full_suffix"
     t_min: float = 0.0
     t_max: float = 1.0
     disable_amp: bool = False

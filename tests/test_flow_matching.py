@@ -294,6 +294,7 @@ class _ChunkActionWindowRecorder:
         self.action_windows: list[torch.Tensor] = []
         self.action_control_priors: list[torch.Tensor | None] = []
         self.observed_videos: list[torch.Tensor] = []
+        self.noisy_future_videos: list[torch.Tensor] = []
 
     def __call__(
         self,
@@ -309,6 +310,7 @@ class _ChunkActionWindowRecorder:
     ) -> torch.Tensor:
         """Capture the active action window and emit zero velocities."""
         del timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        self.noisy_future_videos.append(noisy_future_video.detach().clone())
         self.action_windows.append(action_tokens.detach().clone())
         self.observed_videos.append(observed_video.detach().clone())
         self.action_control_priors.append(
@@ -356,6 +358,35 @@ def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> 
 
     assert len(model.action_windows) == 3
     assert all(torch.equal(window, action_tokens) for window in model.action_windows)
+
+
+def test_chunkwise_teacher_forcing_can_match_rollout_with_active_chunk_future_inputs() -> None:
+    """Restrict teacher forcing to the active chunk so future inputs match rollout shape."""
+    full_suffix_model = _ChunkActionWindowRecorder()
+    active_chunk_model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
+    common_kwargs = {
+        "z_past_video": torch.randn(1, 2, 3, 1, 1),
+        "z_future_video": torch.randn(1, 2, 5, 1, 1),
+        "action_tokens": action_tokens,
+        "k": 2,
+        "t_min": 0.4,
+        "t_max": 0.4,
+    }
+
+    chunkwise_teacher_forcing_loss(
+        full_suffix_model,
+        teacher_forcing_future_input_mode="full_suffix",
+        **common_kwargs,
+    )
+    chunkwise_teacher_forcing_loss(
+        active_chunk_model,
+        teacher_forcing_future_input_mode="active_chunk",
+        **common_kwargs,
+    )
+
+    assert [video.shape[2] for video in full_suffix_model.noisy_future_videos] == [5, 3, 1]
+    assert [video.shape[2] for video in active_chunk_model.noisy_future_videos] == [2, 2, 1]
 
 
 def test_chunkwise_teacher_forcing_can_hide_future_prefix_from_later_chunks() -> None:
@@ -519,6 +550,31 @@ def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes()
     assert torch.equal(full_model.action_control_priors[1], action_control_prior[:, :, 2:4])
 
 
+def test_chunkwise_teacher_forcing_trims_full_plan_action_control_prior_for_active_chunk_inputs() -> None:
+    """Trim full-plan action priors to the active chunk when rollout-matched inputs are used."""
+    model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(4, dtype=torch.float32).view(1, 4, 1)
+    action_control_prior = torch.arange(1 * 2 * 4 * 1 * 1, dtype=torch.float32).view(1, 2, 4, 1, 1)
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=torch.randn(1, 2, 2, 1, 1),
+        z_future_video=torch.randn(1, 2, 4, 1, 1),
+        action_tokens=action_tokens,
+        action_control_prior=action_control_prior,
+        action_conditioning_window="full",
+        teacher_forcing_future_input_mode="active_chunk",
+        k=1,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert all(window.shape[1] == 4 for window in model.action_windows)
+    assert [video.shape[2] for video in model.noisy_future_videos] == [2, 2]
+    assert torch.equal(model.action_control_priors[0], action_control_prior[:, :, 0:2])
+    assert torch.equal(model.action_control_priors[1], action_control_prior[:, :, 2:4])
+
+
 def test_chunkwise_teacher_forcing_rejects_unknown_observation_mode() -> None:
     """Reject unsupported observation modes before teacher forcing begins."""
     model = _ChunkActionWindowRecorder()
@@ -530,6 +586,21 @@ def test_chunkwise_teacher_forcing_rejects_unknown_observation_mode() -> None:
             z_future_video=torch.randn(1, 2, 2, 1, 1),
             action_tokens=torch.randn(1, 2, 1),
             teacher_forcing_observation_mode="bad",
+            k=1,
+        )
+
+
+def test_chunkwise_teacher_forcing_rejects_unknown_future_input_mode() -> None:
+    """Reject unsupported future-input modes before teacher forcing begins."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="teacher_forcing_future_input_mode"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 1, 1),
+            z_future_video=torch.randn(1, 2, 2, 1, 1),
+            action_tokens=torch.randn(1, 2, 1),
+            teacher_forcing_future_input_mode="bad",
             k=1,
         )
 
