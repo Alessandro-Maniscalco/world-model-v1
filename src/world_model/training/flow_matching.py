@@ -15,6 +15,7 @@ from world_model.masking import build_block_causal_mask
 
 
 WeightMode = Literal["uniform", "snr", "clipped_snr"]
+TeacherForcingObservationMode = Literal["full_prefix", "past_only"]
 DEFAULT_NUM_TRAIN_TIMESTEPS = 1000.0
 
 
@@ -177,6 +178,7 @@ def chunkwise_teacher_forcing_loss(
     action_tokens: torch.Tensor,
     action_control_prior: torch.Tensor | None = None,
     action_conditioning_window: Literal["chunk", "full"] = "chunk",
+    teacher_forcing_observation_mode: TeacherForcingObservationMode = "full_prefix",
     k: int,
     t_min: float = 0.0,
     t_max: float = 1.0,
@@ -199,6 +201,7 @@ def chunkwise_teacher_forcing_loss(
         action_tokens=action_tokens,
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
+        teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         k=k,
         t_min=t_min,
         t_max=t_max,
@@ -223,6 +226,7 @@ def _chunkwise_teacher_forcing_video_loss(
     action_tokens: torch.Tensor | None,
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
+    teacher_forcing_observation_mode: TeacherForcingObservationMode,
     k: int,
     t_min: float,
     t_max: float,
@@ -244,6 +248,7 @@ def _chunkwise_teacher_forcing_video_loss(
         action_tokens=action_tokens,
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
+        teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         k=k,
     )
 
@@ -296,7 +301,12 @@ def _chunkwise_teacher_forcing_video_loss(
         noisy_suffix = clean_suffix.clone()
         noisy_suffix[:, :, :chunk_len, :, :] = noisy_chunk
 
-        observed_video = torch.cat([z_past_video, z_future_video[:, :, :start, :, :]], dim=2)
+        observed_video = _select_observed_video(
+            z_past_video=z_past_video,
+            z_future_video=z_future_video,
+            start=start,
+            teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+        )
         observed_mask = torch.zeros(
             observed_video.shape[0],
             1,
@@ -393,6 +403,7 @@ def _validate_chunkwise_video_inputs(
     action_tokens: torch.Tensor | None,
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
+    teacher_forcing_observation_mode: TeacherForcingObservationMode,
     k: int,
 ) -> None:
     """Validate structured latent-video chunkwise training inputs."""
@@ -431,6 +442,11 @@ def _validate_chunkwise_video_inputs(
             "action_conditioning_window must be 'chunk' or 'full', "
             f"got {action_conditioning_window!r}"
         )
+    if teacher_forcing_observation_mode not in {"full_prefix", "past_only"}:
+        raise ValueError(
+            "teacher_forcing_observation_mode must be 'full_prefix' or 'past_only', "
+            f"got {teacher_forcing_observation_mode!r}"
+        )
     if z_future_video.shape[2] <= 0:
         raise ValueError("z_future_video must have positive time dimension")
     if k < 1:
@@ -448,6 +464,19 @@ def _select_action_tokens(
     if action_conditioning_window == "full":
         return action_tokens
     return action_tokens[:, start:end]
+
+
+def _select_observed_video(
+    *,
+    z_past_video: torch.Tensor,
+    z_future_video: torch.Tensor,
+    start: int,
+    teacher_forcing_observation_mode: TeacherForcingObservationMode,
+) -> torch.Tensor:
+    """Select the observed latent prefix for one teacher-forced chunk."""
+    if teacher_forcing_observation_mode == "past_only":
+        return z_past_video
+    return torch.cat([z_past_video, z_future_video[:, :, :start, :, :]], dim=2)
 
 
 def _select_action_control_prior(

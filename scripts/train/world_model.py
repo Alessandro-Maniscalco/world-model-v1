@@ -189,6 +189,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.future_chunk_early_bias,
         help="Optional linear loss bonus for earlier autoregressive chunks; 0 disables chunk-position bias.",
     )
+    parser.add_argument(
+        "--teacher-forcing-observation-mode",
+        choices=("full_prefix", "past_only"),
+        default=defaults.teacher_forcing_observation_mode,
+        help="Whether later teacher-forced chunks observe the true future prefix or only the true past.",
+    )
     parser.add_argument("--t-min", type=float, default=defaults.t_min)
     parser.add_argument("--t-max", type=float, default=defaults.t_max)
     parser.add_argument("--disable-amp", action="store_true", default=defaults.disable_amp)
@@ -390,6 +396,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "future_chunk_early_bias must be >= 0, got "
             f"{cfg.future_chunk_early_bias}."
+        )
+    if cfg.teacher_forcing_observation_mode not in {"full_prefix", "past_only"}:
+        raise ValueError(
+            "teacher_forcing_observation_mode must be 'full_prefix' or 'past_only', got "
+            f"{cfg.teacher_forcing_observation_mode!r}."
         )
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(
@@ -616,6 +627,7 @@ def _evaluate_loss(
     a_plan: torch.Tensor,
     k: int,
     action_conditioning_window: str,
+    teacher_forcing_observation_mode: str,
     action_control_prior_scale: float,
     t_min: float,
     t_max: float,
@@ -651,6 +663,7 @@ def _evaluate_loss(
             action_tokens=action_tokens,
             action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
+            teacher_forcing_observation_mode=teacher_forcing_observation_mode,
             k=k,
             t_min=t_min,
             t_max=t_max,
@@ -700,6 +713,7 @@ def _evaluate_validation_loss(
             a_plan=prepared.a_plan,
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
+            teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -940,6 +954,7 @@ def main() -> None:
             a_plan=prepared.a_plan,
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
+            teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1003,6 +1018,7 @@ def main() -> None:
             a_plan=prepared.a_plan,
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
+            teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1148,6 +1164,7 @@ def main() -> None:
             a_plan=prepared.a_plan,
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
+            teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,

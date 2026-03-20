@@ -293,6 +293,7 @@ class _ChunkActionWindowRecorder:
         """Initialize captured action-window storage."""
         self.action_windows: list[torch.Tensor] = []
         self.action_control_priors: list[torch.Tensor | None] = []
+        self.observed_videos: list[torch.Tensor] = []
 
     def __call__(
         self,
@@ -307,8 +308,9 @@ class _ChunkActionWindowRecorder:
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Capture the active action window and emit zero velocities."""
-        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        del timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
         self.action_windows.append(action_tokens.detach().clone())
+        self.observed_videos.append(observed_video.detach().clone())
         self.action_control_priors.append(
             None if future_action_control_prior is None else future_action_control_prior.detach().clone()
         )
@@ -356,6 +358,48 @@ def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> 
     assert all(torch.equal(window, action_tokens) for window in model.action_windows)
 
 
+def test_chunkwise_teacher_forcing_can_hide_future_prefix_from_later_chunks() -> None:
+    """Hide the ground-truth future prefix from later chunks when requested."""
+    full_prefix_model = _ChunkActionWindowRecorder()
+    past_only_model = _ChunkActionWindowRecorder()
+    z_past_video = torch.tensor([[[[[10.0]], [[11.0]]]]])
+    z_future_video = torch.tensor([[[[[20.0]], [[21.0]], [[22.0]], [[23.0]], [[24.0]]]]])
+    action_tokens = torch.arange(5, dtype=torch.float32).view(1, 5, 1)
+
+    chunkwise_teacher_forcing_loss(
+        full_prefix_model,
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        action_tokens=action_tokens,
+        teacher_forcing_observation_mode="full_prefix",
+        k=2,
+        t_min=0.4,
+        t_max=0.4,
+    )
+    chunkwise_teacher_forcing_loss(
+        past_only_model,
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        action_tokens=action_tokens,
+        teacher_forcing_observation_mode="past_only",
+        k=2,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert len(full_prefix_model.observed_videos) == 3
+    assert torch.equal(full_prefix_model.observed_videos[0], z_past_video)
+    assert torch.equal(
+        full_prefix_model.observed_videos[1],
+        torch.cat((z_past_video, z_future_video[:, :, :2, :, :]), dim=2),
+    )
+    assert torch.equal(
+        full_prefix_model.observed_videos[2],
+        torch.cat((z_past_video, z_future_video[:, :, :4, :, :]), dim=2),
+    )
+    assert all(torch.equal(observed, z_past_video) for observed in past_only_model.observed_videos)
+
+
 def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes() -> None:
     """Align chunk-mode priors to the active chunk and full-mode priors to the future suffix."""
     chunk_model = _ChunkActionWindowRecorder()
@@ -400,6 +444,21 @@ def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes()
     assert torch.equal(chunk_model.action_control_priors[1], action_control_prior[:, :, 2:4])
     assert torch.equal(full_model.action_control_priors[0], action_control_prior[:, :, 0:4])
     assert torch.equal(full_model.action_control_priors[1], action_control_prior[:, :, 2:4])
+
+
+def test_chunkwise_teacher_forcing_rejects_unknown_observation_mode() -> None:
+    """Reject unsupported observation modes before teacher forcing begins."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="teacher_forcing_observation_mode"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 1, 1),
+            z_future_video=torch.randn(1, 2, 2, 1, 1),
+            action_tokens=torch.randn(1, 2, 1),
+            teacher_forcing_observation_mode="bad",
+            k=1,
+        )
 
 
 class _ZeroVelocityModel:

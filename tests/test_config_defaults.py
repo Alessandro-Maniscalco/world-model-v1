@@ -22,6 +22,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_order_conditioning is False
     assert cfg.action_control_prior_scale == 0.0
     assert cfg.future_chunk_early_bias == 0.0
+    assert cfg.teacher_forcing_observation_mode == "full_prefix"
     assert cfg.lora_rank == 8
     assert cfg.lora_alpha == 16
     assert cfg.validation_enabled is True

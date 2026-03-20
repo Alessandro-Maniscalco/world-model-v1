@@ -279,6 +279,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-conditioning-window" in option_strings
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" in option_strings
+    assert "--teacher-forcing-observation-mode" in option_strings
     assert "--action-temporal-difference-scale" in option_strings
     assert "--action-temporal-mixer-kernel-size" in option_strings
     assert "--action-temporal-mixer-scale" in option_strings
@@ -629,6 +630,16 @@ def test_train_script_rejects_negative_future_chunk_early_bias() -> None:
 
     with pytest.raises(ValueError, match="future_chunk_early_bias must be >= 0"):
         train_script._validate_auto_stop_config(TrainScriptConfig(future_chunk_early_bias=-0.1))
+
+
+def test_train_script_rejects_unknown_teacher_forcing_observation_mode() -> None:
+    """Fail fast when the observation mode would silently change training semantics."""
+    train_script = _load_train_script_module()
+
+    with pytest.raises(ValueError, match="teacher_forcing_observation_mode must be"):
+        train_script._validate_auto_stop_config(
+            TrainScriptConfig(teacher_forcing_observation_mode="bad")
+        )
 
 
 def test_train_script_updates_validation_tracking_with_patience() -> None:
