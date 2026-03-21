@@ -400,3 +400,9 @@ current decision state and use this ledger only when a turn needs older context.
   - `image_quality_verdict`: not applicable because there are no videos to review
   - `continue_training`: one final low-risk fit retry in the same neighborhood is justified with the base-config LoRA budget; do not change architecture yet
   - Why: reducing `lora_rank` from `32` to `16` did not clear the blocker. The run still failed inside the Wan/VACE added-K/V path with `torch.OutOfMemoryError` before the first checkpoint, now while trying to allocate about `16 MiB`, and the controller result again confirms that `metrics.jsonl`, `final_for_eval.pt`, and all eval/inspection artifacts are absent. Since the geometry and hypothesis are still untested, the smallest remaining same-hypothesis recovery is to rerun the branch at `lora_rank=8`, which matches the base config's LoRA budget and is the last cheap memory cut before a more structural memory or architecture pivot.
+
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora8_action_noinputln_mlp128resid_addedkv_fresh400`
+  - `arm_motion_verdict`: no model result; training failed before any checkpoint or sweep artifacts were produced
+  - `image_quality_verdict`: not applicable because there are no videos to review
+  - `continue_training`: no more plain LoRA-rank cuts in this neighborhood; switch to activation-memory reduction while keeping the same added-K/V hypothesis
+  - Why: the `lora_rank=8` retry still failed before the first checkpoint or any evaluation artifacts, this time with `torch.OutOfMemoryError` while trying to allocate about `42 MiB`. Since `32`, `16`, and `8` all failed inside the same Wan/VACE added-K/V path, plain rank reduction is exhausted as a fit strategy. The smallest distinct recovery that still tests the same architecture is to keep `lora_rank=8` and enable `gradient_checkpointing`, which the repo already supports for the Wan backbone.
