@@ -1,5 +1,5 @@
 ## Goal
-The process is to start from the simplest meaningful setup, validate visible task-relevant motion, then increase complexity one axis at a time.
+The process is to find the easiest setup that can produce a good-looking plausible video with visible task-relevant motion, then increase difficulty one axis at a time from that anchor.
 
 ## Proven Complexity ladder
 List only proven rungs. For each rung, include a short description of the
@@ -7,35 +7,39 @@ complexity and the best video link.
 
 ## Next complexity to test
 Only one, including the rung name and why it is next. It is flexible.
-- Rung: action-conditioned two-latent scout.
-- `conditioning_mode=action`, `context_len=17`, `horizon_len=8`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200`, `no_action_input_layernorm=true`, `action_mlp_dim=128`, `action_mlp_residual=true`
-- Why next: the observation-only `ctx17/h4` scout stayed parked through frames `14-16` on the main clip plus held-out episodes `1` and `2`, then made only a single late jump on frame `17`. Because `horizon_len=4` compresses to just one future latent step under Wan packing, another `h4` follow-up is a weak test for multi-step timing. The next meaningful ladder rung is therefore the smallest action-conditioned setup with more than one future latent step: keep the cheap `ctx17` geometry, promote only the future horizon to `h8`, and add the established action path to test whether action cues can pull motion earlier across two latent steps without giving up plausibility.
+- Rung: max-context single-generated-frame action scout.
+- `conditioning_mode=action`, `context_len=21`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200`, `no_action_input_layernorm=true`, `action_mlp_dim=128`, `action_mlp_residual=true`
+- Why next: the `ctx17/h8` action scout finally generated more than one future frame, but all five generated frames `17-21` on the main clip and held-out episodes `1` and `2` were visibly blurred and ghosted, with episode `2` failing plausibility on every generated frame. Since the operator wants the easiest path to a good video first, the next rung should favor visual stability over longer rollout: keep the action path, collapse back to the cheapest one-latent future block, and increase context only so the model has the strongest visual anchor while synthesizing just one final frame.
 
 ## Best rung for current complexity
 Only one for the current complexity being researched, including the mp4 link
 and a short description of the run.
-- None yet for the action-conditioned two-latent scout rung.
+- None yet for the max-context single-generated-frame action scout rung.
 
 ## Rung Findings for current complexity
 Clear when complexity increases. Use one point per rung.
-- Observation-only short-window absolute-target scout rejected as a working rung: `conditioning_mode=none`, `ctx17/h4`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `step_0000200` stayed essentially static through frames `14-16` on the main clip and held-out episodes `1` and `2`, then jumped only on frame `17`; the generated fork shape stayed plausible, but it still missed the reference timing and contact path, especially on held-outs where the final-frame move is abrupt and slightly blurry (`late_motion_ratio≈1.72/2.20/2.53`, all `misaligned`).
+- Action-conditioned short-window two-latent scout rejected as an easy-video rung: `conditioning_mode=action`, `ctx17/h8`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200` generated frames `17-21` instead of only the last frame, but all five generated frames on the main clip were brown/green ghosted smears around the fork and plate; held-out episode `1` showed the same persistent blur across frames `17-21`, and held-out episode `2` was worst, with every generated frame failing plausibility and the plate/fork region washing out into a bright blob (`late_motion_ratio≈2.17/1.38/5.04`, all `misaligned`).
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
   treat plausibility as a safety gate, and rank runs visual first
-- Stay on the complexity ladder: find the simplest rung that works, then
-  promote upward one axis at a time.
+- Stay on the complexity ladder: find the easiest rung that produces a good
+  video, then promote upward one axis at a time.
 - In this repo, the closest local Wan/VACE-style inference contract uses
   `single_chunk_rollout=true` with at least `50` integration steps.
 - For simple runs with few latent steps, cap the scout at `200` training steps
   before deciding whether that rung earns promotion.
-- Under Wan temporal packing, `horizon_len=4` gives only one future latent
-  step, so `h4` is useful as a cheapest final-block scout but not as a strong
-  test of multi-step temporal commitment.
-- Observation-only is now exhausted as the simplest ladder family: the hard
+- Lower context is simpler, but not easier for image quality; more context has
+  helped stability, so the easy-video ladder should prefer short horizons
+  before aggressively cutting context.
+- Under Wan temporal packing, `horizon_len=4` gives one future latent step and
+  `horizon_len=8` gives two; on the validated `ctx17/h4` scouts only frame
+  `17` changed, while on the validated `ctx17/h8` action scout frames
+  `17-21` were all generated.
+- Observation-only is exhausted for easy-video scouting on this task: the hard
   `ctx21/h8` control stayed late-heavy, the residual `ctx17/h4` scout imploded
-  on frame `17`, and the absolute-target `ctx17/h4` scout stayed plausible but
-  still waited until frame `17` to move on the main clip and both held-outs.
+  on frame `17`, and the absolute-target `ctx17/h4` scout was readable but
+  still only synthesized the final frame and missed contact timing.
 - The late-motion failure is not obviously action-specific on the harder
   benchmark geometry: observation-only `conditioning_mode=none` also stayed
   late-heavy on `ctx21/h8`, so the backbone/objective must be treated as a
