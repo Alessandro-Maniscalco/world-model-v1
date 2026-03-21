@@ -115,6 +115,61 @@ def test_wan_vace_world_model_allows_missing_block_causal_attention_mask() -> No
     assert torch.equal(output, torch.zeros(1, 2, 1, 1, 1))
 
 
+def test_wan_vace_world_model_adds_action_control_prior_to_future_gray_template() -> None:
+    """Add the action-derived prior to future gray VACE filler latents before control assembly."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        action_control_prior_scale=0.5,
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.ones(1, 2, 1, 1, 1),
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+        future_action_control_prior=torch.full((1, 2, 1, 1, 1), 2.0),
+    )
+
+    assert backbone.last_control_hidden_states is not None
+    expected_future_control = torch.full((1, 2, 1, 1, 1), 1.5)
+    assert torch.equal(backbone.last_control_hidden_states[:, 2:4, 1:, :, :], expected_future_control)
+
+
+def test_wan_vace_world_model_can_add_action_control_prior_to_both_future_branches() -> None:
+    """Allow action-derived latent priors to modulate both future VACE control branches."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        action_control_prior_scale=0.5,
+        action_control_prior_mode="dual_fill",
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.ones(1, 2, 1, 1, 1),
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+        future_action_control_prior=torch.full((1, 2, 1, 1, 1), 2.0),
+    )
+
+    assert backbone.last_control_hidden_states is not None
+    expected_future_reactive = torch.full((1, 2, 1, 1, 1), 1.5)
+    expected_future_inactive = torch.full((1, 2, 1, 1, 1), 0.0)
+    assert torch.equal(backbone.last_control_hidden_states[:, 2:4, 1:, :, :], expected_future_reactive)
+    assert torch.equal(backbone.last_control_hidden_states[:, :2, 1:, :, :], expected_future_inactive)
+
+
 def test_expand_block_causal_mask_to_patch_tokens_repeats_2d_masks() -> None:
     """Repeat each latent-frame mask entry across the patch-token grid."""
     mask = torch.tensor([[0.0, float("-inf")], [0.0, 0.0]], dtype=torch.float32)

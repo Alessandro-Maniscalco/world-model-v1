@@ -313,6 +313,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-conditioning-window" in option_strings
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" in option_strings
+    assert "--action-control-prior-mode" in option_strings
     assert "--teacher-forcing-observation-mode" in option_strings
     assert "--teacher-forcing-future-input-mode" in option_strings
     assert "--action-temporal-difference-scale" in option_strings

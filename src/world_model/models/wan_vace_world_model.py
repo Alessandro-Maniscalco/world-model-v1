@@ -41,14 +41,23 @@ class WanVACEWorldModel(nn.Module):
         *,
         backbone: nn.Module | None = None,
         control_scale: float = 1.0,
+        action_control_prior_scale: float = 0.0,
+        action_control_prior_mode: str = "reactive_only",
         mask_channels: int = 64,
         control_black_latents: torch.Tensor | None = None,
         control_gray_latents: torch.Tensor | None = None,
     ) -> None:
         """Store the backbone and control-stream defaults."""
         super().__init__()
+        if action_control_prior_mode not in {"reactive_only", "dual_fill"}:
+            raise ValueError(
+                "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
+                f"{action_control_prior_mode!r}"
+            )
         self.backbone = backbone if backbone is not None else WanVACETransformer3DModel()
         self.control_scale = float(control_scale)
+        self.action_control_prior_scale = float(action_control_prior_scale)
+        self.action_control_prior_mode = str(action_control_prior_mode)
         self.mask_channels = int(mask_channels)
         self.register_buffer("control_black_latents", control_black_latents, persistent=False)
         self.register_buffer("control_gray_latents", control_gray_latents, persistent=False)
@@ -62,6 +71,7 @@ class WanVACEWorldModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the Wan VACE backbone on chunkwise world-model inputs."""
@@ -107,7 +117,24 @@ class WanVACEWorldModel(nn.Module):
             observed_video=observed_video,
             noisy_future_video=noisy_future_video,
         )
+        inactive_fill_latents = black_control_latents
         future_control_video = gray_control_latents[:, :, observed_video.shape[2] :, :, :]
+        if future_action_control_prior is not None:
+            if future_action_control_prior.shape != future_control_video.shape:
+                raise ValueError(
+                    "future_action_control_prior must match noisy future-control shape "
+                    f"{tuple(future_control_video.shape)}, got {tuple(future_action_control_prior.shape)}"
+                )
+            action_control_delta = self.action_control_prior_scale * future_action_control_prior.to(
+                device=future_control_video.device,
+                dtype=future_control_video.dtype,
+            )
+            future_control_video = future_control_video + action_control_delta
+            if self.action_control_prior_mode == "dual_fill":
+                inactive_fill_latents = inactive_fill_latents.clone()
+                inactive_fill_latents[:, :, observed_video.shape[2] :, :, :] = (
+                    inactive_fill_latents[:, :, observed_video.shape[2] :, :, :] + action_control_delta
+                )
         future_control_mask = torch.ones(
             noisy_future_video.shape[0],
             1,
@@ -123,7 +150,7 @@ class WanVACEWorldModel(nn.Module):
         control_hidden_states = build_vace_control_tensor(
             observed_latents=control_video,
             observed_mask=control_mask,
-            inactive_fill_latents=black_control_latents,
+            inactive_fill_latents=inactive_fill_latents,
             reactive_fill_latents=black_control_latents,
             mask_channels=self.mask_channels,
         )

@@ -280,7 +280,37 @@ def test_build_runtime_modules_respects_action_order_and_control_prior_flags() -
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, ActionTokenEncoder)
     assert action_encoder.order_conditioning is True
+    assert model.action_control_prior_mode == "reactive_only"
     assert isinstance(action_control_projector, ActionControlProjector)
+
+
+def test_build_runtime_modules_respects_action_control_prior_mode() -> None:
+    """Propagate latent control-prior mode into the runtime world-model wrapper."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_control_prior_scale=1.0,
+        action_control_prior_mode="dual_fill",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert model.action_control_prior_mode == "dual_fill"
 
 
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:

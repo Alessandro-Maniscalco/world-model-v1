@@ -291,6 +291,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Scale for the action-derived latent control prior added to future VACE filler latents.",
     )
     parser.add_argument(
+        "--action-control-prior-mode",
+        choices=("reactive_only", "dual_fill"),
+        default=defaults.action_control_prior_mode,
+        help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
+    )
+    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -439,6 +445,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_control_prior_scale must be >= 0, got "
             f"{cfg.action_control_prior_scale}."
+        )
+    if cfg.action_control_prior_mode not in {"reactive_only", "dual_fill"}:
+        raise ValueError(
+            "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
+            f"{cfg.action_control_prior_mode!r}."
         )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
