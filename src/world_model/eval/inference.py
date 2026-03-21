@@ -20,6 +20,7 @@ class VideoVelocityModel(Protocol):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
@@ -36,6 +37,7 @@ def infer_future_videos_chunkwise(
     z_past_video: torch.Tensor,
     future_steps: int,
     cross_attention_tokens: torch.Tensor,
+    image_attention_tokens: torch.Tensor | None = None,
     future_action_control_prior: torch.Tensor | None = None,
     k: int,
     chunk_schedule_mode: str = "k_plus_one",
@@ -53,6 +55,7 @@ def infer_future_videos_chunkwise(
         z_past_video=z_past_video,
         future_steps=future_steps,
         cross_attention_tokens=cross_attention_tokens,
+        image_attention_tokens=image_attention_tokens,
         future_action_control_prior=future_action_control_prior,
         negative_cross_attention_tokens=negative_cross_attention_tokens,
         integration_steps=integration_steps,
@@ -129,6 +132,12 @@ def infer_future_videos_chunkwise(
             end=end,
             chunk_conditioning=chunk_conditioning,
         )
+        positive_image_tokens = _select_chunk_conditioning_tokens(
+            image_attention_tokens,
+            start=start,
+            end=end,
+            chunk_conditioning=chunk_conditioning,
+        )
         negative_tokens = _select_chunk_conditioning_tokens(
             negative_cross_attention_tokens,
             start=start,
@@ -149,6 +158,7 @@ def infer_future_videos_chunkwise(
                 noisy_future_video=chunk_state,
                 observed_video=observed_video,
                 action_tokens=positive_tokens,
+                action_image_tokens=positive_image_tokens,
                 timestep_t=timestep_t,
                 block_causal_attention_mask=mask,
                 observed_mask=observed_mask,
@@ -160,6 +170,7 @@ def infer_future_videos_chunkwise(
                     noisy_future_video=chunk_state,
                     observed_video=observed_video,
                     action_tokens=negative_tokens,
+                    action_image_tokens=None,
                     timestep_t=timestep_t,
                     block_causal_attention_mask=mask,
                     observed_mask=observed_mask,
@@ -179,6 +190,7 @@ def _validate_video_infer_inputs(
     z_past_video: torch.Tensor,
     future_steps: int,
     cross_attention_tokens: torch.Tensor,
+    image_attention_tokens: torch.Tensor | None,
     future_action_control_prior: torch.Tensor | None,
     negative_cross_attention_tokens: torch.Tensor | None,
     integration_steps: int,
@@ -217,6 +229,15 @@ def _validate_video_infer_inputs(
     if negative_cross_attention_tokens is not None:
         if negative_cross_attention_tokens.shape != cross_attention_tokens.shape:
             raise ValueError("negative_cross_attention_tokens must match cross_attention_tokens shape")
+    if image_attention_tokens is not None:
+        if image_attention_tokens.ndim != 3:
+            raise ValueError(
+                f"image_attention_tokens must be [B,S,D], got {tuple(image_attention_tokens.shape)}"
+            )
+        if image_attention_tokens.shape[0] != z_past_video.shape[0]:
+            raise ValueError("image_attention_tokens batch size must match z_past_video")
+        if chunk_conditioning and image_attention_tokens.shape[1] != future_steps:
+            raise ValueError("chunk-conditioned image_attention_tokens length must match requested future_steps")
     if future_action_control_prior is not None:
         if future_action_control_prior.ndim != 5:
             raise ValueError(

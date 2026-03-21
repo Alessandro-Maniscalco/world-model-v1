@@ -23,13 +23,17 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
     """Build a Wan VACE world-model adapter from typed config and prepared batch data."""
     latent_channels = int(prepared_batch.latent_shape[0])
     expected_control_channels = _expected_control_channels(latent_channels=latent_channels, mask_channels=cfg.mask_channels)
+    use_action_added_kv = _uses_action_added_kv(cfg)
     if cfg.load_pretrained_backbone:
         backbone = WanVACETransformer3DModel.from_pretrained(
             cfg.wan_vace_model_id,
             subfolder=cfg.wan_vace_subfolder or None,
             local_files_only=_offline_mode_enabled(),
         )
+        if use_action_added_kv:
+            backbone = _enable_action_added_kv_path(backbone=backbone)
     else:
+        inner_dim = int(cfg.wan_num_attention_heads) * int(cfg.wan_attention_head_dim)
         backbone = WanVACETransformer3DModel(
             in_channels=latent_channels,
             out_channels=latent_channels,
@@ -39,6 +43,8 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
             freq_dim=cfg.wan_freq_dim,
             ffn_dim=cfg.wan_ffn_dim,
             num_layers=cfg.wan_num_layers,
+            image_dim=(int(cfg.wan_text_dim) if use_action_added_kv else None),
+            added_kv_proj_dim=(inner_dim if use_action_added_kv else None),
             vace_layers=list(cfg.vace_layers),
             vace_in_channels=expected_control_channels,
         )
@@ -59,6 +65,8 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
             backbone.gradient_checkpointing = True
     if getattr(cfg, "trainable_backbone", "full") == "lora":
         _attach_lora_adapters(backbone=backbone, cfg=cfg)
+        if use_action_added_kv:
+            _enable_action_added_kv_training(backbone=backbone)
 
     return WanVACEWorldModel(
         backbone=backbone,
@@ -237,6 +245,7 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_mlp_residual",
         "action_conditioning_window",
         "action_order_conditioning",
+        "action_backbone_added_kv_mode",
         "action_control_prior_scale",
         "action_control_prior_mode",
         "action_control_projector_init_mode",
@@ -278,6 +287,65 @@ def _resolve_action_mlp_dim(cfg: Any) -> int | None:
     """Resolve non-positive config values to the encoder's default linear projection path."""
     value = int(getattr(cfg, "action_mlp_dim", 0) or 0)
     return None if value <= 0 else value
+
+
+def _uses_action_added_kv(cfg: Any) -> bool:
+    """Decide whether to mirror action tokens into Wan's added-K/V image-conditioning path."""
+    return (
+        getattr(cfg, "conditioning_mode", "none") == "action"
+        and str(getattr(cfg, "action_backbone_added_kv_mode", "none")) == "reuse_action_tokens"
+    )
+
+
+def _enable_action_added_kv_path(backbone: WanVACETransformer3DModel) -> WanVACETransformer3DModel:
+    """Rebuild a pretrained Wan VACE backbone with action-driven added-K/V image conditioning enabled."""
+    config = backbone.config
+    inner_dim = int(config.num_attention_heads) * int(config.attention_head_dim)
+    upgraded = WanVACETransformer3DModel(
+        patch_size=tuple(config.patch_size),
+        num_attention_heads=int(config.num_attention_heads),
+        attention_head_dim=int(config.attention_head_dim),
+        in_channels=int(config.in_channels),
+        out_channels=int(config.out_channels),
+        text_dim=int(config.text_dim),
+        freq_dim=int(config.freq_dim),
+        ffn_dim=int(config.ffn_dim),
+        num_layers=int(config.num_layers),
+        cross_attn_norm=bool(config.cross_attn_norm),
+        qk_norm=getattr(config, "qk_norm", "rms_norm_across_heads"),
+        eps=float(config.eps),
+        image_dim=int(config.text_dim),
+        added_kv_proj_dim=inner_dim,
+        rope_max_seq_len=int(getattr(config, "rope_max_seq_len", 1024)),
+        pos_embed_seq_len=getattr(config, "pos_embed_seq_len", None),
+        vace_layers=list(config.vace_layers),
+        vace_in_channels=int(config.vace_in_channels),
+    )
+    incompatible = upgraded.load_state_dict(backbone.state_dict(), strict=False)
+    if incompatible.unexpected_keys:
+        raise ValueError(
+            "Unexpected pretrained keys when enabling action added-K/V path: "
+            f"{sorted(incompatible.unexpected_keys)}"
+        )
+    for key in incompatible.missing_keys:
+        if key.startswith("condition_embedder.image_embedder."):
+            continue
+        if ".add_k_proj." in key or ".add_v_proj." in key:
+            continue
+        if ".norm_added_k." in key:
+            continue
+        raise ValueError(
+            "Unexpected missing pretrained key when enabling action added-K/V path: "
+            f"{key!r}"
+        )
+    return upgraded
+
+
+def _enable_action_added_kv_training(*, backbone: WanVACETransformer3DModel) -> None:
+    """Keep newly introduced added-K/V image-conditioning weights trainable under LoRA."""
+    for name, parameter in backbone.named_parameters():
+        if "condition_embedder.image_embedder" in name or ".add_k_proj." in name or ".add_v_proj." in name:
+            parameter.requires_grad = True
 
 
 def _load_action_encoder_state_dict(

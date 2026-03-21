@@ -284,6 +284,35 @@ def test_build_runtime_modules_respects_action_order_and_control_prior_flags() -
     assert isinstance(action_control_projector, ActionControlProjector)
 
 
+def test_build_runtime_modules_enables_action_added_kv_path() -> None:
+    """Build the Wan added-K/V image-conditioning path when action mirroring is requested."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_backbone_added_kv_mode="reuse_action_tokens",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert model.backbone.config.image_dim == 16
+    assert model.backbone.config.added_kv_proj_dim == 16
+
+
 def test_build_runtime_modules_respects_action_control_prior_mode() -> None:
     """Propagate latent control-prior mode into the runtime world-model wrapper."""
     prepared = _make_prepared_batch()

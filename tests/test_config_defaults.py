@@ -21,6 +21,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_conditioning_window == "chunk"
     assert cfg.chunk_schedule_mode == "k_plus_one"
     assert cfg.action_order_conditioning is False
+    assert cfg.action_backbone_added_kv_mode == "none"
     assert cfg.action_control_prior_scale == 0.0
     assert cfg.action_control_prior_mode == "reactive_only"
     assert cfg.action_control_projector_init_mode == "zero"
@@ -65,6 +66,7 @@ def test_infer_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_conditioning_window == "chunk"
     assert cfg.chunk_schedule_mode == "k_plus_one"
     assert cfg.action_order_conditioning is False
+    assert cfg.action_backbone_added_kv_mode == "none"
     assert cfg.action_control_prior_scale == 0.0
     assert cfg.action_control_prior_mode == "reactive_only"
     assert cfg.action_control_projector_init_mode == "zero"

@@ -54,6 +54,7 @@ def train_chunkwise_batch(
     teacher_forcing_observation_mode: str = "full_prefix",
     teacher_forcing_future_input_mode: str = "full_suffix",
     chunk_schedule_mode: str = "k_plus_one",
+    action_backbone_added_kv_mode: str = "none",
     action_control_prior_scale: float = 0.0,
     action_control_projector_observed_context_mode: str = "none",
     action_hidden_state_bias_scale: float = 0.0,
@@ -86,6 +87,11 @@ def train_chunkwise_batch(
     autocast_context = _build_training_autocast_context(z_past_video=z_past_video, amp_dtype=amp_dtype)
     with autocast_context:
         action_tokens = action_encoder(a_plan)
+        action_image_tokens = (
+            action_tokens
+            if str(action_backbone_added_kv_mode) == "reuse_action_tokens"
+            else None
+        )
         action_control_prior = None
         if (
             action_control_projector is not None
@@ -108,6 +114,7 @@ def train_chunkwise_batch(
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
+            action_image_tokens=action_image_tokens,
             action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,

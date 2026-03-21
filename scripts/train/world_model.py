@@ -286,6 +286,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Disable learned action-order features and keep order-unaware token projections.",
     )
     parser.add_argument(
+        "--action-backbone-added-kv-mode",
+        choices=("none", "reuse_action_tokens"),
+        default=defaults.action_backbone_added_kv_mode,
+        help="Optionally mirror action tokens into Wan's added-K/V image-conditioning path.",
+    )
+    parser.add_argument(
         "--action-control-prior-scale",
         type=float,
         default=defaults.action_control_prior_scale,
@@ -480,6 +486,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
             f"{cfg.action_control_projector_observed_context_mode!r}."
+        )
+    if cfg.action_backbone_added_kv_mode not in {"none", "reuse_action_tokens"}:
+        raise ValueError(
+            "action_backbone_added_kv_mode must be 'none' or 'reuse_action_tokens', got "
+            f"{cfg.action_backbone_added_kv_mode!r}."
         )
     if cfg.action_hidden_state_bias_scale < 0.0:
         raise ValueError(
@@ -716,6 +727,7 @@ def _evaluate_loss(
     teacher_forcing_observation_mode: str,
     teacher_forcing_future_input_mode: str,
     chunk_schedule_mode: str,
+    action_backbone_added_kv_mode: str,
     action_control_prior_scale: float,
     action_control_projector_observed_context_mode: str,
     action_hidden_state_bias_scale: float,
@@ -740,6 +752,11 @@ def _evaluate_loss(
 
     with _training_autocast_context(device=device, disable_amp=disable_amp, dtype=runtime_dtype):
         action_tokens = action_encoder(a_plan)
+        action_image_tokens = (
+            action_tokens
+            if action_backbone_added_kv_mode == "reuse_action_tokens"
+            else None
+        )
         action_control_prior = None
         if (
             action_control_projector is not None
@@ -762,6 +779,7 @@ def _evaluate_loss(
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
+            action_image_tokens=action_image_tokens,
             action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
@@ -826,6 +844,7 @@ def _evaluate_validation_loss(
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
+            action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
@@ -1072,7 +1091,9 @@ def main() -> None:
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
+            action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
@@ -1140,6 +1161,7 @@ def main() -> None:
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
+            action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
@@ -1291,6 +1313,7 @@ def main() -> None:
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
+            action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,

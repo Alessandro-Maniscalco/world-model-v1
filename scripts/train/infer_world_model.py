@@ -181,6 +181,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Disable learned action-order features and keep order-unaware token projections.",
     )
     parser.add_argument(
+        "--action-backbone-added-kv-mode",
+        choices=("none", "reuse_action_tokens"),
+        default=defaults.action_backbone_added_kv_mode,
+        help="Optionally mirror action tokens into Wan's added-K/V image-conditioning path.",
+    )
+    parser.add_argument(
         "--action-control-prior-scale",
         type=float,
         default=defaults.action_control_prior_scale,
@@ -326,6 +332,11 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
             "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
             f"{cfg.action_control_projector_observed_context_mode!r}"
         )
+    if cfg.action_backbone_added_kv_mode not in {"none", "reuse_action_tokens"}:
+        raise ValueError(
+            "action_backbone_added_kv_mode must be 'none' or 'reuse_action_tokens', got "
+            f"{cfg.action_backbone_added_kv_mode!r}"
+        )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}")
     if cfg.conditioning_mode == "action" and not cfg.checkpoint:
@@ -375,6 +386,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_mlp_residual",
         "action_conditioning_window",
         "action_order_conditioning",
+        "action_backbone_added_kv_mode",
         "action_control_prior_scale",
         "action_control_prior_mode",
         "action_hidden_state_bias_scale",
@@ -1070,9 +1082,15 @@ def main() -> None:
         if device.type == "cuda":
             torch.cuda.empty_cache()
         future_action_control_prior = None
+        image_attention_tokens = None
     elif cfg.conditioning_mode == "action":
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
+            image_attention_tokens = (
+                cross_attention_tokens
+                if cfg.action_backbone_added_kv_mode == "reuse_action_tokens"
+                else None
+            )
             future_action_control_prior = None
             if cfg.action_control_prior_scale > 0.0 or cfg.action_hidden_state_bias_scale > 0.0:
                 future_action_control_prior = action_control_projector(
@@ -1089,6 +1107,7 @@ def main() -> None:
     else:
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
+        image_attention_tokens = None
         negative_cross_attention_tokens = None
         future_action_control_prior = None
 
@@ -1098,6 +1117,7 @@ def main() -> None:
             z_past_video=prepared.z_past_video,
             future_steps=prepared.z_future_video.shape[2],
             cross_attention_tokens=cross_attention_tokens,
+            image_attention_tokens=image_attention_tokens,
             future_action_control_prior=future_action_control_prior,
             k=cfg.k,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
@@ -1110,6 +1130,7 @@ def main() -> None:
         )
 
     del cross_attention_tokens
+    del image_attention_tokens
     del negative_cross_attention_tokens
     del future_action_control_prior
     _release_sampling_modules(model, action_encoder, action_control_projector, device=device)

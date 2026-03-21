@@ -577,6 +577,25 @@ def test_infer_script_restores_action_control_projector_observed_context_mode_fr
     assert restored.action_control_projector_observed_context_mode == "last_frame"
 
 
+def test_infer_script_restores_action_backbone_added_kv_mode_from_checkpoint_defaults() -> None:
+    """Reuse saved action added-K/V mode when infer config still uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_backbone_added_kv_mode": "reuse_action_tokens",
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_backbone_added_kv_mode == "reuse_action_tokens"
+
+
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:
     """Treat `num_vis_frames=0` as a request to render every available frame."""
     infer_script = _load_infer_script_module()

@@ -29,6 +29,7 @@ class ChunkwiseVideoVelocityModel(Protocol):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
@@ -177,6 +178,7 @@ def chunkwise_teacher_forcing_loss(
     z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
     action_tokens: torch.Tensor,
+    action_image_tokens: torch.Tensor | None = None,
     action_control_prior: torch.Tensor | None = None,
     action_conditioning_window: Literal["chunk", "full"] = "chunk",
     teacher_forcing_observation_mode: TeacherForcingObservationMode = "full_prefix",
@@ -202,6 +204,7 @@ def chunkwise_teacher_forcing_loss(
         z_past_video=z_past_video,
         z_future_video=z_future_video,
         action_tokens=action_tokens,
+        action_image_tokens=action_image_tokens,
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
@@ -229,6 +232,7 @@ def _chunkwise_teacher_forcing_video_loss(
     z_past_video: torch.Tensor | None,
     z_future_video: torch.Tensor | None,
     action_tokens: torch.Tensor | None,
+    action_image_tokens: torch.Tensor | None,
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
@@ -253,6 +257,7 @@ def _chunkwise_teacher_forcing_video_loss(
         z_past_video=z_past_video,
         z_future_video=z_future_video,
         action_tokens=action_tokens,
+        action_image_tokens=action_image_tokens,
         action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
@@ -361,6 +366,14 @@ def _chunkwise_teacher_forcing_video_loss(
                 end=end,
                 action_conditioning_window=action_conditioning_window,
             ),
+            action_image_tokens=_select_action_tokens(
+                action_tokens=action_image_tokens,
+                start=start,
+                end=end,
+                action_conditioning_window=action_conditioning_window,
+            )
+            if action_image_tokens is not None
+            else None,
             timestep_t=normalized_t_to_scheduler_timestep(t),
             block_causal_attention_mask=attn_mask,
             observed_mask=observed_mask,
@@ -430,6 +443,7 @@ def _validate_chunkwise_video_inputs(
     z_past_video: torch.Tensor | None,
     z_future_video: torch.Tensor | None,
     action_tokens: torch.Tensor | None,
+    action_image_tokens: torch.Tensor | None,
     action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
@@ -446,6 +460,8 @@ def _validate_chunkwise_video_inputs(
         raise ValueError(f"z_future_video must be [B,C,T,H,W], got {tuple(z_future_video.shape)}")
     if action_tokens.ndim != 3:
         raise ValueError(f"action_tokens must be [B,T,D], got {tuple(action_tokens.shape)}")
+    if action_image_tokens is not None and action_image_tokens.ndim != 3:
+        raise ValueError(f"action_image_tokens must be [B,T,D], got {tuple(action_image_tokens.shape)}")
     if z_past_video.shape[0] != z_future_video.shape[0]:
         raise ValueError("z_past_video and z_future_video must share batch size")
     if z_past_video.shape[1] != z_future_video.shape[1]:
@@ -456,6 +472,11 @@ def _validate_chunkwise_video_inputs(
         raise ValueError("action_tokens batch size must match latent-video batch size")
     if action_tokens.shape[1] != z_future_video.shape[2]:
         raise ValueError("action_tokens time length must match z_future_video latent horizon")
+    if action_image_tokens is not None:
+        if action_image_tokens.shape[0] != z_future_video.shape[0]:
+            raise ValueError("action_image_tokens batch size must match latent-video batch size")
+        if action_image_tokens.shape[1] != z_future_video.shape[2]:
+            raise ValueError("action_image_tokens time length must match z_future_video latent horizon")
     if action_control_prior is not None:
         if action_control_prior.ndim != 5:
             raise ValueError(

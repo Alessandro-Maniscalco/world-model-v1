@@ -27,6 +27,7 @@ class _RecordingBackbone(torch.nn.Module):
         self.last_control_hidden_states: torch.Tensor | None = None
         self.last_control_hidden_states_scale: torch.Tensor | None = None
         self.last_attention_mask: torch.Tensor | None = None
+        self.last_encoder_hidden_states_image: torch.Tensor | None = None
 
     def forward(
         self,
@@ -34,6 +35,7 @@ class _RecordingBackbone(torch.nn.Module):
         hidden_states: torch.Tensor,
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_image: torch.Tensor | None,
         control_hidden_states: torch.Tensor,
         control_hidden_states_scale: torch.Tensor | None,
         attention_mask: torch.Tensor,
@@ -41,6 +43,9 @@ class _RecordingBackbone(torch.nn.Module):
     ) -> SimpleNamespace:
         """Capture the constructed control tensor and echo the hidden states."""
         del timestep, encoder_hidden_states, return_dict
+        self.last_encoder_hidden_states_image = (
+            None if encoder_hidden_states_image is None else encoder_hidden_states_image.detach().clone()
+        )
         self.last_control_hidden_states = control_hidden_states.detach().clone()
         self.last_attention_mask = None if attention_mask is None else attention_mask.detach().clone()
         self.last_control_hidden_states_scale = None
@@ -192,6 +197,31 @@ def test_wan_vace_world_model_can_add_action_signal_to_future_hidden_states() ->
     )
 
     assert torch.equal(output, torch.ones(1, 2, 1, 1, 1))
+
+
+def test_wan_vace_world_model_forwards_action_image_tokens_to_backbone() -> None:
+    """Pass optional action-image tokens into Wan's added-K/V image-conditioning slot."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+    action_image_tokens = torch.randn(1, 1, 4)
+
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.ones(1, 2, 1, 1, 1),
+        action_tokens=torch.randn(1, 1, 4),
+        action_image_tokens=action_image_tokens,
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+    )
+
+    assert backbone.last_encoder_hidden_states_image is not None
+    assert torch.equal(backbone.last_encoder_hidden_states_image, action_image_tokens)
 
 
 def test_expand_block_causal_mask_to_patch_tokens_repeats_2d_masks() -> None:
