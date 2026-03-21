@@ -36,12 +36,13 @@ Important but less-stable takeaways that may change as new experiments land.
 - The first fresh `ctx21/h8` added-K/V backbone run with `lora_rank=32` did not produce a model result at all: training OOMed inside the Wan backbone LoRA path before the first checkpoint or evaluation artifacts were written (`torch.OutOfMemoryError`, missing about `20 MiB`). That means the architecture question is still open; only the initial memory budget was too large.
 - The follow-up fresh added-K/V retry with `lora_rank=16` also failed before checkpointing or evaluation, this time missing about `16 MiB`. So the added-K/V hypothesis is still untested on model quality; the only information gained is that this branch still needs a smaller memory footprint on the 16 GB RTX 3080.
 - The base-config fresh added-K/V retry with `lora_rank=8` also failed before checkpointing or evaluation, still inside the Wan/VACE backbone. That closes plain LoRA-rank cuts as a fit strategy for this branch; the next meaningful test is activation-memory reduction via gradient checkpointing, not another smaller rank sweep.
+- The first gradient-checkpointed added-K/V run finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but all three windows still looked late-heavy and `misaligned` (`late_motion_ratio≈2.28/2.03/3.17`, `profile_correlation≈0.28/0.52/0.47`). So the branch is not yet a motion-first win; its only cheap remaining rescue is checkpoint selection because validation kept improving through step `350` before regressing at step `400`.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
 - Can a stronger backbone-conditioning route help where all latent-projector variants failed?
-- Smallest next move: rerun the same fresh `ctx21/h8` `400`-step added-K/V backbone job with `action_backbone_added_kv_mode=reuse_action_tokens`, `lora_rank=8`, and `gradient_checkpointing=true` so the architecture can finally be tested instead of dying on activation memory.
+- Smallest next move: evaluate the saved `step_0000300.pt` checkpoint from the gradient-checkpointed added-K/V run on the main clip plus held-out episodes `1` and `2`, because it is the best saved checkpoint before the final regression.
 - If the added-K/V backbone route is still late-heavy or implausible, stop local action-conditioning tweaks in this architecture family and pivot out of Wan-side action routing entirely.
 
 ## Future Questions
