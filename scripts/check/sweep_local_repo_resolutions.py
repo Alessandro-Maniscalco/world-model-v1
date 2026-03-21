@@ -1095,7 +1095,7 @@ def _run_checkpoint_world_model(
         frame_height=height,
         frame_width=width,
     )
-    model, action_encoder = build_wan_vace_runtime_modules(
+    model, action_encoder, action_control_projector = build_wan_vace_runtime_modules(
         runtime_cfg,
         prepared,
         device=device,
@@ -1104,11 +1104,23 @@ def _run_checkpoint_world_model(
     if device.type == "cuda":
         model = model.to(device=device, dtype=runtime_dtype)
         action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
+        action_control_projector = action_control_projector.to(device=device, dtype=runtime_dtype)
     model.eval()
     action_encoder.eval()
+    action_control_projector.eval()
 
     with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
         cross_attention_tokens = action_encoder(prepared.a_plan)
+        future_action_control_prior = None
+        if (
+            getattr(runtime_cfg, "conditioning_mode", "action") == "action"
+            and float(getattr(runtime_cfg, "action_control_prior_scale", 0.0)) > 0.0
+        ):
+            future_action_control_prior = action_control_projector(
+                prepared.a_plan,
+                latent_height=prepared.z_future_video.shape[3],
+                latent_width=prepared.z_future_video.shape[4],
+            )
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         runtime_cfg.wan_vace_model_id,
         subfolder="scheduler",
@@ -1120,11 +1132,16 @@ def _run_checkpoint_world_model(
             z_past_video=prepared.z_past_video,
             future_steps=prepared.z_future_video.shape[2],
             cross_attention_tokens=cross_attention_tokens,
+            future_action_control_prior=future_action_control_prior,
             k=k,
+            chunk_schedule_mode=str(getattr(runtime_cfg, "chunk_schedule_mode", "k_plus_one")),
             integration_steps=integration_steps,
             negative_cross_attention_tokens=None,
             guidance_scale=1.0,
-            chunk_conditioning=(getattr(runtime_cfg, "conditioning_mode", "action") in ("none", "action")),
+            chunk_conditioning=(
+                getattr(runtime_cfg, "conditioning_mode", "action") != "action"
+                or getattr(runtime_cfg, "action_conditioning_window", "chunk") == "chunk"
+            ),
             single_chunk_rollout=single_chunk_rollout,
             scheduler=scheduler,
             generator=generator,

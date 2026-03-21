@@ -1,9 +1,13 @@
-"""Unit tests for latent-time K+1 chunk scheduling."""
+"""Unit tests for latent-time chunk scheduling helpers."""
 
 import torch
 import pytest
 
-from world_model.chunking import build_full_sequence_chunk_ids, build_k_plus_one_schedule
+from world_model.chunking import (
+    build_chunk_schedule,
+    build_full_sequence_chunk_ids,
+    build_k_plus_one_schedule,
+)
 
 
 def test_k_plus_one_schedule_supports_k_equals_one_baseline():
@@ -27,6 +31,28 @@ def test_full_sequence_chunk_ids_prefixes_past_steps():
     assert torch.equal(chunk_ids, torch.tensor([-1, -1, -1, 0, 0, 0, 1, 1]))
 
 
+def test_k_chunks_schedule_uses_exactly_k_future_chunks() -> None:
+    """Split the future window over exactly k chunks when requested."""
+    schedule = build_chunk_schedule(future_steps=8, k=2, chunk_schedule_mode="k_chunks")
+
+    assert schedule.num_chunks == 2
+    assert schedule.boundaries == ((0, 4), (4, 8))
+    assert torch.equal(schedule.chunk_ids, torch.tensor([0, 0, 0, 0, 1, 1, 1, 1]))
+
+
+def test_full_sequence_chunk_ids_support_k_chunks_mode() -> None:
+    """Allow full-sequence chunk ids to use exact-k chunking for short horizons."""
+    chunk_ids = build_full_sequence_chunk_ids(
+        past_steps=2,
+        future_steps=2,
+        k=2,
+        chunk_schedule_mode="k_chunks",
+        past_chunk_id=-1,
+    )
+
+    assert torch.equal(chunk_ids, torch.tensor([-1, -1, 0, 1]))
+
+
 @pytest.mark.parametrize(
     ("future_steps", "k"),
     [
@@ -38,3 +64,9 @@ def test_full_sequence_chunk_ids_prefixes_past_steps():
 def test_k_plus_one_schedule_rejects_invalid_inputs(future_steps: int, k: int):
     with pytest.raises(ValueError):
         build_k_plus_one_schedule(future_steps=future_steps, k=k)
+
+
+def test_k_chunks_schedule_rejects_future_windows_shorter_than_k() -> None:
+    """Reject exact-k schedules when the latent horizon cannot cover all chunks."""
+    with pytest.raises(ValueError):
+        build_chunk_schedule(future_steps=1, k=2, chunk_schedule_mode="k_chunks")

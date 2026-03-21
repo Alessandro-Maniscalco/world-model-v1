@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 
 import torch
 
-from world_model.chunking import build_k_plus_one_schedule
+from world_model.chunking import build_chunk_schedule
 from world_model.masking import build_block_causal_mask
 
 
@@ -181,6 +181,7 @@ def chunkwise_teacher_forcing_loss(
     action_conditioning_window: Literal["chunk", "full"] = "chunk",
     teacher_forcing_observation_mode: TeacherForcingObservationMode = "full_prefix",
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode = "full_suffix",
+    chunk_schedule_mode: str = "k_plus_one",
     k: int,
     t_min: float = 0.0,
     t_max: float = 1.0,
@@ -205,6 +206,7 @@ def chunkwise_teacher_forcing_loss(
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+        chunk_schedule_mode=chunk_schedule_mode,
         k=k,
         t_min=t_min,
         t_max=t_max,
@@ -231,6 +233,7 @@ def _chunkwise_teacher_forcing_video_loss(
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+    chunk_schedule_mode: str,
     k: int,
     t_min: float,
     t_max: float,
@@ -254,6 +257,7 @@ def _chunkwise_teacher_forcing_video_loss(
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+        chunk_schedule_mode=chunk_schedule_mode,
         k=k,
     )
 
@@ -268,9 +272,10 @@ def _chunkwise_teacher_forcing_video_loss(
 
     batch_size = z_future_video.shape[0]
     total_future_steps = z_future_video.shape[2]
-    schedule = build_k_plus_one_schedule(
+    schedule = build_chunk_schedule(
         future_steps=total_future_steps,
         k=k,
+        chunk_schedule_mode=chunk_schedule_mode,
         device=z_future_video.device,
     )
 
@@ -429,6 +434,7 @@ def _validate_chunkwise_video_inputs(
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+    chunk_schedule_mode: str,
     k: int,
 ) -> None:
     """Validate structured latent-video chunkwise training inputs."""
@@ -482,10 +488,15 @@ def _validate_chunkwise_video_inputs(
             "teacher_forcing_future_input_mode must be 'full_suffix' or "
             f"'active_chunk', got {teacher_forcing_future_input_mode!r}"
         )
+    if chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
+        raise ValueError(
+            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', "
+            f"got {chunk_schedule_mode!r}"
+        )
     if z_future_video.shape[2] <= 0:
         raise ValueError("z_future_video must have positive time dimension")
     if k < 1:
-        raise ValueError(f"k must be >= 1 for K+1 chunking, got {k}")
+        raise ValueError(f"k must be >= 1 for chunked scheduling, got {k}")
 
 
 def _select_action_tokens(

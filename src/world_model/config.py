@@ -28,6 +28,7 @@ class TrainScriptConfig:
     dt: float = 0.1
     batch_size: int = 2
     k: int = 1
+    chunk_schedule_mode: str = "k_plus_one"
     max_steps: int = 2000
     auto_stop_check_every: int = 0
     auto_stop_min_relative_improvement: float = 0.0
@@ -117,6 +118,7 @@ class InferScriptConfig:
     batch_size: int = 1
     subset_size: int = 1
     k: int = 1
+    chunk_schedule_mode: str = "k_plus_one"
     integration_steps: int = 20
     num_vis_frames: int = 0
     load_pretrained_backbone: bool = True

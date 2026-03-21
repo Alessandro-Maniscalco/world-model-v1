@@ -32,13 +32,21 @@ dt: 0.1
 # --- training ---
 batch_size: 1
 k: 1
+chunk_schedule_mode: k_plus_one
 max_steps: 50000
 auto_stop_check_every: 5000
 auto_stop_min_relative_improvement: 0.05
+validation_enabled: true
+validation_every: 50
+validation_split_ratio: 0.1
+validation_max_batches: 8
+validation_patience_checks: 3
+validation_min_relative_improvement: 0.01
 lr: 0.0001
 weight_decay: 0.0001
 grad_clip_norm: 1.0
 weight_mode: clipped_snr
+motion_loss_alpha: 0.0
 t_min: 0.0
 t_max: 1.0
 
@@ -74,6 +82,7 @@ lora_rank: 8
 lora_alpha: 16
 lora_dropout: 0.0
 conditioning_mode: action
+action_input_layernorm: true
 
 # --- data loading ---
 num_workers: 0
@@ -83,6 +92,6 @@ overfit_one_batch: false
 # --- logging ---
 log_every: 10
 checkpoint_every: 500
-checkpoint_early_every: 100
+checkpoint_early_every: 200
 checkpoint_early_until: 500
 seed: 0

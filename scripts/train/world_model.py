@@ -92,7 +92,13 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--horizon-len", type=int, default=defaults.horizon_len, help="frame-time horizon length (H)")
     parser.add_argument("--dt", type=float, default=defaults.dt)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
-    parser.add_argument("--k", type=int, default=defaults.k, help="K in K+1 chunk schedule")
+    parser.add_argument("--k", type=int, default=defaults.k, help="Chunk-count parameter for latent-time scheduling")
+    parser.add_argument(
+        "--chunk-schedule-mode",
+        choices=("k_plus_one", "k_chunks"),
+        default=defaults.chunk_schedule_mode,
+        help="Interpret k as K+1 total chunks or exactly K total chunks.",
+    )
     parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
     parser.add_argument("--auto-stop-check-every", type=int, default=defaults.auto_stop_check_every)
     parser.add_argument(
@@ -350,14 +356,15 @@ def _training_autocast_context(*, device: torch.device, disable_amp: bool, dtype
 
 
 def _validate_chunk_schedule(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> None:
-    """Fail fast when latent-time chunking cannot satisfy the configured K+1 schedule."""
-    min_future_steps = cfg.k + 1
+    """Fail fast when latent-time chunking cannot satisfy the configured schedule."""
+    min_future_steps = cfg.k + 1 if cfg.chunk_schedule_mode == "k_plus_one" else cfg.k
     future_steps = prepared_batch.horizon_latent_steps
     if future_steps < min_future_steps:
         raise ValueError(
             "Invalid latent-time schedule: "
             f"raw horizon_len={cfg.horizon_len} compressed to horizon_latent_steps={future_steps}, "
-            f"but k={cfg.k} requires at least {min_future_steps} latent future steps. "
+            f"but k={cfg.k} with chunk_schedule_mode={cfg.chunk_schedule_mode!r} "
+            f"requires at least {min_future_steps} latent future steps. "
             "Increase horizon_len or reduce k."
         )
 
@@ -416,6 +423,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "teacher_forcing_future_input_mode must be 'full_suffix' or "
             f"'active_chunk', got {cfg.teacher_forcing_future_input_mode!r}."
+        )
+    if cfg.chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
+        raise ValueError(
+            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', got "
+            f"{cfg.chunk_schedule_mode!r}."
         )
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(
@@ -644,6 +656,7 @@ def _evaluate_loss(
     action_conditioning_window: str,
     teacher_forcing_observation_mode: str,
     teacher_forcing_future_input_mode: str,
+    chunk_schedule_mode: str,
     action_control_prior_scale: float,
     t_min: float,
     t_max: float,
@@ -681,6 +694,7 @@ def _evaluate_loss(
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
+            chunk_schedule_mode=chunk_schedule_mode,
             k=k,
             t_min=t_min,
             t_max=t_max,
@@ -732,6 +746,7 @@ def _evaluate_validation_loss(
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1039,6 +1054,7 @@ def main() -> None:
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1185,6 +1201,8 @@ def main() -> None:
             k=cfg.k,
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,

@@ -354,6 +354,23 @@ def test_train_script_accepts_valid_latent_schedule() -> None:
     train_script._validate_chunk_schedule(cfg, prepared)
 
 
+def test_train_script_accepts_exact_k_chunk_schedule_for_short_horizon() -> None:
+    """Allow k-chunk scheduling when the latent horizon matches k exactly."""
+    train_script = _load_train_script_module()
+    cfg = TrainScriptConfig(k=2, chunk_schedule_mode="k_chunks", horizon_len=8)
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+
+    train_script._validate_chunk_schedule(cfg, prepared)
+
+
 def test_train_script_accepts_disabled_auto_stop() -> None:
     """Allow the default disabled auto-stop configuration."""
     train_script = _load_train_script_module()

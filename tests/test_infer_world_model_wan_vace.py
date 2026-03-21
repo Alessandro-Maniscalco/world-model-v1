@@ -11,7 +11,12 @@ import torch
 
 from world_model.config import InferScriptConfig, load_infer_config
 from world_model.data.schema import PreparedPackedBatch
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
+from world_model.models.wan_vace_conditioning import (
+    ActionControlProjector,
+    ActionTokenEncoder,
+    NullActionControlProjector,
+    NullConditioningEncoder,
+)
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 
 
@@ -39,7 +44,7 @@ def test_infer_script_builds_wan_vace_runtime_modules_without_checkpoint() -> No
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, action_control_projector = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -48,6 +53,7 @@ def test_infer_script_builds_wan_vace_runtime_modules_without_checkpoint() -> No
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, NullConditioningEncoder)
+    assert isinstance(action_control_projector, NullActionControlProjector)
 
 
 def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
@@ -59,6 +65,10 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-temporal-difference-scale" in option_strings
     assert "--action-temporal-mixer-kernel-size" in option_strings
     assert "--action-temporal-mixer-scale" in option_strings
+    assert "--action-conditioning-window" in option_strings
+    assert "--chunk-schedule-mode" in option_strings
+    assert "--action-order-conditioning" in option_strings
+    assert "--action-control-prior-scale" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -143,7 +153,7 @@ def test_infer_script_builds_action_encoder_when_requested() -> None:
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, action_control_projector = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -152,6 +162,7 @@ def test_infer_script_builds_action_encoder_when_requested() -> None:
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, ActionTokenEncoder)
+    assert isinstance(action_control_projector, ActionControlProjector)
 
 
 def test_infer_script_builds_action_encoder_with_mlp_when_requested() -> None:
@@ -181,7 +192,7 @@ def test_infer_script_builds_action_encoder_with_mlp_when_requested() -> None:
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, _ = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -222,7 +233,7 @@ def test_infer_script_builds_action_encoder_with_residual_mlp_when_requested() -
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, _ = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -264,7 +275,7 @@ def test_infer_script_builds_action_encoder_with_temporal_difference_scale_when_
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, _ = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -304,7 +315,7 @@ def test_infer_script_builds_action_encoder_with_temporal_mixer_when_requested()
         mask_channels=4,
     )
 
-    model, action_encoder = infer_script.build_runtime_modules(
+    model, action_encoder, _ = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -315,6 +326,45 @@ def test_infer_script_builds_action_encoder_with_temporal_mixer_when_requested()
     assert isinstance(action_encoder, ActionTokenEncoder)
     assert action_encoder.temporal_mixer is not None
     assert action_encoder.temporal_mixer_scale == pytest.approx(0.5)
+
+
+def test_infer_script_builds_action_ordered_prior_modules_when_requested() -> None:
+    """Expose both ordered action tokens and a latent prior projector for action inference."""
+    infer_script = _load_infer_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_order_conditioning=True,
+        action_control_prior_scale=1.0,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder, action_control_projector = infer_script.build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.order_conditioning is True
+    assert isinstance(action_control_projector, ActionControlProjector)
 
 
 def test_infer_script_restores_lora_runtime_settings_from_checkpoint_defaults() -> None:
@@ -384,6 +434,29 @@ def test_infer_script_restores_action_temporal_mixer_settings_from_checkpoint_de
     assert restored.action_temporal_mixer_scale == pytest.approx(0.5)
 
 
+def test_infer_script_restores_ordered_plan_settings_from_checkpoint_defaults() -> None:
+    """Reuse saved ordered-plan inference settings when the runtime still uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_conditioning_window": "full",
+                "action_order_conditioning": True,
+                "action_control_prior_scale": 1.0,
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_conditioning_window == "full"
+    assert restored.action_order_conditioning is True
+    assert restored.action_control_prior_scale == pytest.approx(1.0)
+
+
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:
     """Treat `num_vis_frames=0` as a request to render every available frame."""
     infer_script = _load_infer_script_module()
@@ -442,6 +515,20 @@ def test_infer_script_uses_vace_like_defaults_for_checkpoint_free_prompt_smoke_t
 
     assert resolved.integration_steps == 50
     assert resolved.single_chunk_rollout is True
+
+
+def test_infer_script_switches_chunk_conditioning_for_full_plan_action_mode() -> None:
+    """Disable per-chunk token slicing when ordered full-plan action conditioning is enabled."""
+    infer_script = _load_infer_script_module()
+
+    assert infer_script._uses_chunk_conditioning(InferScriptConfig(conditioning_mode="action")) is True
+    assert (
+        infer_script._uses_chunk_conditioning(
+            InferScriptConfig(conditioning_mode="action", action_conditioning_window="full")
+        )
+        is False
+    )
+    assert infer_script._uses_chunk_conditioning(InferScriptConfig(conditioning_mode="prompt")) is False
 
 
 def test_infer_script_builds_sharpness_report() -> None:

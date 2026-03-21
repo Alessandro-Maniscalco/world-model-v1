@@ -44,7 +44,12 @@ from world_model.data import build_lerobot_dataloader, prepare_packed_batch, pre
 from world_model.data.schema import PreparedPackedBatch
 from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
+from world_model.models.wan_vace_conditioning import (
+    ActionControlProjector,
+    ActionTokenEncoder,
+    NullActionControlProjector,
+    NullConditioningEncoder,
+)
 from world_model.models.wan_vace_factory import build_wan_vace_runtime_modules
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 
@@ -84,6 +89,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
     parser.add_argument("--subset-size", type=int, default=defaults.subset_size)
     parser.add_argument("--k", type=int, default=defaults.k)
+    parser.add_argument(
+        "--chunk-schedule-mode",
+        choices=("k_plus_one", "k_chunks"),
+        default=defaults.chunk_schedule_mode,
+        help="Interpret k as K+1 total chunks or exactly K total chunks during rollout.",
+    )
     parser.add_argument("--integration-steps", type=int, default=defaults.integration_steps)
     parser.add_argument(
         "--num-vis-frames",
@@ -122,6 +133,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Use null tokens, action-plan tokens, or prompt tokens for cross-attention conditioning.",
     )
     parser.add_argument(
+        "--action-conditioning-window",
+        choices=("chunk", "full"),
+        default=defaults.action_conditioning_window,
+        help="Use only the active action chunk or the full future plan on every denoising call.",
+    )
+    parser.add_argument(
         "--action-input-layernorm",
         action="store_true",
         default=defaults.action_input_layernorm,
@@ -150,6 +167,24 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         dest="action_mlp_residual",
         action="store_false",
         help="Use the optional action-token MLP as a replacement path instead of a residual augmentation.",
+    )
+    parser.add_argument(
+        "--action-order-conditioning",
+        action="store_true",
+        default=defaults.action_order_conditioning,
+        help="Add learned continuous position features to action tokens before temporal mixing.",
+    )
+    parser.add_argument(
+        "--no-action-order-conditioning",
+        dest="action_order_conditioning",
+        action="store_false",
+        help="Disable learned action-order features and keep order-unaware token projections.",
+    )
+    parser.add_argument(
+        "--action-control-prior-scale",
+        type=float,
+        default=defaults.action_control_prior_scale,
+        help="Scale for the action-derived latent control prior added to future VACE filler latents.",
     )
     parser.add_argument(
         "--action-temporal-difference-scale",
@@ -238,6 +273,15 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
     """Reject inference configurations that cannot produce meaningful outputs."""
     if cfg.num_vis_frames < 0:
         raise ValueError(f"num_vis_frames must be >= 0, got {cfg.num_vis_frames}")
+    if cfg.chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
+        raise ValueError(
+            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', got "
+            f"{cfg.chunk_schedule_mode!r}"
+        )
+    if cfg.action_control_prior_scale < 0.0:
+        raise ValueError(
+            f"action_control_prior_scale must be >= 0, got {cfg.action_control_prior_scale}"
+        )
     if cfg.conditioning_mode == "action" and not cfg.checkpoint:
         raise ValueError(
             "Action conditioning requires --checkpoint because the action encoder is random otherwise. "
@@ -283,9 +327,13 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_input_layernorm",
         "action_mlp_dim",
         "action_mlp_residual",
+        "action_conditioning_window",
+        "action_order_conditioning",
+        "action_control_prior_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",
+        "chunk_schedule_mode",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:
@@ -502,7 +550,11 @@ def build_runtime_modules(
     prepared: PreparedPackedBatch,
     device: torch.device,
     checkpoint: dict[str, object] | None,
-) -> tuple[WanVACEWorldModel, ActionTokenEncoder | NullConditioningEncoder]:
+) -> tuple[
+    WanVACEWorldModel,
+    ActionTokenEncoder | NullConditioningEncoder,
+    ActionControlProjector | NullActionControlProjector,
+]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
     return build_wan_vace_runtime_modules(
         cfg,
@@ -613,6 +665,15 @@ def _get_t5_prompt_embeds(
 def _offline_mode_enabled() -> bool:
     """Mirror Hugging Face offline env handling for local-cache-only loading."""
     return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+def _uses_chunk_conditioning(cfg: InferScriptConfig) -> bool:
+    """Decide whether inference should slice action tokens per rollout chunk."""
+    if cfg.conditioning_mode == "prompt":
+        return False
+    if cfg.conditioning_mode == "action":
+        return cfg.action_conditioning_window == "chunk"
+    return True
 
 
 def _save_grid(
@@ -922,7 +983,7 @@ def main() -> None:
         )
 
     _release_vae_after_prepare(vae, device=device)
-    model, action_encoder = build_runtime_modules(
+    model, action_encoder, action_control_projector = build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=device,
@@ -931,10 +992,12 @@ def main() -> None:
     if device.type == "cuda" and not cfg.disable_amp:
         model = model.to(device=device, dtype=runtime_dtype)
         action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
+        action_control_projector = action_control_projector.to(device=device, dtype=runtime_dtype)
     scheduler = _load_flow_match_scheduler(cfg)
 
     model.eval()
     action_encoder.eval()
+    action_control_projector.eval()
 
     if cfg.conditioning_mode == "prompt":
         tokenizer, text_encoder = _load_prompt_encoder(cfg)
@@ -956,14 +1019,23 @@ def main() -> None:
         del text_encoder
         if device.type == "cuda":
             torch.cuda.empty_cache()
+        future_action_control_prior = None
     elif cfg.conditioning_mode == "action":
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
+            future_action_control_prior = None
+            if cfg.action_control_prior_scale > 0.0:
+                future_action_control_prior = action_control_projector(
+                    prepared.a_plan,
+                    latent_height=prepared.z_future_video.shape[3],
+                    latent_width=prepared.z_future_video.shape[4],
+                )
         negative_cross_attention_tokens = None
     else:
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
         negative_cross_attention_tokens = None
+        future_action_control_prior = None
 
     with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
         pred_future_video = infer_future_videos_chunkwise(
@@ -971,18 +1043,21 @@ def main() -> None:
             z_past_video=prepared.z_past_video,
             future_steps=prepared.z_future_video.shape[2],
             cross_attention_tokens=cross_attention_tokens,
+            future_action_control_prior=future_action_control_prior,
             k=cfg.k,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
             integration_steps=cfg.integration_steps,
             negative_cross_attention_tokens=negative_cross_attention_tokens,
             guidance_scale=cfg.guidance_scale,
-            chunk_conditioning=(cfg.conditioning_mode in ("none", "action")),
+            chunk_conditioning=_uses_chunk_conditioning(cfg),
             single_chunk_rollout=cfg.single_chunk_rollout,
             scheduler=scheduler,
         )
 
     del cross_attention_tokens
     del negative_cross_attention_tokens
-    _release_sampling_modules(model, action_encoder, device=device)
+    del future_action_control_prior
+    _release_sampling_modules(model, action_encoder, action_control_projector, device=device)
     pred_video, target_video = _decode_future_videos(
         vae=vae,
         pred_future_video=pred_future_video,

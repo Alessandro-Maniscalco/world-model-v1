@@ -360,6 +360,27 @@ def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> 
     assert all(torch.equal(window, action_tokens) for window in model.action_windows)
 
 
+def test_chunkwise_teacher_forcing_supports_exact_k_chunk_schedules() -> None:
+    """Allow short latent horizons to split over exactly k chunks when requested."""
+    model = _ChunkActionWindowRecorder()
+    action_tokens = torch.arange(2, dtype=torch.float32).view(1, 2, 1)
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=torch.randn(1, 2, 3, 1, 1),
+        z_future_video=torch.randn(1, 2, 2, 1, 1),
+        action_tokens=action_tokens,
+        chunk_schedule_mode="k_chunks",
+        k=2,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert len(model.action_windows) == 2
+    assert torch.equal(model.action_windows[0], action_tokens[:, 0:1])
+    assert torch.equal(model.action_windows[1], action_tokens[:, 1:2])
+
+
 def test_chunkwise_teacher_forcing_can_match_rollout_with_active_chunk_future_inputs() -> None:
     """Restrict teacher forcing to the active chunk so future inputs match rollout shape."""
     full_suffix_model = _ChunkActionWindowRecorder()
