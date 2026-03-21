@@ -120,13 +120,18 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 
 ## Ladder Promotion
 
-- Work from the simplest meaningful rung upward.
+- Work from the easiest rung likely to generate a good video upward, not the
+  absolute minimum-complexity rung.
+- Prefer the shortest future horizon, enough observed context to stabilize the
+  scene, and the simplest conditioning path that visibly helps motion when
+  choosing the base rung.
 - Change only one major complexity axis at a time when promoting to the next
   rung.
 - Do not add a rung to `## Proven Complexity ladder` until it has a validated
   best run with visible task-relevant motion and acceptable plausibility.
 - If a short-window scout rung wins, keep it as a proven rung but do not treat
-  it as a project win until a later rung shows the gain transfers upward.
+  it as a project win until a later harder rung shows the gain transfers
+  upward.
 
 ## Local Neighborhood Control
 

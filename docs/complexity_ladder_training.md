@@ -2,22 +2,17 @@
 The process is to find the easiest setup that can produce a good-looking plausible video with visible task-relevant motion, then increase difficulty one axis at a time from that anchor.
 
 ## Proven Complexity ladder
-List only proven rungs. For each rung, include a short description of the
-complexity and the best video link.
+- None yet.
 
 ## Next complexity to test
-Only one, including the rung name and why it is next. It is flexible.
 - Rung: max-context single-generated-frame action scout.
 - `conditioning_mode=action`, `context_len=21`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200`, `no_action_input_layernorm=true`, `action_mlp_dim=128`, `action_mlp_residual=true`
 - Why next: the `ctx17/h8` action scout finally generated more than one future frame, but all five generated frames `17-21` on the main clip and held-out episodes `1` and `2` were visibly blurred and ghosted, with episode `2` failing plausibility on every generated frame. Since the operator wants the easiest path to a good video first, the next rung should favor visual stability over longer rollout: keep the action path, collapse back to the cheapest one-latent future block, and increase context only so the model has the strongest visual anchor while synthesizing just one final frame.
 
 ## Best rung for current complexity
-Only one for the current complexity being researched, including the mp4 link
-and a short description of the run.
 - None yet for the max-context single-generated-frame action scout rung.
 
 ## Rung Findings for current complexity
-Clear when complexity increases. Use one point per rung.
 - Action-conditioned short-window two-latent scout rejected as an easy-video rung: `conditioning_mode=action`, `ctx17/h8`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200` generated frames `17-21` instead of only the last frame, but all five generated frames on the main clip were brown/green ghosted smears around the fork and plate; held-out episode `1` showed the same persistent blur across frames `17-21`, and held-out episode `2` was worst, with every generated frame failing plausibility and the plate/fork region washing out into a bright blob (`late_motion_ratio≈2.17/1.38/5.04`, all `misaligned`).
 
 ## Stable Findings
