@@ -26,7 +26,7 @@ from world_model.optimization.codex_runner import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MEMORY_PATH = REPO_ROOT / "docs" / "training_optimizer.md"
+DEFAULT_MEMORY_PATH = REPO_ROOT / "docs" / "complexity_ladder_training.md"
 DEFAULT_PROMPT_PATH = REPO_ROOT / "docs" / "controller_prompt.md"
 DEFAULT_INSTRUCTIONS_PATH = DEFAULT_PROMPT_PATH
 DEFAULT_STATE_PATH = REPO_ROOT / "runs" / "training_optimizer" / "controller_state.json"

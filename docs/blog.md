@@ -2,12 +2,12 @@
 
 _Status: March 2026_
 
-I am a sophmore majoring i nMechanical Engineering & Finance at the University of Pennsylvania. This summer
-I did an amazing internship at Built Robtoics working on a powerful mecancial attachment.
-recently I developed a passion for the predictive power of ML and have been studying it independently as
-I am taking the limits of credits and cannot take a class. I have read a lot, taking notes on:
+I am a sophomore majoring in Mechanical Engineering & Finance at the University of Pennsylvania. This summer
+I did an amazing internship at Built Robotics, working on a powerful mechanical attachment.
+Recently, I developed a passion for the predictive power of ML and have been studying it independently because
+I am at the credit limit and cannot take another class. I have read a lot and have been taking notes here:
 https://docs.google.com/document/d/1Q-M7ZCJGVbRLWiulOSyfcfaDw1_juOFTBJZOAF928NU. I was playing around with the
-opensource Pi models and when I saw the beauty in DreamZero I was inspired to do my own.
+open-source Pi models, and when I saw the beauty of DreamZero, I was inspired to build my own.
 
 The current goal is narrower and more concrete: learn an action-conditioned
 latent video model that predicts future observations for robot manipulation.
@@ -57,7 +57,7 @@ The current codebase uses a hybrid approach:
   model while still allowing local world-model changes
 
 This ended up being much more maintainable than treating the entire backbone as
-a fully custom implementation which I did initially.
+a fully custom implementation, which is what I did initially.
 
 ## Current experimental picture
 
@@ -104,8 +104,8 @@ That controller has been useful for speeding up iteration, but the problem remai
 The open questions I care about most are:
 
 1. Am I tackling the problem in the right way?
-2. How do I know what is the right things to do?
-3. How do I find what is exactly not working in such a complex system?
+2. How do I know what the right things to do are?
+3. How do I determine exactly what is not working in such a complex system?
 
 ## Bottom line
 

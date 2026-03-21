@@ -4,9 +4,12 @@ Use this file as the persistent operating contract for the shared Codex session.
 The first session-start prompt inlines it. Later turns should refer back to the
 section headings instead of repeating the whole file.
 
-- Read `docs/training_optimizer.md` first.
-- Treat `docs/training_optimizer.md` as decision memory and
-  `runs/training_optimizer/experiment_ledger.md` as chronology only.
+- Read `docs/complexity_ladder_training.md` first.
+- Treat `docs/complexity_ladder_training.md` as the decision memory for the
+  active ladder process.
+- Treat `docs/training_optimizer.md` as legacy background only when older
+  findings are still useful for context, not as the primary next-step driver.
+- Treat `runs/training_optimizer/experiment_ledger.md` as chronology only.
 
 Everything is run on a RTX 3080 with 16GB of VRAM.
 
@@ -24,8 +27,8 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 - Use rollback freely for speculative edits that fail validation or do not earn
   a better next decision.
 - Rollback affects repo files only, not `runs/`.
-- Record kept code-changing commits in `docs/training_optimizer.md` under
-  `## Kept Code Changes`. Put detailed chronology in
+- Record kept code-changing commits in `docs/complexity_ladder_training.md`
+  under `## Kept Code Changes`. Put detailed chronology in
   `runs/training_optimizer/experiment_ledger.md`.
 - Delete `runs/` artifacts only when they are clearly dominated and no longer
   needed. When unsure, keep them.
@@ -71,8 +74,8 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 - Watch enough of each reviewed clip to describe the
   visible motion pattern in sentences, not just labels or metrics.
 - If the video visibly goes bad, `*_arm_motion_report.json` is not needed. Visible collapse, incoherent motion, or late-horizon failure is enough to reject it even when scalar metrics look acceptable.
-- Use `docs/training_optimizer.md` to choose the next step and the ledger only
-  for detail.
+- Use `docs/complexity_ladder_training.md` to choose the next step and the
+  ledger only for detail.
 
 ### Motion-First Ranking
 
@@ -94,29 +97,41 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 
 ## Memory Maintenance
 
-- Keep `docs/training_optimizer.md` short and decision-oriented.
+- Keep `docs/complexity_ladder_training.md` short and decision-oriented.
 - It must contain only:
-  - `## Stable Findings`: durable facts.
-  - `## Best Run`: current winner and ranking takeaway.
-  - `## Findings`: important but less-stable takeaways.
-  - `## Active Questions`: the one question to answer next, broken into the minimum parts needed for the next check.
-  - `## Future Questions`: deferred questions to revisit only after the active question is answered.
-  - `## Exhausted Families`: branches that should not get another near-duplicate try.
+  - `## Goal`: the ladder objective in one short paragraph.
+  - `## Proven Complexity ladder`: only proven rungs, each with a short
+    description and the best video link.
+  - `## Next complexity to test`: exactly one active rung, with why it is next.
+  - `## Best rung for current complexity`: the current rung's best run only.
+  - `## Rung Findings for current complexity`: compact findings for the active
+    rung, one point per rung transition.
+  - `## Stable Findings`: durable facts that apply across multiple rungs.
   - `## Kept Code Changes`: still-relevant code-changing commits only.
 - Put detailed validation summaries and chronology in
   `runs/training_optimizer/experiment_ledger.md`.
-- Re-review `## Active Questions` after every validated run and before choosing
-  the next action. Rewrite whenever the latest evidence changes what the
-  next question should be. It may be replaced completely.
-- In memory findings, record the specific visible behavior that changed the
-  decision, especially main-vs-held-out differences in motion timing, contact,
-  and late-horizon artifacts.
+- Re-review `## Next complexity to test` after every validated run and before
+  choosing the next action. Rewrite it whenever the latest evidence changes
+  which rung should be active next.
+- In ladder findings, record the specific visible behavior that changed the
+  decision, especially when motion starts, how long it stays static, and any
+  blur, ghosting, or missed contact in held-out clips.
 - Delete repeated conclusions instead of restating them.
+
+## Ladder Promotion
+
+- Work from the simplest meaningful rung upward.
+- Change only one major complexity axis at a time when promoting to the next
+  rung.
+- Do not add a rung to `## Proven Complexity ladder` until it has a validated
+  best run with visible task-relevant motion and acceptable plausibility.
+- If a short-window scout rung wins, keep it as a proven rung but do not treat
+  it as a project win until a later rung shows the gain transfers upward.
 
 ## Local Neighborhood Control
 
 - Every proposed run must name its local neighborhood and the distinct
-  hypothesis it tests.
+  hypothesis it tests, and identify which ladder rung it belongs to.
 - Do not spend more than `2` non-improving follow-ups inside the same
   neighborhood after the current anchor.
 - If a direct continuation regresses, do not run another plain continuation in
@@ -127,6 +142,8 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
   over several more scalar sweeps.
 - A structural experiment may bundle multiple coordinated code changes when they
   are all required to test one architecture hypothesis.
+- Prefer promoting the current rung or rejecting it clearly over opening
+  multiple ladder branches at once.
 
 ## Decision Rule
 
@@ -144,10 +161,10 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 - Base the choice on the best next action for the total long-run budget, not on
   the smallest decisive check. A cheap checkpoint-selection pass is not
   preferred when the visible failure mode already shows the family is exhausted.
-- If validation answers or obsoletes the current active question, update
-  `docs/training_optimizer.md` first and then choose the next action against
-  the new active question, even when that means a full pivot away from the
-  previous neighborhood.
+- If validation answers or obsoletes the current ladder rung, update
+  `docs/complexity_ladder_training.md` first and then choose the next action
+  against the new ladder state, even when that means promoting upward or
+  rejecting the rung entirely.
 
 ## Operator Control
 
