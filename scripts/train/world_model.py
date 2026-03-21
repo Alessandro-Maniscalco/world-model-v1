@@ -64,6 +64,7 @@ from world_model.training import (
     save_checkpoint,
     train_chunkwise_batch,
 )
+from world_model.training.chunkwise_training import _compute_action_control_aux_loss
 
 
 def _config_parser() -> argparse.ArgumentParser:
@@ -309,6 +310,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Scale for adding the action-derived latent control signal directly to future latent hidden states before the Wan backbone.",
     )
     parser.add_argument(
+        "--action-control-aux-loss-scale",
+        type=float,
+        default=defaults.action_control_aux_loss_scale,
+        help="Auxiliary loss scale for matching the action-control projector to the clean future latent summary during training.",
+    )
+    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -467,6 +474,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_hidden_state_bias_scale must be >= 0, got "
             f"{cfg.action_hidden_state_bias_scale}."
+        )
+    if cfg.action_control_aux_loss_scale < 0.0:
+        raise ValueError(
+            "action_control_aux_loss_scale must be >= 0, got "
+            f"{cfg.action_control_aux_loss_scale}."
         )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
@@ -695,6 +707,7 @@ def _evaluate_loss(
     chunk_schedule_mode: str,
     action_control_prior_scale: float,
     action_hidden_state_bias_scale: float,
+    action_control_aux_loss_scale: float,
     t_min: float,
     t_max: float,
     weight_mode: str,
@@ -718,7 +731,11 @@ def _evaluate_loss(
         action_control_prior = None
         if (
             action_control_projector is not None
-            and (action_control_prior_scale > 0.0 or action_hidden_state_bias_scale > 0.0)
+            and (
+                action_control_prior_scale > 0.0
+                or action_hidden_state_bias_scale > 0.0
+                or action_control_aux_loss_scale > 0.0
+            )
         ):
             action_control_prior = action_control_projector(
                 a_plan,
@@ -744,6 +761,13 @@ def _evaluate_loss(
             motion_loss_excess_only=motion_loss_excess_only,
             future_loss_early_bias=future_loss_early_bias,
             future_chunk_early_bias=future_chunk_early_bias,
+        )
+        loss = loss + (
+            action_control_aux_loss_scale
+            * _compute_action_control_aux_loss(
+                action_control_prior=action_control_prior,
+                z_future_video=z_future_video,
+            )
         )
     return float(loss.detach().cpu().item())
 
@@ -789,6 +813,7 @@ def _evaluate_validation_loss(
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
+            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1030,7 +1055,10 @@ def main() -> None:
             action_conditioning_window=cfg.action_conditioning_window,
             teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
+            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1097,6 +1125,8 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
+            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1245,6 +1275,8 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
+            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,

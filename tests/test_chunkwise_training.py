@@ -52,6 +52,7 @@ def test_chunkwise_step_metrics_to_log_dict_serializes_numbers() -> None:
         "step": 7,
         "loss": 1.5,
         "grad_norm": 2.5,
+        "action_control_aux_loss": 0.0,
         "per_chunk_losses": [0.5, 1.0],
         "per_chunk_lengths": [4, 4],
     }

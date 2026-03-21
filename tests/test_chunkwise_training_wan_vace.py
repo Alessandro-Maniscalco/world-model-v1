@@ -5,8 +5,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionControlProjector, ActionTokenEncoder
 from world_model.training import train_chunkwise_batch
+from world_model.training.chunkwise_training import _compute_action_control_aux_loss
 from world_model.training.flow_matching import chunkwise_teacher_forcing_loss
 
 
@@ -222,3 +223,49 @@ def test_train_chunkwise_batch_can_match_rollout_future_inputs_with_active_chunk
     assert metrics.loss > 0.0
     assert len(model.calls) == 2
     assert [call["future_frames"].item() for call in model.calls] == [4, 4]
+
+
+def test_action_control_aux_loss_matches_future_latent_summary() -> None:
+    """Compare the projector output against the clean future latent summary."""
+    future = torch.tensor(
+        [[[[[1.0, 3.0], [5.0, 7.0]]]]],
+        dtype=torch.float32,
+    )
+    prior = torch.tensor(
+        [[[[[2.0, 2.0], [2.0, 2.0]]]]],
+        dtype=torch.float32,
+    )
+
+    loss = _compute_action_control_aux_loss(action_control_prior=prior, z_future_video=future)
+
+    assert loss == torch.tensor(4.0)
+
+
+def test_train_chunkwise_batch_can_train_action_control_projector_with_aux_loss_only() -> None:
+    """Let the projector receive direct gradients even when prior injection is disabled."""
+    torch.manual_seed(0)
+    model = _RecordingVideoModel()
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16)
+    action_control_projector = ActionControlProjector(action_dim=6, latent_channels=16, init_mode="linear_default")
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(action_encoder.parameters()) + list(action_control_projector.parameters()),
+        lr=1e-2,
+    )
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        action_control_projector=action_control_projector,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 8, 8, 8),
+        a_plan=torch.randn(2, 8, 6),
+        k=1,
+        action_control_aux_loss_scale=1.0,
+        t_min=0.5,
+        t_max=0.5,
+    )
+
+    assert metrics.loss > 0.0
+    assert metrics.action_control_aux_loss > 0.0
+    assert action_control_projector.projection.weight.grad is not None

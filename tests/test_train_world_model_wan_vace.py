@@ -796,6 +796,7 @@ def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch
     assert val_loss == pytest.approx(0.45)
     assert len(captured_kwargs) == 2
     assert captured_kwargs[0]["action_hidden_state_bias_scale"] == pytest.approx(0.0)
+    assert captured_kwargs[0]["action_control_aux_loss_scale"] == pytest.approx(0.0)
 
 
 def test_train_script_restores_validation_state_from_checkpoint() -> None:

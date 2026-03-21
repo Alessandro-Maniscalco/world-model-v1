@@ -26,6 +26,7 @@ class ChunkwiseStepMetrics:
     grad_norm: float
     per_chunk_losses: tuple[float, ...]
     per_chunk_lengths: tuple[int, ...]
+    action_control_aux_loss: float = 0.0
 
     def to_log_dict(self, *, step: int) -> dict[str, Any]:
         """Convert metrics to a JSON-serializable payload."""
@@ -33,6 +34,7 @@ class ChunkwiseStepMetrics:
             "step": int(step),
             "loss": float(self.loss),
             "grad_norm": float(self.grad_norm),
+            "action_control_aux_loss": float(self.action_control_aux_loss),
             "per_chunk_losses": [float(x) for x in self.per_chunk_losses],
             "per_chunk_lengths": [int(x) for x in self.per_chunk_lengths],
         }
@@ -54,6 +56,7 @@ def train_chunkwise_batch(
     chunk_schedule_mode: str = "k_plus_one",
     action_control_prior_scale: float = 0.0,
     action_hidden_state_bias_scale: float = 0.0,
+    action_control_aux_loss_scale: float = 0.0,
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: str = "uniform",
@@ -85,7 +88,11 @@ def train_chunkwise_batch(
         action_control_prior = None
         if (
             action_control_projector is not None
-            and (action_control_prior_scale > 0.0 or action_hidden_state_bias_scale > 0.0)
+            and (
+                action_control_prior_scale > 0.0
+                or action_hidden_state_bias_scale > 0.0
+                or action_control_aux_loss_scale > 0.0
+            )
         ):
             action_control_prior = action_control_projector(
                 a_plan,
@@ -116,11 +123,16 @@ def train_chunkwise_batch(
             generator=generator,
             return_info=True,
         )
+        action_control_aux_loss = _compute_action_control_aux_loss(
+            action_control_prior=action_control_prior,
+            z_future_video=z_future_video,
+        )
+        total_loss = info.loss + (action_control_aux_loss_scale * action_control_aux_loss)
 
     if grad_scaler is None:
-        info.loss.backward()
+        total_loss.backward()
     else:
-        grad_scaler.scale(info.loss).backward()
+        grad_scaler.scale(total_loss).backward()
 
     if grad_clip_norm is None:
         grad_norm = _compute_grad_norm(trainable_params)
@@ -142,8 +154,9 @@ def train_chunkwise_batch(
             grad_scaler.update()
 
     return ChunkwiseStepMetrics(
-        loss=float(info.loss.detach().cpu().item()),
+        loss=float(total_loss.detach().cpu().item()),
         grad_norm=float(grad_norm),
+        action_control_aux_loss=float(action_control_aux_loss.detach().cpu().item()),
         per_chunk_losses=info.per_chunk_losses,
         per_chunk_lengths=info.per_chunk_lengths,
     )
@@ -195,6 +208,19 @@ def _compute_grad_norm(parameters: Any) -> float:
         norm = float(param.grad.detach().norm(2).cpu().item())
         total_sq += norm * norm
     return total_sq ** 0.5
+
+
+def _compute_action_control_aux_loss(
+    *,
+    action_control_prior: torch.Tensor | None,
+    z_future_video: torch.Tensor,
+) -> torch.Tensor:
+    """Match the action-derived latent prior to the clean future latent summary."""
+    if action_control_prior is None:
+        return z_future_video.new_zeros(())
+    target_summary = z_future_video.detach().mean(dim=(3, 4), keepdim=True)
+    predicted_summary = action_control_prior.mean(dim=(3, 4), keepdim=True)
+    return torch.nn.functional.mse_loss(predicted_summary, target_summary)
 
 
 def _build_training_autocast_context(
