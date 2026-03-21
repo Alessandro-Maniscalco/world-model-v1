@@ -302,9 +302,37 @@ current decision state and use this ledger only when a turn needs older context.
   - `continue_training`: no more one-sided latent-prior retries; keep the `ctx21/h8` anchor but change the routing, not the scalar
   - Why: the main comparison and arm-crop sheets remain visually close to the default single-chunk control, and the reports confirm that the motion pattern barely moved even after train-side latent-prior exposure. Main `late_motion_ratio≈1.98`, episode `1≈1.47`, and episode `2≈2.39` all remain `misaligned`, while plausibility stays `PASS` on all three windows and `mean_frame_mae≈2.79/2.57/2.26` stays in the same range as the safe short-horizon anchor. Training also collapses late again (`best_val_loss≈0.0281`, `val_loss≈0.2371` at step `1000`), so another scalar continuation in this routing is not justified. The smallest new hypothesis is to keep the same projector and anchor but route the latent prior through both future VACE control branches instead of only the reactive branch.
 
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_actionctrlprior0p5_dualfill_resume800to1000` final checkpoint
+  - `arm_motion_verdict`: routing the latent prior through both future VACE control branches still leaves the main clip plus held-out episodes `1` and `2` `misaligned`, with the same late fork commitment pattern
+  - `image_quality_verdict`: all three windows stay plausible and close in quality to the one-sided latent prior, but there is no visible motion-first gain
+  - `continue_training`: no more latent-prior routing retries on this anchor; pivot to a different conditioning path instead of another routing or scalar tweak
+  - Why: the last-horizon comparison sheets and arm crop are visually almost unchanged from the one-sided latent prior: the fork stays static for too long and only moves late. The reports confirm that there is no useful shift in behavior: main `late_motion_ratio≈2.06`, episode `1≈1.43`, and episode `2≈2.53` all remain `misaligned`, while plausibility stays `PASS` on all three windows and MAE stays in the same band at about `2.91/2.72/2.34`. Training also follows the same late-collapse trace (`best_val_loss≈0.0281`, `val_loss≈0.2359` at step `1000`). Because the stronger routing still looks inert, the latent-prior routing family is exhausted. The smallest remaining structural probe is to reuse the same action-derived latent signal but add it directly to future latent hidden states before the Wan backbone.
+
 ## Latest Structural Edits
 
 - `d73b3e9` `Route latent action priors through both VACE branches`
   - Added `action_control_prior_mode` with checkpoint-compatible defaults in train/infer configs and CLI parsing.
   - Added `dual_fill` routing in `WanVACEWorldModel` so the existing action-derived latent prior can modulate both future VACE control branches instead of only the reactive future stream.
   - Validated with `103` focused pytest passes plus train/infer CLI smoke checks for `--action-control-prior-mode`.
+
+- `6006617` `Add direct action bias to future latents`
+  - Added `action_hidden_state_bias_scale` to train/infer configs, checkpoint restore, and CLI parsing.
+  - Reused the existing action-derived latent projector so its output can bias future latent hidden states directly before the Wan backbone, while leaving the control-stream prior path optional and default-off.
+  - Validated with `106` focused pytest passes plus train/infer CLI smoke checks for `--action-hidden-state-bias-scale`.
+
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_resume800to1000`
+  - `arm_motion_verdict`: no model verdict yet; the run was blocked by validation plumbing before any sweep artifacts were produced
+  - `image_quality_verdict`: not available because the run never reached checkpoint evaluation
+  - `continue_training`: rerun the exact same hidden-state-bias command after the plumbing fix; do not change the hypothesis yet
+  - Why: training resumed successfully from step `800` and advanced through step `850`, but the first validation pass crashed with `TypeError: _evaluate_loss() got an unexpected keyword argument 'action_hidden_state_bias_scale'`. That is a tooling-only blocker, not a model result. The correct response is to fix validation plumbing and rerun the same bounded experiment.
+
+- `6ccb840` `Fix validation plumbing for action hidden-state bias`
+  - Forwarded `action_hidden_state_bias_scale` through `_evaluate_loss` and aligned the validation-side projector gating with the train-step path.
+  - Added a regression assertion in the train-entrypoint tests so validation-loss evaluation keeps receiving the new bias scale.
+  - Validated with the same focused `106`-test bundle plus a train CLI smoke check.
+
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_rerun_resume800to1000` final checkpoint
+  - `arm_motion_verdict`: still `misaligned` on the main clip plus held-out episodes `1` and `2`, with the same long static hold followed by late fork motion
+  - `image_quality_verdict`: all three windows stay plausible and fairly clean, but there is no visible motion-first gain over the latent-prior baselines
+  - `continue_training`: no plain continuation; the only remaining cheap rescue in this neighborhood is checkpoint selection at step `900`
+  - Why: the last-horizon comparison sheets and arm-crop strips remain visibly late-heavy in all three windows. The reports confirm the same pattern: main `late_motion_ratio≈1.99`, episode `1≈1.41`, and episode `2≈2.47`, all still `misaligned`, while plausibility stays `PASS` with `mean_frame_mae≈2.85/2.59/2.33`. Training also collapsed late again, with `best_val_loss≈0.0283` but `val_loss≈0.2363` at step `1000`. Since only steps `900` and `1000` were saved, step `900` is the smallest remaining rescue before the branch should pivot to a stronger train-side action redesign.

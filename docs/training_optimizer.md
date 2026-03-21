@@ -27,20 +27,20 @@ Important but less-stable takeaways that may change as new experiments land.
 - The matching `action_token_scale=0.0` ablation also stayed visually near-identical to the default single-chunk control while remaining plausible (`late_motion_ratio≈1.92`, `profile_correlation≈0.34`, `mean_frame_mae≈2.48`), so projected action tokens are effectively inert on the canonical `ctx21/h8` step-`800` checkpoint.
 - Resuming the same `ctx21/h8` step-`800` anchor with `action_control_prior_scale=0.5` on the default `reactive_only` latent-prior path also stayed plausible but still late-heavy and `misaligned` across the main clip plus held-out episodes `1` and `2` (`late_motion_ratio≈1.98/1.47/2.39`, `mean_frame_mae≈2.79/2.57/2.26`), so the one-sided latent prior does not rescue the branch either.
 - The stronger `dual_fill` latent-prior routing also stayed plausible but effectively unchanged from the one-sided prior (`late_motion_ratio≈2.06/1.43/2.53`, `mean_frame_mae≈2.91/2.72/2.34`), so the whole latent-prior routing family is now exhausted on the `ctx21/h8` anchor.
-- The first `action_hidden_state_bias_scale=0.5` resume from the `ctx21/h8` step-`800` anchor was blocked by validation-loss plumbing after training resumed to step `850`, not by model behavior, so the correct next action remains a rerun of that exact hidden-state-bias probe.
+- The rerun of `action_hidden_state_bias_scale=0.5` from the `ctx21/h8` step-`800` anchor stayed plausible on the main clip plus held-out episodes `1` and `2`, but all three windows still showed the same late-heavy `misaligned` motion pattern (`late_motion_ratio≈1.99/1.41/2.47`) and training collapsed late again (`best_val_loss≈0.0283`, `val_loss≈0.2363` at step `1000`).
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can the existing action-derived latent signal steer the model once it is added directly to the future latent hidden states before the Wan backbone?
-- Smallest next structural move: resume `ctx21/h8` step `800` to step `1000` with `action_hidden_state_bias_scale=0.5`, keeping `action_control_prior_scale=0.0`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If the direct future-latent bias still leaves the same late-heavy pattern, the next iteration should pivot from conditioning-route tweaks to a stronger train-side action objective or projection redesign.
+- Is the hidden-state-bias branch truly dead, or is the final checkpoint only hiding the best saved checkpoint before the late validation collapse?
+- Smallest next move: evaluate `runs/optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_rerun_resume800to1000/checkpoints/step_0000900.pt` on the main clip plus held-out episodes `1` and `2`.
+- If step `900` still shows the same late-heavy pattern, pivot from conditioning-route tweaks to a stronger train-side action objective or projection redesign.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the direct future-latent bias still barely changes motion timing, what is the smallest justified next redesign: simpler action projection, a stronger train-side action objective, or a broader backbone-conditioning change?
-- If the direct future-latent bias changes behavior sharply, should the next step be a calibrated bias-scale sweep or a cleaner train-side ablation of latent-bias vs. token conditioning before revisiting multi-chunk rollout?
+- If hidden-state-bias step `900` still barely changes motion timing, what is the smallest justified next redesign: simpler action projection, a stronger train-side action objective, or a broader backbone-conditioning change?
+- If hidden-state-bias step `900` changes behavior sharply, should the next step be a calibrated bias-scale sweep or a cleaner train-side ablation of latent-bias vs. token conditioning before revisiting multi-chunk rollout?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
