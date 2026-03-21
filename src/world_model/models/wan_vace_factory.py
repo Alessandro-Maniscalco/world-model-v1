@@ -91,6 +91,11 @@ def build_conditioning_encoder_for_model(
     return ActionTokenEncoder(
         action_dim=int(prepared_batch.a_plan.shape[-1]),
         hidden_dim=int(model.backbone.config.text_dim),
+        latent_summary_channels=(
+            int(model.backbone.config.in_channels)
+            if float(getattr(cfg, "action_token_latent_aux_loss_scale", 0.0)) > 0.0
+            else 0
+        ),
         mlp_dim=_resolve_action_mlp_dim(cfg),
         mlp_residual=bool(getattr(cfg, "action_mlp_residual", False)),
         input_layernorm=bool(getattr(cfg, "action_input_layernorm", True)),
@@ -251,6 +256,7 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_control_projector_init_mode",
         "action_control_projector_observed_context_mode",
         "action_hidden_state_bias_scale",
+        "action_token_latent_aux_loss_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",

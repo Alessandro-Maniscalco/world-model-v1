@@ -220,6 +220,35 @@ def test_build_runtime_modules_respects_action_token_scale() -> None:
     assert action_encoder.token_scale == pytest.approx(2.0)
 
 
+def test_build_runtime_modules_builds_action_latent_aux_head_from_cfg() -> None:
+    """Restore the optional action-token latent-summary head from runtime config."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_token_latent_aux_loss_scale=1.0,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.latent_summary_head is not None
+    assert action_encoder.latent_summary_channels == 16
+
+
 def test_build_runtime_modules_respects_action_temporal_mixer_settings() -> None:
     """Propagate temporal action-mixer settings into the runtime encoder."""
     prepared = _make_prepared_batch()

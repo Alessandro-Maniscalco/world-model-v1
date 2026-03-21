@@ -98,6 +98,24 @@ def test_action_token_encoder_token_scale_multiplies_projected_tokens() -> None:
     assert torch.allclose(scaled(actions), 2.5 * baseline(actions), atol=1e-5)
 
 
+def test_action_token_encoder_can_predict_future_latent_summaries() -> None:
+    """Project action tokens into per-step latent summaries when aux supervision is enabled."""
+    encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        latent_summary_channels=5,
+        input_layernorm=False,
+    )
+    tokens = encoder(torch.randn(2, 4, 7))
+    predicted = encoder.predict_future_latent_summary(tokens)
+
+    assert predicted.shape == (2, 5, 4)
+    assert {
+        "latent_summary_head.weight",
+        "latent_summary_head.bias",
+    }.issubset(encoder.allowed_missing_state_dict_keys())
+
+
 def test_action_token_encoder_temporal_difference_scale_is_noop_for_constant_actions() -> None:
     """Keep outputs unchanged when temporal differences are identically zero."""
     torch.manual_seed(0)

@@ -64,7 +64,10 @@ from world_model.training import (
     save_checkpoint,
     train_chunkwise_batch,
 )
-from world_model.training.chunkwise_training import _compute_action_control_aux_loss
+from world_model.training.chunkwise_training import (
+    _compute_action_control_aux_loss,
+    _compute_action_token_latent_aux_loss,
+)
 
 
 def _config_parser() -> argparse.ArgumentParser:
@@ -328,6 +331,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Auxiliary loss scale for matching the action-control projector to the clean future latent summary during training.",
     )
     parser.add_argument(
+        "--action-token-latent-aux-loss-scale",
+        type=float,
+        default=defaults.action_token_latent_aux_loss_scale,
+        help="Train-only auxiliary loss scale for matching projected action tokens to per-step clean future latent summaries.",
+    )
+    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -501,6 +510,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_control_aux_loss_scale must be >= 0, got "
             f"{cfg.action_control_aux_loss_scale}."
+        )
+    if cfg.action_token_latent_aux_loss_scale < 0.0:
+        raise ValueError(
+            "action_token_latent_aux_loss_scale must be >= 0, got "
+            f"{cfg.action_token_latent_aux_loss_scale}."
         )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
@@ -732,6 +746,7 @@ def _evaluate_loss(
     action_control_projector_observed_context_mode: str,
     action_hidden_state_bias_scale: float,
     action_control_aux_loss_scale: float,
+    action_token_latent_aux_loss_scale: float,
     t_min: float,
     t_max: float,
     weight_mode: str,
@@ -802,6 +817,14 @@ def _evaluate_loss(
                 z_future_video=z_future_video,
             )
         )
+        loss = loss + (
+            action_token_latent_aux_loss_scale
+            * _compute_action_token_latent_aux_loss(
+                action_encoder=action_encoder,
+                action_tokens=action_tokens,
+                z_future_video=z_future_video,
+            )
+        )
     return float(loss.detach().cpu().item())
 
 
@@ -849,6 +872,7 @@ def _evaluate_validation_loss(
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
+            action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1096,6 +1120,7 @@ def main() -> None:
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
+            action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1166,6 +1191,7 @@ def main() -> None:
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
+            action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,
@@ -1318,6 +1344,7 @@ def main() -> None:
             action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
+            action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,

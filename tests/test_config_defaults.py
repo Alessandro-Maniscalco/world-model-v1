@@ -28,6 +28,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_control_projector_observed_context_mode == "none"
     assert cfg.action_hidden_state_bias_scale == 0.0
     assert cfg.action_control_aux_loss_scale == 0.0
+    assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
     assert cfg.future_chunk_early_bias == 0.0
     assert cfg.teacher_forcing_observation_mode == "full_prefix"
@@ -72,6 +73,7 @@ def test_infer_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_control_projector_init_mode == "zero"
     assert cfg.action_control_projector_observed_context_mode == "none"
     assert cfg.action_hidden_state_bias_scale == 0.0
+    assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
     assert cfg.lora_rank == 8
     assert cfg.lora_alpha == 16

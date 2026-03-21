@@ -7,7 +7,10 @@ import torch.nn as nn
 
 from world_model.models.wan_vace_conditioning import ActionControlProjector, ActionTokenEncoder
 from world_model.training import train_chunkwise_batch
-from world_model.training.chunkwise_training import _compute_action_control_aux_loss
+from world_model.training.chunkwise_training import (
+    _compute_action_control_aux_loss,
+    _compute_action_token_latent_aux_loss,
+)
 from world_model.training.flow_matching import chunkwise_teacher_forcing_loss
 
 
@@ -26,6 +29,7 @@ class _RecordingVideoModel(nn.Module):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
@@ -33,7 +37,7 @@ class _RecordingVideoModel(nn.Module):
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Record structured video-path inputs and return a scaled prediction."""
-        del action_tokens, observed_mask, future_action_control_prior, control_hidden_states_scale
+        del action_tokens, action_image_tokens, observed_mask, future_action_control_prior, control_hidden_states_scale
         self.calls.append(
             {
                 "observed_frames": torch.tensor(observed_video.shape[2]),
@@ -119,6 +123,7 @@ class _ActionTokenOnlyVideoModel(nn.Module):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
@@ -128,6 +133,7 @@ class _ActionTokenOnlyVideoModel(nn.Module):
         """Project active-window action tokens into the leading latent frames."""
         del (
             observed_video,
+            action_image_tokens,
             timestep_t,
             block_causal_attention_mask,
             observed_mask,
@@ -195,6 +201,48 @@ def test_train_chunkwise_batch_reports_unclipped_grad_norm_when_disabled() -> No
 
     assert metrics.loss > 0.0
     assert metrics.grad_norm > 0.0
+
+
+def test_train_chunkwise_batch_reports_action_token_latent_aux_loss() -> None:
+    """Report nonzero action-token aux loss when latent-summary supervision is enabled."""
+    torch.manual_seed(0)
+    model = _RecordingVideoModel()
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16, latent_summary_channels=16)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(action_encoder.parameters()),
+        lr=1e-2,
+    )
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 8, 8, 8),
+        a_plan=torch.randn(2, 8, 6),
+        k=1,
+        t_min=0.5,
+        t_max=0.5,
+        action_token_latent_aux_loss_scale=1.0,
+    )
+
+    assert metrics.loss > 0.0
+    assert metrics.action_token_latent_aux_loss > 0.0
+
+
+def test_compute_action_token_latent_aux_loss_returns_zero_without_aux_head() -> None:
+    """Skip the train-only action-token aux loss when the encoder has no latent head."""
+    action_encoder = ActionTokenEncoder(action_dim=6, hidden_dim=16)
+    action_tokens = action_encoder(torch.randn(2, 8, 6))
+    z_future_video = torch.randn(2, 16, 8, 8, 8)
+
+    loss = _compute_action_token_latent_aux_loss(
+        action_encoder=action_encoder,
+        action_tokens=action_tokens,
+        z_future_video=z_future_video,
+    )
+
+    assert loss.item() == 0.0
 
 
 def test_train_chunkwise_batch_can_match_rollout_future_inputs_with_active_chunk_mode() -> None:

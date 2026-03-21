@@ -391,6 +391,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_control_prior_mode",
         "action_hidden_state_bias_scale",
         "action_control_projector_observed_context_mode",
+        "action_token_latent_aux_loss_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",

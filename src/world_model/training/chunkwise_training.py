@@ -27,6 +27,7 @@ class ChunkwiseStepMetrics:
     per_chunk_losses: tuple[float, ...]
     per_chunk_lengths: tuple[int, ...]
     action_control_aux_loss: float = 0.0
+    action_token_latent_aux_loss: float = 0.0
 
     def to_log_dict(self, *, step: int) -> dict[str, Any]:
         """Convert metrics to a JSON-serializable payload."""
@@ -35,6 +36,7 @@ class ChunkwiseStepMetrics:
             "loss": float(self.loss),
             "grad_norm": float(self.grad_norm),
             "action_control_aux_loss": float(self.action_control_aux_loss),
+            "action_token_latent_aux_loss": float(self.action_token_latent_aux_loss),
             "per_chunk_losses": [float(x) for x in self.per_chunk_losses],
             "per_chunk_lengths": [int(x) for x in self.per_chunk_lengths],
         }
@@ -59,6 +61,7 @@ def train_chunkwise_batch(
     action_control_projector_observed_context_mode: str = "none",
     action_hidden_state_bias_scale: float = 0.0,
     action_control_aux_loss_scale: float = 0.0,
+    action_token_latent_aux_loss_scale: float = 0.0,
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: str = "uniform",
@@ -138,7 +141,16 @@ def train_chunkwise_batch(
             action_control_prior=action_control_prior,
             z_future_video=z_future_video,
         )
-        total_loss = info.loss + (action_control_aux_loss_scale * action_control_aux_loss)
+        action_token_latent_aux_loss = _compute_action_token_latent_aux_loss(
+            action_encoder=action_encoder,
+            action_tokens=action_tokens,
+            z_future_video=z_future_video,
+        )
+        total_loss = (
+            info.loss
+            + (action_control_aux_loss_scale * action_control_aux_loss)
+            + (action_token_latent_aux_loss_scale * action_token_latent_aux_loss)
+        )
 
     if grad_scaler is None:
         total_loss.backward()
@@ -168,6 +180,7 @@ def train_chunkwise_batch(
         loss=float(total_loss.detach().cpu().item()),
         grad_norm=float(grad_norm),
         action_control_aux_loss=float(action_control_aux_loss.detach().cpu().item()),
+        action_token_latent_aux_loss=float(action_token_latent_aux_loss.detach().cpu().item()),
         per_chunk_losses=info.per_chunk_losses,
         per_chunk_lengths=info.per_chunk_lengths,
     )
@@ -231,6 +244,21 @@ def _compute_action_control_aux_loss(
         return z_future_video.new_zeros(())
     target_summary = z_future_video.detach().mean(dim=(3, 4), keepdim=True)
     predicted_summary = action_control_prior.mean(dim=(3, 4), keepdim=True)
+    return torch.nn.functional.mse_loss(predicted_summary, target_summary)
+
+
+def _compute_action_token_latent_aux_loss(
+    *,
+    action_encoder: nn.Module,
+    action_tokens: torch.Tensor,
+    z_future_video: torch.Tensor,
+) -> torch.Tensor:
+    """Match action tokens to per-step clean future latent summaries when available."""
+    predict_summary = getattr(action_encoder, "predict_future_latent_summary", None)
+    if predict_summary is None or getattr(action_encoder, "latent_summary_head", None) is None:
+        return z_future_video.new_zeros(())
+    predicted_summary = predict_summary(action_tokens)
+    target_summary = z_future_video.detach().mean(dim=(3, 4))
     return torch.nn.functional.mse_loss(predicted_summary, target_summary)
 
 

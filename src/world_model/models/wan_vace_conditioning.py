@@ -14,6 +14,7 @@ class ActionTokenEncoder(nn.Module):
         action_dim: int,
         hidden_dim: int,
         *,
+        latent_summary_channels: int = 0,
         mlp_dim: int | None = None,
         mlp_residual: bool = False,
         dropout: float = 0.0,
@@ -30,6 +31,11 @@ class ActionTokenEncoder(nn.Module):
             raise ValueError(f"action_dim must be positive, got {action_dim}")
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if latent_summary_channels < 0:
+            raise ValueError(
+                "latent_summary_channels must be non-negative, got "
+                f"{latent_summary_channels}"
+            )
         if dropout < 0:
             raise ValueError(f"dropout must be non-negative, got {dropout}")
         if temporal_difference_scale < 0:
@@ -62,6 +68,7 @@ class ActionTokenEncoder(nn.Module):
 
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
+        self.latent_summary_channels = int(latent_summary_channels)
         self.input_layernorm = bool(input_layernorm)
         self.mlp_residual = bool(mlp_residual)
         self.order_conditioning = bool(order_conditioning)
@@ -132,6 +139,9 @@ class ActionTokenEncoder(nn.Module):
             nn.init.zeros_(self.temporal_mixer.weight)
             if self.temporal_mixer.bias is not None:
                 nn.init.zeros_(self.temporal_mixer.bias)
+        self.latent_summary_head: nn.Linear | None = None
+        if self.latent_summary_channels > 0:
+            self.latent_summary_head = nn.Linear(self.hidden_dim, self.latent_summary_channels)
 
     def forward(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project `[B, T, A]` actions to `[B, T, D]` Wan cross-attention tokens."""
@@ -175,6 +185,18 @@ class ActionTokenEncoder(nn.Module):
             return tokens
         return tokens * self.token_scale
 
+    def predict_future_latent_summary(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Predict per-step latent summaries `[B,C,T]` from projected action tokens."""
+        if tokens.ndim != 3:
+            raise ValueError(f"tokens must be [B,T,D], got {tuple(tokens.shape)}")
+        if tokens.shape[-1] != self.hidden_dim:
+            raise ValueError(
+                f"tokens last dim D={tokens.shape[-1]} does not match hidden_dim={self.hidden_dim}"
+            )
+        if self.latent_summary_head is None:
+            raise ValueError("latent_summary_head is unavailable because latent_summary_channels=0")
+        return self.latent_summary_head(tokens).permute(0, 2, 1)
+
     def allowed_missing_state_dict_keys(self) -> set[str]:
         """List optional state-dict keys that older checkpoints may legitimately omit."""
         missing: set[str] = set()
@@ -192,6 +214,13 @@ class ActionTokenEncoder(nn.Module):
                 {
                     "temporal_mixer.weight",
                     "temporal_mixer.bias",
+                }
+            )
+        if self.latent_summary_head is not None:
+            missing.update(
+                {
+                    "latent_summary_head.weight",
+                    "latent_summary_head.bias",
                 }
             )
         return missing
