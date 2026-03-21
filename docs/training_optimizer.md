@@ -29,20 +29,21 @@ Important but less-stable takeaways that may change as new experiments land.
 - The stronger `dual_fill` latent-prior routing also stayed plausible but effectively unchanged from the one-sided prior (`late_motion_ratio≈2.06/1.43/2.53`, `mean_frame_mae≈2.91/2.72/2.34`), so the whole latent-prior routing family is now exhausted on the `ctx21/h8` anchor.
 - The hidden-state-bias checkpoint rescue also failed: step `900` stayed visibly late-heavy, worsened main and episode-`1` MAE versus step `1000`, and reintroduced an episode-`2` plausibility failure on frame `21`, so the zero-init hidden-state-bias branch is exhausted.
 - The nonzero-init hidden-state-bias rerun also failed: `action_control_projector_init_mode=linear_default` kept the main clip plus held-out episodes `1` and `2` plausible, but all three windows stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.00/1.43/2.56`) and validation was much weaker than the zero-init rerun (`best_val_loss≈0.1186` vs. `≈0.0283`), so projector init alone does not wake up the latent route.
-- The latent-prior and hidden-state-bias branches add a fresh `ActionControlProjector` on top of old checkpoints. Since both zero-init and linear-init resumes stayed inert over `200` extra steps, the smallest remaining projector-local redesign is to give that fresh projector a direct supervised gradient instead of relying only on indirect denoising loss.
+- The linear-init hidden-state-bias rerun with direct projector supervision also failed to rescue the motion-first ranking: main and episode `1` still stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.15/1.47`), only episode `2` improved to `motion_verdict=good`, and validation stayed very weak (`best_val_loss≈0.2918`, `final≈0.4600`). Aux loss alone is therefore exhausted as an action-only projector fix.
+- The latent-prior and hidden-state-bias branches add a fresh `ActionControlProjector` on top of old checkpoints. Zero-init, linear-init, and aux-loss variants all stayed inert over `200` extra steps when the projector only saw action plus progress features, so the next bounded redesign should add observed-state context rather than another scalar on the action-only projector.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can direct supervision make the fresh `ActionControlProjector` matter on short resumed checkpoints where indirect denoising gradients have stayed inert?
-- Smallest next move: rerun the `ctx21/h8` step-`800` to `1000` hidden-state-bias branch with `action_hidden_state_bias_scale=0.5`, `action_control_projector_init_mode=linear_default`, and the new train-only `action_control_aux_loss_scale=1.0`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If that aux-loss rerun still leaves the same late-heavy pattern, pivot out of local projector-path tweaks to a broader action-projection redesign.
+- Can a fresh latent projector matter on short resumed checkpoints once it sees the last observed latent state instead of only action plus progress features?
+- Smallest next move: rerun the `ctx21/h8` step-`800` to `1000` hidden-state-bias branch with `action_hidden_state_bias_scale=0.5`, `action_control_projector_init_mode=linear_default`, `action_control_aux_loss_scale=1.0`, and `action_control_projector_observed_context_mode=last_frame`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If that observed-context rerun still leaves the same late-heavy pattern, stop local projector-path tweaks and pivot to a different action-conditioning architecture.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the aux-loss hidden-state-bias rerun still barely changes motion timing, what is the smallest justified next redesign: a learned latent-delta projector, a stronger backbone-conditioning change, or abandoning short resumed projector paths entirely?
-- If the aux-loss rerun changes behavior sharply, should the next step be a calibrated aux-loss / hidden-bias sweep or a cleaner ablation of aux supervision vs. hidden-state bias before revisiting multi-chunk rollout?
+- If the observed-context hidden-state-bias rerun still barely changes motion timing, what is the smallest justified next redesign: a learned latent-delta projector, a stronger backbone-conditioning change, or abandoning short resumed projector paths entirely?
+- If the observed-context rerun changes behavior sharply, should the next step be a calibrated observed-context / hidden-bias sweep or a cleaner ablation of state context vs. aux supervision before revisiting multi-chunk rollout?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -59,6 +60,7 @@ Branches that should not get another near-duplicate retry.
 - Latent control-prior routing on `ctx21/h8` step `800`, including `reactive_only` and `dual_fill`.
 - Zero-init hidden-state-bias rescue on `ctx21/h8` step `800`, including checkpoint selection.
 - Linear-init hidden-state-bias rescue without direct projector supervision on `ctx21/h8` step `800`.
+- Linear-init hidden-state-bias rescue with direct projector supervision but no observed latent context on `ctx21/h8` step `800`.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
@@ -81,3 +83,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `6ccb840` (`Fix validation plumbing for action hidden-state bias`): forwards `action_hidden_state_bias_scale` through validation-loss evaluation so hidden-state-bias training runs can complete instead of failing at the first validation step.
 - Commit `cf7ebc9` (`Add configurable action-control projector init`): adds `action_control_projector_init_mode` so resumed latent-prior and hidden-state-bias branches can opt out of the exact-zero projector start that likely left the fresh latent route inert.
 - Commit `81fd6b1` (`Add action-control aux loss`): adds a train-only `action_control_aux_loss_scale` that directly supervises the fresh action-control projector against the clean future latent summary, so short resumed latent branches are no longer learning only through indirect denoising gradients.
+- Commit `0d714da` (`Add observed-context action control projector`): adds `action_control_projector_observed_context_mode` so the fresh latent projector can condition on the pooled last observed latent frame during train, infer, and checkpoint sweeps while keeping the old action-only path unchanged by default.
