@@ -44,19 +44,20 @@ Important but less-stable takeaways that may change as new experiments land.
 - The gradient-checkpointed `ctx21/h8` action-token-latent-aux resume finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but it still showed the same long static hold followed by a late fork snap on all three windows. The reports confirm that it remains `misaligned` everywhere: main `late_motion_ratio≈2.52`, `profile_correlation≈0.21`, `mean_frame_mae≈3.15`; episode `1≈2.04`, `≈0.50`, `≈3.31`; episode `2≈2.95`, `≈0.52`, `≈2.33`, all with plausibility `PASS`. Validation improved strongly through step `950` (`best_val_loss≈0.0554`) before regressing at step `1000` (`val_loss≈0.2248`), but because the last saved checkpoint before regression is only step `900` and the visible failure mode is unchanged across all reviewed windows, local checkpoint-rescue retries do not currently earn another turn.
 - The first observation-only reset on the same `ctx21/h8` / `lora32` geometry (`conditioning_mode=none`, fresh `400` steps) did not produce any videos or checkpoints because it OOMed on the first train step inside the Wan backbone while missing only about `84 MiB`. That leaves the non-action hypothesis open: the result says the fresh no-action control needs a memory-fit rescue, not that observation-only conditioning already failed motion-first.
 - The gradient-checkpointed observation-only fit rescue answered that open question negatively. On the main clip plus held-out episodes `1` and `2`, the fork still stays near its starting pose through most of the final `8` frames and only swings late near the end; the arm-crop sheets show the same delayed commit without the action path, while plausibility stays `PASS` on all three windows. The reports remain `misaligned` everywhere (`late_motion_ratio≈1.87/1.21/1.89`, `profile_correlation≈0.46/0.59/0.53`, `mean_frame_mae≈3.34/2.95/2.85`), and validation already stopped at step `300` after regressing from `best_val_loss≈0.0391` to `≈0.0410`. That makes the failure look backbone/objective-local rather than action-specific.
+- The next structural lever is now a target reformulation rather than another conditioning tweak: because both action-on and observation-only controls keep the fork parked through most of the last `8` frames before a late catch-up swing, the objective can be reframed to predict future latents relative to the last observed latent frame so motion-bearing regions carry more signal than the mostly static background.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- The action-versus-no-action causality question is now answered: the same late-heavy motion survives even when the action path is removed.
-- Before another long command, identify the strongest structural redesign that changes the backbone/objective or data path rather than another nearby conditioning or checkpoint rescue.
-- If work resumes with a new long command, it should test a genuinely different architecture hypothesis instead of another local `ctx21/h8` control.
+- Test the new `future_latent_residual_mode=last_context_frame` structural branch on the canonical `ctx21/h8` / `lora32` observation-only geometry for `400` steps with gradient checkpointing.
+- On the main clip and held-out episodes `1` and `2`, check whether the fork starts moving earlier within the last-horizon sheet instead of staying parked until the final frames.
+- Reject the branch immediately if the residual target only adds blur/ghosting or hurts plausibility without improving motion timing.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- What is the best justified redesign now that both action-conditioned and observation-only controls share the same late-motion failure?
-- Which structural lever should move first: objective timing bias, backbone conditioning geometry, or data/target reformulation?
+- If residual targets do not move commitment earlier, should the next redesign change the denoising objective again or change the data target itself beyond last-frame residualization?
+- If residual targets help the main clip but not held-out episodes, is the next move a longer run in the same branch or a held-out-stability safeguard?
 
 ## Exhausted Families
 Branches that should not get another near-duplicate retry.
@@ -82,6 +83,8 @@ Branches that should not get another near-duplicate retry.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural levers.
+
+- Commit `0f50064` (`Add residual future latent training mode`): adds checkpoint-compatible `future_latent_residual_mode=last_context_frame` to train/infer config, flow-matching training, and rollout sampling so the model can denoise future latents relative to the last observed latent frame instead of absolute latents.
 
 - Commit `17ba95f` (`Cap motion-aware loss weights`): added `motion_loss_max_weight` so motion-aware loss can stay active without letting a few high-motion regions dominate training.
 - Commit `7fe8994` (`Add excess-only motion loss weighting`): added an excess-only weighting mode so motion emphasis can target above-average motion regions instead of boosting all regions equally.
