@@ -89,6 +89,7 @@ class TrainScriptConfig:
     action_control_prior_scale: float = 0.0
     action_control_prior_mode: str = "reactive_only"
     action_control_projector_init_mode: str = "zero"
+    action_control_projector_observed_context_mode: str = "none"
     action_hidden_state_bias_scale: float = 0.0
     action_control_aux_loss_scale: float = 0.0
     action_temporal_difference_scale: float = 0.0
@@ -161,6 +162,7 @@ class InferScriptConfig:
     action_control_prior_scale: float = 0.0
     action_control_prior_mode: str = "reactive_only"
     action_control_projector_init_mode: str = "zero"
+    action_control_projector_observed_context_mode: str = "none"
     action_hidden_state_bias_scale: float = 0.0
     action_temporal_difference_scale: float = 0.0
     action_temporal_mixer_kernel_size: int = 0

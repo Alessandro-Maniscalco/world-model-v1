@@ -199,6 +199,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Initialization mode for the action-to-latent control projector when no projector weights are available in a checkpoint.",
     )
     parser.add_argument(
+        "--action-control-projector-observed-context-mode",
+        choices=("none", "last_frame"),
+        default=defaults.action_control_projector_observed_context_mode,
+        help="Optional observed-latent context pooled into the action-control projector before future broadcast.",
+    )
+    parser.add_argument(
         "--action-hidden-state-bias-scale",
         type=float,
         default=defaults.action_hidden_state_bias_scale,
@@ -315,6 +321,11 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
         raise ValueError(
             f"action_hidden_state_bias_scale must be >= 0, got {cfg.action_hidden_state_bias_scale}"
         )
+    if cfg.action_control_projector_observed_context_mode not in {"none", "last_frame"}:
+        raise ValueError(
+            "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
+            f"{cfg.action_control_projector_observed_context_mode!r}"
+        )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}")
     if cfg.conditioning_mode == "action" and not cfg.checkpoint:
@@ -367,6 +378,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_control_prior_scale",
         "action_control_prior_mode",
         "action_hidden_state_bias_scale",
+        "action_control_projector_observed_context_mode",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",
@@ -1067,6 +1079,11 @@ def main() -> None:
                     prepared.a_plan,
                     latent_height=prepared.z_future_video.shape[3],
                     latent_width=prepared.z_future_video.shape[4],
+                    observed_latents=(
+                        prepared.z_past_video
+                        if cfg.action_control_projector_observed_context_mode != "none"
+                        else None
+                    ),
                 )
         negative_cross_attention_tokens = None
     else:

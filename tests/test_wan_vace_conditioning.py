@@ -262,6 +262,12 @@ def test_action_control_projector_rejects_unknown_init_mode() -> None:
         ActionControlProjector(action_dim=3, latent_channels=5, init_mode="bad_mode")
 
 
+def test_action_control_projector_rejects_unknown_observed_context_mode() -> None:
+    """Reject unsupported observed-context modes before building parameters."""
+    with pytest.raises(ValueError, match="observed_context_mode must be 'none' or 'last_frame'"):
+        ActionControlProjector(action_dim=3, latent_channels=5, observed_context_mode="bad_mode")
+
+
 def test_build_vace_control_tensor_matches_vace_channel_contract() -> None:
     """Build `[inactive; reactive; mask]` channels matching Wan VACE defaults."""
     latents = torch.randn(2, 16, 6, 8, 8)
@@ -320,3 +326,31 @@ def test_action_control_projector_broadcasts_latent_prior_over_space() -> None:
 
     assert prior.shape == (1, 5, 2, 4, 6)
     assert torch.allclose(prior[:, :, :, 0, 0], prior[:, :, :, -1, -1])
+
+
+def test_action_control_projector_can_add_last_observed_latent_context() -> None:
+    """Add a pooled last-frame latent summary when observed context is enabled."""
+    projector = ActionControlProjector(
+        action_dim=3,
+        latent_channels=2,
+        init_mode="zero",
+        observed_context_mode="last_frame",
+    )
+    projector.context_projection.weight.data.copy_(torch.eye(2))
+    projector.context_projection.bias.data.zero_()
+
+    prior = projector(
+        torch.zeros(1, 3, 3),
+        latent_height=2,
+        latent_width=2,
+        observed_latents=torch.tensor(
+            [[
+                [[[1.0, 1.0], [1.0, 1.0]], [[3.0, 3.0], [3.0, 3.0]]],
+                [[[2.0, 2.0], [2.0, 2.0]], [[4.0, 4.0], [4.0, 4.0]]],
+            ]],
+            dtype=torch.float32,
+        ).permute(0, 1, 2, 3, 4),
+    )
+
+    assert prior.shape == (1, 2, 3, 2, 2)
+    assert torch.allclose(prior[:, :, :, 0, 0], torch.tensor([[[3.0, 3.0, 3.0], [4.0, 4.0, 4.0]]]))

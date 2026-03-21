@@ -206,6 +206,7 @@ class ActionControlProjector(nn.Module):
         latent_channels: int,
         *,
         init_mode: str = "zero",
+        observed_context_mode: str = "none",
     ) -> None:
         """Initialize the action-to-latent prior projection layer."""
         super().__init__()
@@ -218,10 +219,19 @@ class ActionControlProjector(nn.Module):
                 "init_mode must be 'zero' or 'linear_default', got "
                 f"{init_mode!r}"
             )
+        if observed_context_mode not in {"none", "last_frame"}:
+            raise ValueError(
+                "observed_context_mode must be 'none' or 'last_frame', got "
+                f"{observed_context_mode!r}"
+            )
         self.action_dim = int(action_dim)
         self.latent_channels = int(latent_channels)
         self.init_mode = str(init_mode)
+        self.observed_context_mode = str(observed_context_mode)
         self.projection = nn.Linear(self.action_dim + 2, self.latent_channels)
+        self.context_projection: nn.Linear | None = None
+        if self.observed_context_mode == "last_frame":
+            self.context_projection = nn.Linear(self.latent_channels, self.latent_channels)
         if self.init_mode == "zero":
             nn.init.zeros_(self.projection.weight)
             if self.projection.bias is not None:
@@ -233,6 +243,7 @@ class ActionControlProjector(nn.Module):
         *,
         latent_height: int,
         latent_width: int,
+        observed_latents: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Project `[B,T,A]` actions into `[B,C,T,H,W]` broadcast latent priors."""
         if a_plan.ndim != 3:
@@ -248,14 +259,65 @@ class ActionControlProjector(nn.Module):
 
         plan_features = torch.cat((_build_plan_progress_features(a_plan), a_plan), dim=-1)
         projected = self.projection(plan_features).permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+        projected = projected + self._build_observed_context_bias(
+            observed_latents=observed_latents,
+            steps=a_plan.shape[1],
+            dtype=projected.dtype,
+            device=projected.device,
+        )
         return projected.expand(-1, -1, -1, latent_height, latent_width)
 
     def allowed_missing_state_dict_keys(self) -> set[str]:
         """List optional projector keys that older checkpoints may legitimately omit."""
-        return {
+        missing = {
             "projection.weight",
             "projection.bias",
         }
+        if self.context_projection is not None:
+            missing.update(
+                {
+                    "context_projection.weight",
+                    "context_projection.bias",
+                }
+            )
+        return missing
+
+    def _build_observed_context_bias(
+        self,
+        *,
+        observed_latents: torch.Tensor | None,
+        steps: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Project pooled observed-latent state into a broadcast future latent bias."""
+        if self.observed_context_mode == "none":
+            if observed_latents is None:
+                return torch.zeros(1, self.latent_channels, steps, 1, 1, device=device, dtype=dtype)
+            return observed_latents.new_zeros(
+                observed_latents.shape[0],
+                self.latent_channels,
+                steps,
+                1,
+                1,
+            ).to(device=device, dtype=dtype)
+        if observed_latents is None:
+            raise ValueError("observed_latents are required when observed_context_mode='last_frame'")
+        if observed_latents.ndim != 5:
+            raise ValueError(
+                f"observed_latents must be [B,C,T,H,W], got {tuple(observed_latents.shape)}"
+            )
+        if observed_latents.shape[1] != self.latent_channels:
+            raise ValueError(
+                "observed_latents channel dim must match latent_channels, got "
+                f"{observed_latents.shape[1]} vs {self.latent_channels}"
+            )
+        if observed_latents.shape[2] <= 0:
+            raise ValueError("observed_latents must include at least one timestep")
+        assert self.context_projection is not None
+        context_summary = observed_latents[:, :, -1].mean(dim=(2, 3))
+        context_bias = self.context_projection(context_summary).to(device=device, dtype=dtype)
+        return context_bias.unsqueeze(2).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, steps, 1, 1)
 
 
 class NullConditioningEncoder(nn.Module):
@@ -292,8 +354,10 @@ class NullActionControlProjector(nn.Module):
         *,
         latent_height: int,
         latent_width: int,
+        observed_latents: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return a zero `[B,C,T,H,W]` latent prior using only batch/time from `a_plan`."""
+        del observed_latents
         if a_plan.ndim != 3:
             raise ValueError(f"a_plan must be [B,T,A], got {tuple(a_plan.shape)}")
         if latent_height <= 0:

@@ -106,6 +106,9 @@ def build_action_control_projector_for_model(
         action_dim=int(prepared_batch.a_plan.shape[-1]),
         latent_channels=int(model.backbone.config.in_channels),
         init_mode=str(getattr(cfg, "action_control_projector_init_mode", "zero")),
+        observed_context_mode=str(
+            getattr(cfg, "action_control_projector_observed_context_mode", "none")
+        ),
     )
 
 
@@ -237,6 +240,7 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_control_prior_scale",
         "action_control_prior_mode",
         "action_control_projector_init_mode",
+        "action_control_projector_observed_context_mode",
         "action_hidden_state_bias_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",

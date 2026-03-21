@@ -1126,6 +1126,11 @@ def _run_checkpoint_world_model(
                 prepared.a_plan,
                 latent_height=prepared.z_future_video.shape[3],
                 latent_width=prepared.z_future_video.shape[4],
+                observed_latents=(
+                    prepared.z_past_video
+                    if getattr(runtime_cfg, "action_control_projector_observed_context_mode", "none") != "none"
+                    else None
+                ),
             )
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         runtime_cfg.wan_vace_model_id,

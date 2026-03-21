@@ -55,6 +55,7 @@ def train_chunkwise_batch(
     teacher_forcing_future_input_mode: str = "full_suffix",
     chunk_schedule_mode: str = "k_plus_one",
     action_control_prior_scale: float = 0.0,
+    action_control_projector_observed_context_mode: str = "none",
     action_hidden_state_bias_scale: float = 0.0,
     action_control_aux_loss_scale: float = 0.0,
     t_min: float = 0.0,
@@ -98,6 +99,9 @@ def train_chunkwise_batch(
                 a_plan,
                 latent_height=z_future_video.shape[3],
                 latent_width=z_future_video.shape[4],
+                observed_latents=(
+                    z_past_video if action_control_projector_observed_context_mode != "none" else None
+                ),
             )
         info = chunkwise_teacher_forcing_loss(
             model,

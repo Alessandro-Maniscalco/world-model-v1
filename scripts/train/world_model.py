@@ -304,6 +304,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Initialization mode for the action-to-latent control projector when a resumed checkpoint has no saved projector weights.",
     )
     parser.add_argument(
+        "--action-control-projector-observed-context-mode",
+        choices=("none", "last_frame"),
+        default=defaults.action_control_projector_observed_context_mode,
+        help="Optional observed-latent context pooled into the action-control projector before future broadcast.",
+    )
+    parser.add_argument(
         "--action-hidden-state-bias-scale",
         type=float,
         default=defaults.action_hidden_state_bias_scale,
@@ -469,6 +475,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
             f"{cfg.action_control_prior_mode!r}."
+        )
+    if cfg.action_control_projector_observed_context_mode not in {"none", "last_frame"}:
+        raise ValueError(
+            "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
+            f"{cfg.action_control_projector_observed_context_mode!r}."
         )
     if cfg.action_hidden_state_bias_scale < 0.0:
         raise ValueError(
@@ -706,6 +717,7 @@ def _evaluate_loss(
     teacher_forcing_future_input_mode: str,
     chunk_schedule_mode: str,
     action_control_prior_scale: float,
+    action_control_projector_observed_context_mode: str,
     action_hidden_state_bias_scale: float,
     action_control_aux_loss_scale: float,
     t_min: float,
@@ -741,6 +753,9 @@ def _evaluate_loss(
                 a_plan,
                 latent_height=z_future_video.shape[3],
                 latent_width=z_future_video.shape[4],
+                observed_latents=(
+                    z_past_video if action_control_projector_observed_context_mode != "none" else None
+                ),
             )
         loss = chunkwise_teacher_forcing_loss(
             model,
@@ -812,6 +827,7 @@ def _evaluate_validation_loss(
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
@@ -1125,6 +1141,7 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
@@ -1275,6 +1292,7 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
             action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             t_min=cfg.t_min,
