@@ -45,19 +45,20 @@ Important but less-stable takeaways that may change as new experiments land.
 - The first observation-only reset on the same `ctx21/h8` / `lora32` geometry (`conditioning_mode=none`, fresh `400` steps) did not produce any videos or checkpoints because it OOMed on the first train step inside the Wan backbone while missing only about `84 MiB`. That leaves the non-action hypothesis open: the result says the fresh no-action control needs a memory-fit rescue, not that observation-only conditioning already failed motion-first.
 - The gradient-checkpointed observation-only fit rescue answered that open question negatively. On the main clip plus held-out episodes `1` and `2`, the fork still stays near its starting pose through most of the final `8` frames and only swings late near the end; the arm-crop sheets show the same delayed commit without the action path, while plausibility stays `PASS` on all three windows. The reports remain `misaligned` everywhere (`late_motion_ratio≈1.87/1.21/1.89`, `profile_correlation≈0.46/0.59/0.53`, `mean_frame_mae≈3.34/2.95/2.85`), and validation already stopped at step `300` after regressing from `best_val_loss≈0.0391` to `≈0.0410`. That makes the failure look backbone/objective-local rather than action-specific.
 - The next structural lever is now a target reformulation rather than another conditioning tweak: because both action-on and observation-only controls keep the fork parked through most of the last `8` frames before a late catch-up swing, the objective can be reframed to predict future latents relative to the last observed latent frame so motion-bearing regions carry more signal than the mostly static background.
+- The first hard-geometry residual-target run failed decisively. On the main clip and held-out episodes `1` and `2`, the prediction stays almost perfectly frozen through frames `14-21`, then breaks into a late brown/green smear from frame `21` onward instead of starting fork motion earlier; all three windows fail plausibility on frames `21-25` and stay `misaligned` (`late_motion_ratio≈3.62/2.55/5.94`, `profile_correlation≈0.01/0.45/0.11`). That rejects `future_latent_residual_mode=last_context_frame` on the full `ctx21/h8` benchmark geometry as a motion-first candidate.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Test the new `future_latent_residual_mode=last_context_frame` structural branch on the canonical `ctx21/h8` / `lora32` observation-only geometry for `400` steps with gradient checkpointing.
-- On the main clip and held-out episodes `1` and `2`, check whether the fork starts moving earlier within the last-horizon sheet instead of staying parked until the final frames.
-- Reject the branch immediately if the residual target only adds blur/ghosting or hurts plausibility without improving motion timing.
+- Before rejecting residual targets globally, test the simpler scout rung: `conditioning_mode=none`, `context_len=17`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `future_latent_residual_mode=last_context_frame`, and `gradient_checkpointing=true`.
+- Check whether that cheaper short-window run starts fork motion before the last two frames instead of staying static and then collapsing.
+- If the scout rung also stays frozen or implausible, treat residual-target reformulation as exhausted and move to a different backbone/objective redesign.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If residual targets do not move commitment earlier, should the next redesign change the denoising objective again or change the data target itself beyond last-frame residualization?
-- If residual targets help the main clip but not held-out episodes, is the next move a longer run in the same branch or a held-out-stability safeguard?
+- If the short-window residual scout wins visually, does that gain transfer back to the harder `ctx21/h8` benchmark geometry?
+- If the scout rung fails too, should the next redesign change the denoising objective again or change the data target itself beyond last-frame residualization?
 
 ## Exhausted Families
 Branches that should not get another near-duplicate retry.
@@ -79,6 +80,7 @@ Branches that should not get another near-duplicate retry.
 - Added-K/V Wan-backbone conditioning on `ctx21/h8`, including LoRA-rank fit retries, gradient checkpointing, and step-`300` checkpoint selection.
 - Direct action-token supervision on `ctx21/h8` step `800`, including the gradient-checkpointed resume from step `800` to `1000`.
 - Observation-only `ctx21/h8` / `lora32` local controls, including the gradient-checkpointed fit rescue.
+- Observation-only residual-target reformulation on the full `ctx21/h8` benchmark geometry.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
