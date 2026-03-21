@@ -4,7 +4,7 @@ Durable facts that should survive multiple controller turns.
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation, treat plausibility as a safety gate, and rank runs motion-first over sharpness or aggregate MAE when the clips stay plausible.
 - The upstream Wan/VACE contract is whole-window inference. In this repo, the closest smoke path is `conditioning_mode=prompt` with `single_chunk_rollout=true` and at least `50` integration steps.
 - The single-chunk simplicity controls are now complete on the canonical episode-`0` / start-`60` window: prompt-only smoke works as a plausible upstream-style path, but action-conditioned runs with `action_scale=0.0`, `1.0`, and `2.0` all keep the same late-heavy motion pattern, so chunking and raw action amplitude are not the main blockers.
-- On the best held-out-safe `ctx21/h8` step-`800` anchor, both projected action-token scaling and the default one-sided latent prior path leave the same late-heavy single-chunk rollout, so the current action-conditioning routes look weakly coupled.
+- On the best held-out-safe `ctx21/h8` step-`800` anchor, projected action-token scaling and both tested latent-prior routes leave the same late-heavy single-chunk rollout, so the current action-conditioning routes into Wan/VACE look weakly coupled.
 - The late-motion failure has survived scalar `ctx21/h8` tweaks, ordered full-plan conditioning, h12/h16 multi-chunk coverage, rollout-prefix and past-only teacher forcing, rollout-matched future inputs, and short-horizon exact-`k` chunk scheduling.
 
 ## Best Run
@@ -26,19 +26,20 @@ Important but less-stable takeaways that may change as new experiments land.
 - The first `action_token_scale=2.0` probe was initially blocked by sweep-wrapper plumbing, but the rerun completed and stayed effectively unchanged from the default single-chunk control (`late_motion_ratio≈2.17`, `profile_correlation≈0.31`, `mean_frame_mae≈2.51`), so post-projection token gain does not rescue the late-motion failure on the canonical window.
 - The matching `action_token_scale=0.0` ablation also stayed visually near-identical to the default single-chunk control while remaining plausible (`late_motion_ratio≈1.92`, `profile_correlation≈0.34`, `mean_frame_mae≈2.48`), so projected action tokens are effectively inert on the canonical `ctx21/h8` step-`800` checkpoint.
 - Resuming the same `ctx21/h8` step-`800` anchor with `action_control_prior_scale=0.5` on the default `reactive_only` latent-prior path also stayed plausible but still late-heavy and `misaligned` across the main clip plus held-out episodes `1` and `2` (`late_motion_ratio≈1.98/1.47/2.39`, `mean_frame_mae≈2.79/2.57/2.26`), so the one-sided latent prior does not rescue the branch either.
+- The stronger `dual_fill` latent-prior routing also stayed plausible but effectively unchanged from the one-sided prior (`late_motion_ratio≈2.06/1.43/2.53`, `mean_frame_mae≈2.91/2.72/2.34`), so the whole latent-prior routing family is now exhausted on the `ctx21/h8` anchor.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can a stronger routing of the existing latent action-control prior rescue the best short-horizon anchor now that the token path and the default one-sided latent prior both look inert?
-- Smallest next structural move: resume `ctx21/h8` step `800` to step `1000` with `action_control_prior_scale=0.5` and `action_control_prior_mode=dual_fill`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If the dual-branch latent prior still leaves the same late-heavy pattern, the next iteration should pivot to a larger action-conditioning redesign instead of more scalar or routing sweeps in this neighborhood.
+- Can the existing action-derived latent signal steer the model once it is added directly to the future latent hidden states before the Wan backbone?
+- Smallest next structural move: resume `ctx21/h8` step `800` to step `1000` with `action_hidden_state_bias_scale=0.5`, keeping `action_control_prior_scale=0.0`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If the direct future-latent bias still leaves the same late-heavy pattern, the next iteration should pivot from conditioning-route tweaks to a stronger train-side action objective or projection redesign.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the dual-branch latent control-prior resume still barely changes motion timing, what is the smallest justified action-conditioning redesign after that: simpler action projection, a different conditioning path, or a stronger train-side action objective?
-- If the latent prior changes behavior sharply, should the next step be a calibrated prior-scale sweep or a cleaner train-side ablation of token vs. latent conditioning before revisiting multi-chunk rollout?
+- If the direct future-latent bias still barely changes motion timing, what is the smallest justified next redesign: simpler action projection, a stronger train-side action objective, or a broader backbone-conditioning change?
+- If the direct future-latent bias changes behavior sharply, should the next step be a calibrated bias-scale sweep or a cleaner train-side ablation of latent-bias vs. token conditioning before revisiting multi-chunk rollout?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -52,7 +53,7 @@ Branches that should not get another near-duplicate retry.
 - Short-horizon exact-`k` rescue on `ctx21/h8/k2`, including checkpoint selection.
 - Single-window inference-side raw action-scale controls on `ctx21/h8` step `800`.
 - Single-window projected-token scale sweeps on `ctx21/h8` step `800`.
-- One-sided latent control-prior routing on `ctx21/h8` step `800` (`action_control_prior_mode=reactive_only`).
+- Latent control-prior routing on `ctx21/h8` step `800`, including `reactive_only` and `dual_fill`.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
@@ -71,3 +72,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `703a306` (`Add action-token output scale`): adds a checkpoint-compatible `action_token_scale` lever so post-projection action-token gain can be tested directly at train or infer time without changing old checkpoints.
 - Commit `16c8f47` (`Plumb action token scale through local sweeps`): adds `--action-token-scale` to `scripts/check/sweep_local_repo_resolutions.py` so the canonical checkpoint-evaluation path can actually run the new token-gain control.
 - Commit `d73b3e9` (`Route latent action priors through both VACE branches`): adds `action_control_prior_mode=dual_fill` so the existing latent prior can modulate both future VACE control branches instead of only the reactive branch.
+- Commit `6006617` (`Add direct action bias to future latents`): adds `action_hidden_state_bias_scale` so the existing action-derived latent signal can bias future latent hidden states directly before the Wan backbone.
