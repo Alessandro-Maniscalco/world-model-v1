@@ -191,6 +191,7 @@ def chunkwise_teacher_forcing_loss(
     motion_loss_alpha: float = 0.0,
     motion_loss_max_weight: float = 0.0,
     motion_loss_excess_only: bool = False,
+    future_latent_residual_mode: str = "none",
     future_loss_early_bias: float = 0.0,
     future_chunk_early_bias: float = 0.0,
     snr_clip_max: float = 5.0,
@@ -217,6 +218,7 @@ def chunkwise_teacher_forcing_loss(
         motion_loss_alpha=motion_loss_alpha,
         motion_loss_max_weight=motion_loss_max_weight,
         motion_loss_excess_only=motion_loss_excess_only,
+        future_latent_residual_mode=future_latent_residual_mode,
         future_loss_early_bias=future_loss_early_bias,
         future_chunk_early_bias=future_chunk_early_bias,
         snr_clip_max=snr_clip_max,
@@ -245,6 +247,7 @@ def _chunkwise_teacher_forcing_video_loss(
     motion_loss_alpha: float,
     motion_loss_max_weight: float,
     motion_loss_excess_only: bool,
+    future_latent_residual_mode: str,
     future_loss_early_bias: float,
     future_chunk_early_bias: float,
     snr_clip_max: float,
@@ -272,9 +275,16 @@ def _chunkwise_teacher_forcing_video_loss(
     if motion_loss_alpha < 0.0:
         raise ValueError(f"motion_loss_alpha must be >= 0, got {motion_loss_alpha}")
     _validate_motion_loss_max_weight(motion_loss_max_weight)
+    _validate_future_latent_residual_mode(future_latent_residual_mode)
     _validate_future_loss_early_bias(future_loss_early_bias)
     _validate_future_chunk_early_bias(future_chunk_early_bias)
 
+    future_residual_base = _build_future_latent_residual_base(
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        future_latent_residual_mode=future_latent_residual_mode,
+    )
+    model_future_video = z_future_video - future_residual_base
     batch_size = z_future_video.shape[0]
     total_future_steps = z_future_video.shape[2]
     schedule = build_chunk_schedule(
@@ -310,11 +320,12 @@ def _chunkwise_teacher_forcing_video_loss(
         ).to(device=z_future_video.device, dtype=z_future_video.dtype)
         chunk_weight = chunk_weight.view(batch_size, 1, 1, 1, 1)
 
-        clean_chunk = z_future_video[:, :, start:end, :, :]
+        absolute_clean_chunk = z_future_video[:, :, start:end, :, :]
+        clean_chunk = model_future_video[:, :, start:end, :, :]
         noisy_chunk, target_chunk = make_noisy_and_target(clean_chunk, t)
 
         noisy_future_input = _select_teacher_forcing_future_input(
-            z_future_video=z_future_video,
+            z_future_video=model_future_video,
             noisy_chunk=noisy_chunk,
             start=start,
             end=end,
@@ -395,12 +406,13 @@ def _chunkwise_teacher_forcing_video_loss(
             pred_chunk=pred_chunk,
             t=t,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
+            future_latent_residual_base=future_residual_base[:, :, start:end, :, :],
         )
 
         sq_err = (pred_chunk - target_chunk).pow(2)
         motion_weight = _compute_motion_loss_weight(
             observed_video=observed_video,
-            clean_chunk=clean_chunk,
+            clean_chunk=absolute_clean_chunk,
             alpha=motion_loss_alpha,
             max_weight=motion_loss_max_weight,
             excess_only=motion_loss_excess_only,
@@ -599,6 +611,7 @@ def _update_predicted_future_prefix(
     pred_chunk: torch.Tensor,
     t: torch.Tensor,
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
+    future_latent_residual_base: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Append the detached clean chunk estimate when predicted-prefix mode is active."""
     if teacher_forcing_observation_mode != "predicted_prefix":
@@ -608,6 +621,8 @@ def _update_predicted_future_prefix(
         pred_chunk=pred_chunk,
         t=t,
     ).detach()
+    if future_latent_residual_base is not None:
+        clean_chunk = clean_chunk + future_latent_residual_base
     if predicted_future_prefix is None:
         return clean_chunk
     return torch.cat([predicted_future_prefix, clean_chunk], dim=2)
@@ -689,6 +704,23 @@ def _compute_motion_loss_weight(
     return weight
 
 
+def _build_future_latent_residual_base(
+    *,
+    z_past_video: torch.Tensor,
+    z_future_video: torch.Tensor,
+    future_latent_residual_mode: str,
+) -> torch.Tensor:
+    """Build the baseline latent video subtracted from future targets before denoising."""
+    if future_latent_residual_mode == "none":
+        return torch.zeros_like(z_future_video)
+    if future_latent_residual_mode == "last_context_frame":
+        return z_past_video[:, :, -1:, :, :].expand(-1, -1, z_future_video.shape[2], -1, -1)
+    raise ValueError(
+        "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
+        f"{future_latent_residual_mode!r}"
+    )
+
+
 def _validate_motion_loss_max_weight(max_weight: float) -> None:
     """Reject invalid motion-loss caps before weighting the latent error."""
     if max_weight < 0.0:
@@ -756,3 +788,12 @@ def _validate_future_chunk_early_bias(bias: float) -> None:
     """Reject invalid early-chunk temporal weighting before loss computation."""
     if bias < 0.0:
         raise ValueError(f"future_chunk_early_bias must be >= 0, got {bias}")
+
+
+def _validate_future_latent_residual_mode(future_latent_residual_mode: str) -> None:
+    """Reject unsupported future-latent target reformulations before loss computation."""
+    if future_latent_residual_mode not in {"none", "last_context_frame"}:
+        raise ValueError(
+            "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
+            f"{future_latent_residual_mode!r}"
+        )

@@ -51,6 +51,7 @@ action_conditioning_window: chunk
 action_order_conditioning: false
 action_control_prior_scale: 0.0
 action_token_scale: 1.0
+future_latent_residual_mode: none
 frame_height: 0
 frame_width: 0
 prompt: ""

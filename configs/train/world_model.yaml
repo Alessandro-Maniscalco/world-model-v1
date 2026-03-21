@@ -21,6 +21,7 @@ weight_decay: 0.0001
 grad_clip_norm: 1.0
 weight_mode: uniform
 motion_loss_alpha: 0.0
+future_latent_residual_mode: none
 t_min: 0.0
 t_max: 1.0
 disable_amp: false

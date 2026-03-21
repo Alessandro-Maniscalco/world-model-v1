@@ -4,6 +4,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 import pytest
 import torch
 from world_model.training.flow_matching import (
+    _build_future_latent_residual_base,
     _compute_future_chunk_early_weight,
     _compute_future_loss_early_weight,
     _compute_motion_loss_weight,
@@ -184,6 +185,35 @@ def test_chunkwise_teacher_forcing_loss_rejects_negative_future_chunk_early_bias
             k=1,
             future_chunk_early_bias=-0.1,
         )
+
+
+def test_chunkwise_teacher_forcing_loss_rejects_unknown_future_latent_residual_mode() -> None:
+    """Reject unsupported future-latent target reformulations."""
+    model = _ChunkActionWindowRecorder()
+
+    with pytest.raises(ValueError, match="future_latent_residual_mode"):
+        chunkwise_teacher_forcing_loss(
+            model,
+            z_past_video=torch.randn(1, 2, 2, 2, 2),
+            z_future_video=torch.randn(1, 2, 2, 2, 2),
+            action_tokens=torch.randn(1, 2, 1),
+            k=1,
+            future_latent_residual_mode="bad_mode",
+        )
+
+
+def test_build_future_latent_residual_base_repeats_last_context_frame() -> None:
+    """Use the last observed latent frame as the residual baseline when requested."""
+    z_past_video = torch.tensor([[[[[1.0]], [[3.0]]]]])
+    z_future_video = torch.zeros(1, 1, 3, 1, 1)
+
+    base = _build_future_latent_residual_base(
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        future_latent_residual_mode="last_context_frame",
+    )
+
+    assert torch.allclose(base, torch.full_like(z_future_video, 3.0))
 
 
 def test_compute_future_chunk_early_weight_emphasizes_earlier_chunks() -> None:

@@ -127,6 +127,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument(
+        "--future-latent-residual-mode",
+        choices=("none", "last_context_frame"),
+        default=defaults.future_latent_residual_mode,
+        help="Optionally sample future latents in residual coordinates relative to the last observed latent frame.",
+    )
+    parser.add_argument(
         "--conditioning-mode",
         choices=("none", "action", "prompt"),
         default=defaults.conditioning_mode,
@@ -397,6 +403,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_temporal_mixer_scale",
         "action_token_scale",
         "chunk_schedule_mode",
+        "future_latent_residual_mode",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:
@@ -1123,6 +1130,7 @@ def main() -> None:
             k=cfg.k,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             integration_steps=cfg.integration_steps,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
             negative_cross_attention_tokens=negative_cross_attention_tokens,
             guidance_scale=cfg.guidance_scale,
             chunk_conditioning=_uses_chunk_conditioning(cfg),

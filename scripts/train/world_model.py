@@ -200,6 +200,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Optional linear loss bonus for earlier autoregressive chunks; 0 disables chunk-position bias.",
     )
     parser.add_argument(
+        "--future-latent-residual-mode",
+        choices=("none", "last_context_frame"),
+        default=defaults.future_latent_residual_mode,
+        help="Optionally predict future latents relative to the last observed latent frame instead of absolute latents.",
+    )
+    parser.add_argument(
         "--teacher-forcing-observation-mode",
         choices=("full_prefix", "past_only", "predicted_prefix"),
         default=defaults.teacher_forcing_observation_mode,
@@ -461,6 +467,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "future_chunk_early_bias must be >= 0, got "
             f"{cfg.future_chunk_early_bias}."
+        )
+    if cfg.future_latent_residual_mode not in {"none", "last_context_frame"}:
+        raise ValueError(
+            "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
+            f"{cfg.future_latent_residual_mode!r}."
         )
     if cfg.teacher_forcing_observation_mode not in {
         "full_prefix",
@@ -769,6 +780,7 @@ def _evaluate_loss(
     motion_loss_alpha: float,
     motion_loss_max_weight: float,
     motion_loss_excess_only: bool,
+    future_latent_residual_mode: str,
     future_loss_early_bias: float,
     future_chunk_early_bias: float,
     device: torch.device,
@@ -823,6 +835,7 @@ def _evaluate_loss(
             motion_loss_alpha=motion_loss_alpha,
             motion_loss_max_weight=motion_loss_max_weight,
             motion_loss_excess_only=motion_loss_excess_only,
+            future_latent_residual_mode=future_latent_residual_mode,
             future_loss_early_bias=future_loss_early_bias,
             future_chunk_early_bias=future_chunk_early_bias,
         )
@@ -895,6 +908,7 @@ def _evaluate_validation_loss(
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
             future_loss_early_bias=cfg.future_loss_early_bias,
             future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,
@@ -1143,6 +1157,7 @@ def main() -> None:
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
             future_loss_early_bias=cfg.future_loss_early_bias,
             future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,
@@ -1214,6 +1229,7 @@ def main() -> None:
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
             future_loss_early_bias=cfg.future_loss_early_bias,
             future_chunk_early_bias=cfg.future_chunk_early_bias,
             grad_clip_norm=cfg.grad_clip_norm,
@@ -1377,6 +1393,7 @@ def main() -> None:
             motion_loss_alpha=cfg.motion_loss_alpha,
             motion_loss_max_weight=cfg.motion_loss_max_weight,
             motion_loss_excess_only=cfg.motion_loss_excess_only,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
             future_loss_early_bias=cfg.future_loss_early_bias,
             future_chunk_early_bias=cfg.future_chunk_early_bias,
             device=device,

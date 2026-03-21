@@ -70,6 +70,7 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" in option_strings
     assert "--action-token-scale" in option_strings
+    assert "--future-latent-residual-mode" in option_strings
     assert "--action-control-prior-mode" in option_strings
     assert "--action-hidden-state-bias-scale" in option_strings
     assert "--hidden-dim" not in option_strings
@@ -594,6 +595,23 @@ def test_infer_script_restores_action_backbone_added_kv_mode_from_checkpoint_def
 
     assert restored.conditioning_mode == "action"
     assert restored.action_backbone_added_kv_mode == "reuse_action_tokens"
+
+
+def test_infer_script_restores_future_latent_residual_mode_from_checkpoint_defaults() -> None:
+    """Reuse saved residual-target sampling mode when the infer config still uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "future_latent_residual_mode": "last_context_frame",
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.future_latent_residual_mode == "last_context_frame"
 
 
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:

@@ -257,6 +257,28 @@ def test_infer_future_videos_chunkwise_applies_classifier_free_guidance() -> Non
     assert torch.allclose(out, torch.full_like(out, 5.0))
 
 
+def test_infer_future_videos_chunkwise_restores_last_context_frame_baseline() -> None:
+    """Add the last observed latent frame back after residual-space sampling."""
+    scheduler = _EchoScheduler()
+    model = _TokenDrivenInferenceModel()
+
+    out = infer_future_videos_chunkwise(
+        model,
+        z_past_video=torch.full((1, 1, 2, 1, 1), 7.0),
+        future_steps=2,
+        cross_attention_tokens=torch.zeros(1, 2, 1),
+        chunk_conditioning=True,
+        single_chunk_rollout=True,
+        block_causal_attention=False,
+        scheduler=scheduler,
+        k=1,
+        integration_steps=1,
+        future_latent_residual_mode="last_context_frame",
+    )
+
+    assert torch.allclose(out, torch.full_like(out, 7.0))
+
+
 def test_select_chunk_conditioning_tokens_slices_multi_chunk_window() -> None:
     """Select only the token window belonging to the active chunk when chunking is enabled."""
     tokens = torch.arange(1 * 6 * 2, dtype=torch.float32).reshape(1, 6, 2)

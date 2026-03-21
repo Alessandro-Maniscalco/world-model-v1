@@ -42,6 +42,7 @@ def infer_future_videos_chunkwise(
     k: int,
     chunk_schedule_mode: str = "k_plus_one",
     integration_steps: int = 20,
+    future_latent_residual_mode: str = "none",
     negative_cross_attention_tokens: torch.Tensor | None = None,
     guidance_scale: float = 1.0,
     chunk_conditioning: bool = True,
@@ -64,6 +65,7 @@ def infer_future_videos_chunkwise(
         single_chunk_rollout=single_chunk_rollout,
         k=k,
         chunk_schedule_mode=chunk_schedule_mode,
+        future_latent_residual_mode=future_latent_residual_mode,
     )
 
     batch_size = z_past_video.shape[0]
@@ -86,6 +88,11 @@ def infer_future_videos_chunkwise(
         width,
         device=z_past_video.device,
         dtype=z_past_video.dtype,
+    )
+    future_residual_base = _build_future_latent_residual_base(
+        z_past_video=z_past_video,
+        future_steps=future_steps,
+        future_latent_residual_mode=future_latent_residual_mode,
     )
 
     for start, end in schedule_boundaries:
@@ -180,7 +187,7 @@ def infer_future_videos_chunkwise(
                 velocity = velocity_uncond + guidance_scale * (velocity - velocity_uncond)
             chunk_state = scheduler.step(velocity, t, chunk_state, generator=generator, return_dict=False)[0]
 
-        pred_future[:, :, start:end, :, :] = chunk_state
+        pred_future[:, :, start:end, :, :] = chunk_state + future_residual_base[:, :, start:end, :, :]
 
     return pred_future
 
@@ -199,6 +206,7 @@ def _validate_video_infer_inputs(
     single_chunk_rollout: bool,
     k: int,
     chunk_schedule_mode: str,
+    future_latent_residual_mode: str,
 ) -> None:
     """Validate structured latent-video inputs for Wan VACE inference sampling."""
     if z_past_video.ndim != 5:
@@ -217,6 +225,11 @@ def _validate_video_infer_inputs(
         raise ValueError(
             "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', "
             f"got {chunk_schedule_mode!r}"
+        )
+    if future_latent_residual_mode not in {"none", "last_context_frame"}:
+        raise ValueError(
+            "future_latent_residual_mode must be 'none' or 'last_context_frame', "
+            f"got {future_latent_residual_mode!r}"
         )
     if cross_attention_tokens.ndim != 3:
         raise ValueError(f"cross_attention_tokens must be [B,S,D], got {tuple(cross_attention_tokens.shape)}")
@@ -296,3 +309,26 @@ def _select_chunk_conditioning_control_prior(
     if future_action_control_prior is None:
         return None
     return future_action_control_prior[:, :, start:end, :, :]
+
+
+def _build_future_latent_residual_base(
+    *,
+    z_past_video: torch.Tensor,
+    future_steps: int,
+    future_latent_residual_mode: str,
+) -> torch.Tensor:
+    """Build the baseline latent video added back after residual-space sampling."""
+    if future_latent_residual_mode == "none":
+        return z_past_video.new_zeros(
+            z_past_video.shape[0],
+            z_past_video.shape[1],
+            future_steps,
+            z_past_video.shape[3],
+            z_past_video.shape[4],
+        )
+    if future_latent_residual_mode == "last_context_frame":
+        return z_past_video[:, :, -1:, :, :].expand(-1, -1, future_steps, -1, -1)
+    raise ValueError(
+        "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
+        f"{future_latent_residual_mode!r}"
+    )

@@ -46,6 +46,7 @@ class TrainScriptConfig:
     motion_loss_alpha: float = 0.0
     motion_loss_max_weight: float = 0.0
     motion_loss_excess_only: bool = False
+    future_latent_residual_mode: str = "none"
     future_loss_early_bias: float = 0.0
     future_chunk_early_bias: float = 0.0
     teacher_forcing_observation_mode: str = "full_prefix"
@@ -172,6 +173,7 @@ class InferScriptConfig:
     action_temporal_mixer_kernel_size: int = 0
     action_temporal_mixer_scale: float = 0.0
     action_token_scale: float = 1.0
+    future_latent_residual_mode: str = "none"
     frame_height: int = 0
     frame_width: int = 0
     prompt: str = ""
