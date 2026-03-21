@@ -1,51 +1,73 @@
 ## Stable Findings
+Durable facts that should survive multiple controller turns.
 
-- Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation and `scripts/check/check_generated_video_plausibility.py` only as a safety gate or tie-breaker.
-- Rank runs motion-first: arm and tool movement outrank whole-frame sharpness and aggregate MAE when the clips remain plausible.
-- The strongest motion-first branch found so far is `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid` at step `800`.
-- The plain `horizon_len=16` family remains relevant as a reduced-distortion reference, but plain h16 continuation and checkpoint selection stayed undercommitted and never produced a motion-first win.
-- The best h16 motion-assisted reference so far is `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p5_resume1000to1200` at step `1200`: cleaner than the stronger h16 motion branches, still undercommitted on the main clip and episode `1`.
-- The local h16 `motion_loss_alpha=0.75` cap and excess-only neighborhood is exhausted. It produced useful diagnostics, but no clean winner over h16 `motion_loss_alpha=0.5`.
-- The temporal-difference action residual was only a partial improvement over plain h16, and its direct interaction with h16 `motion_loss_alpha=0.5` regressed.
-- The temporal action-token mixer produced one plausible structural baseline at step `1200`, but plain continuation to step `1400` regressed, so the remaining issue is still action-magnitude and temporal conditioning rather than color fidelity.
+- Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation, treat plausibility as a safety gate, and rank runs motion-first over sharpness or aggregate MAE when the clips stay plausible.
+- The upstream Wan/VACE contract is whole-window inference. In this repo, the closest smoke path is `conditioning_mode=prompt` with `single_chunk_rollout=true` and at least `50` integration steps.
+- The single-chunk simplicity controls are now complete on the canonical episode-`0` / start-`60` window: prompt-only smoke works as a plausible upstream-style path, but action-conditioned runs with `action_scale=0.0`, `1.0`, and `2.0` all keep the same late-heavy motion pattern, so chunking and raw action amplitude are not the main blockers.
+- On the best held-out-safe `ctx21/h8` step-`800` anchor, both projected action-token scaling and the default one-sided latent prior path leave the same late-heavy single-chunk rollout, so the current action-conditioning routes look weakly coupled.
+- The late-motion failure has survived scalar `ctx21/h8` tweaks, ordered full-plan conditioning, h12/h16 multi-chunk coverage, rollout-prefix and past-only teacher forcing, rollout-matched future inputs, and short-horizon exact-`k` chunk scheduling.
 
 ## Best Run
+Current winners and the ranking takeaway to anchor comparisons.
 
-- Motion-first best run: `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid` at step `800`.
-- Image-quality reference: `optimizer_aloha_static_fork_pick_up_full_320x240_lora8_action` at step `1400`.
-- Clean h16 resume point: `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1` at step `1000`.
-- Best h16 motion-assisted reference: `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p5_resume1000to1200` at step `1200`.
-- Ranking takeaway: use residual step `800` as the motion reference, use normalized step `1400` as the image-quality reference, and treat h16 as a cleaner-but-still-undercommitted family that now needs a different temporal-control lever rather than more plain continuation.
+- Motion-first best overall: `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid` at step `800`.
+- Best held-out-safe action anchor: `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid` at step `800`.
+- Ranking takeaway: use `ctx21/h8` step `800` as the control checkpoint for rollout-structure tests, because it is the strongest action-conditioned anchor that still kept episode-`2` behavior relatively safe.
 
-## Active Decision
+## Findings
+Important but less-stable takeaways that may change as new experiments land.
 
-- `Status`: paused by operator.
-- `Question`: can stronger temporal action conditioning plus a mild motion assist improve commitment on the clean h16 branch without reintroducing the distortion and late-heavy failures from the local h16 scalar sweeps?
-- `Next step`: if optimization resumes, run the clean h16 step-`1000` branch with `action_temporal_mixer_kernel_size=3`, `action_temporal_mixer_scale=0.5`, and `motion_loss_alpha=0.5`, then re-evaluate the standard main clip plus held-out episodes `1` and `2`.
-- `Success signal`: main clip and episode `1` no longer carry `stops_early`, episode `2` remains plausible, and the result beats h16 `motion_loss_alpha=0.5` step `1200` on motion-first ranking.
-- `Exit condition`: if that mixer-plus-motion-loss run still undercommits on the main clip and episode `1` or makes episode `2` implausible, stop spending budget inside this local h16 neighborhood and escalate to a larger action-conditioning change or a distinct longer-context experiment.
+- Longer context helped stability. The `context_len=21`, `horizon_len=8` branch was a meaningful improvement over shorter-memory baselines.
+- The strongest action-conditioned checkpoints remain `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid` at step `800` for raw motion and `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid` at step `800` for held-out safety.
+- The prompt-conditioned single-chunk smoke on episode `0` / start `60` stayed plausible but undercommitted (`motion_verdict=undercommitted`, `late_motion_ratio≈0.43`, `profile_correlation≈0.72`), so the upstream-style Wan/VACE path basically works but does not solve task motion by itself.
+- The action-conditioned `ctx21/h8` step-`800` single-chunk control on the same window still stayed late-heavy and `misaligned` (`late_motion_ratio≈2.11`, `profile_correlation≈0.31`) while remaining plausible, so chunked rollout is not the main cause of the late-motion failure.
+- The zero-action version of that same single-chunk control stayed almost unchanged on motion (`late_motion_ratio≈2.08`, `profile_correlation≈0.31`) while getting blurrier (`mean_frame_mae≈3.95` versus `≈2.41`), so the default action path affects image quality more than it affects the late-motion pattern on the canonical window.
+- Doubling raw action scale on that same single-chunk control also kept the same late-heavy `misaligned` motion (`late_motion_ratio≈2.21`, `profile_correlation≈0.30`) with image quality close to the default action-on case (`mean_frame_mae≈2.53`), so inference-side raw action scaling is exhausted as a causality test.
+- The first `action_token_scale=2.0` probe was initially blocked by sweep-wrapper plumbing, but the rerun completed and stayed effectively unchanged from the default single-chunk control (`late_motion_ratio≈2.17`, `profile_correlation≈0.31`, `mean_frame_mae≈2.51`), so post-projection token gain does not rescue the late-motion failure on the canonical window.
+- The matching `action_token_scale=0.0` ablation also stayed visually near-identical to the default single-chunk control while remaining plausible (`late_motion_ratio≈1.92`, `profile_correlation≈0.34`, `mean_frame_mae≈2.48`), so projected action tokens are effectively inert on the canonical `ctx21/h8` step-`800` checkpoint.
+- Resuming the same `ctx21/h8` step-`800` anchor with `action_control_prior_scale=0.5` on the default `reactive_only` latent-prior path also stayed plausible but still late-heavy and `misaligned` across the main clip plus held-out episodes `1` and `2` (`late_motion_ratio≈1.98/1.47/2.39`, `mean_frame_mae≈2.79/2.57/2.26`), so the one-sided latent prior does not rescue the branch either.
+
+## Active Questions
+The one question to answer next, broken down into the minimum parts.
+
+- Can a stronger routing of the existing latent action-control prior rescue the best short-horizon anchor now that the token path and the default one-sided latent prior both look inert?
+- Smallest next structural move: resume `ctx21/h8` step `800` to step `1000` with `action_control_prior_scale=0.5` and `action_control_prior_mode=dual_fill`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If the dual-branch latent prior still leaves the same late-heavy pattern, the next iteration should pivot to a larger action-conditioning redesign instead of more scalar or routing sweeps in this neighborhood.
+
+## Future Questions
+Questions to revisit only after the simplicity check is answered.
+
+- If the dual-branch latent control-prior resume still barely changes motion timing, what is the smallest justified action-conditioning redesign after that: simpler action projection, a different conditioning path, or a stronger train-side action objective?
+- If the latent prior changes behavior sharply, should the next step be a calibrated prior-scale sweep or a cleaner train-side ablation of token vs. latent conditioning before revisiting multi-chunk rollout?
+- Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
+Branches that should not get another near-duplicate retry.
 
-- Residual-family continuations and nearby width, LR, and action-input-LayerNorm tweaks around residual step `800`.
-- Plain `horizon_len=16` continuation and checkpoint selection inside the clean h16 rerun.
-- Local h16 `motion_loss_alpha=0.75` cap and excess-only sweep.
-- `action_temporal_difference_scale=0.5` as a standalone h16 follow-up.
-- `action_temporal_difference_scale=0.5` plus h16 `motion_loss_alpha=0.5` interaction test.
-- Plain continuation of the temporal action-token mixer from step `1200` to step `1400`.
-- Subset restriction and related dataset-filtering side branches.
+- Residual-family scalar continuations around residual step `800`.
+- Short-horizon `ctx21/h8` scalar shaping: temporal difference, temporal mixer, motion-loss weighting, and early-horizon loss bias.
+- Ordered full-plan conditioning on the `ctx21/h8` anchor.
+- h12/h16 multi-chunk expansion families, including plain `k=2` and `k=3`, chunk-position weighting, motion-loss follow-ups, and checkpoint-selection rescues.
+- Teacher-forcing rollout variants: `past_only`, `predicted_prefix`, and `teacher_forcing_future_input_mode=active_chunk`.
+- Short-horizon exact-`k` rescue on `ctx21/h8/k2`, including checkpoint selection.
+- Single-window inference-side raw action-scale controls on `ctx21/h8` step `800`.
+- Single-window projected-token scale sweeps on `ctx21/h8` step `800`.
+- One-sided latent control-prior routing on `ctx21/h8` step `800` (`action_control_prior_mode=reactive_only`).
+- Dataset-subset restriction side branches.
 
 ## Kept Code Changes
+Still-relevant code-changing commits that remain available as structural levers.
 
 - Commit `17ba95f` (`Cap motion-aware loss weights`): added `motion_loss_max_weight` so motion-aware loss can stay active without letting a few high-motion regions dominate training.
 - Commit `7fe8994` (`Add excess-only motion loss weighting`): added an excess-only weighting mode so motion emphasis can target above-average motion regions instead of boosting all regions equally.
 - Commit `7832e4a` (`Add temporal-difference action residual`): added an optional temporal-difference residual over action tokens without breaking checkpoint compatibility.
 - Commit `5537878` (`Add temporal action-token mixer`): added an optional zero-init temporal mixer over projected action tokens plus backward-compatible checkpoint loading for structural action-conditioning tests.
-
-## Resume From
-
-- Clean h16 resume checkpoint: `runs/optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1/checkpoints/step_0001000.pt`
-- Motion-first reference checkpoint: `runs/optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid/checkpoints/step_0000800.pt`
-- Best h16 motion-assisted reference checkpoint: `runs/optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p5_resume1000to1200/checkpoints/step_0001200.pt`
-- Latest temporal-mixer checkpoint family: `runs/optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_actiontempmixk3s0p5_resume1000to1200/checkpoints/step_0001400.pt`
-- Validation ledger: `runs/training_optimizer/experiment_ledger.md`
+- Commit `7cba14d` (`Add early-horizon loss bias`): added an optional linear temporal loss bias so earlier future frames can be upweighted directly when timing, not plausibility, is the blocking failure.
+- Commit `614c605` (`Add early chunk loss bias`): added a training-only `future_chunk_early_bias` so earlier autoregressive chunks can receive more loss mass without changing inference behavior.
+- Commit `07281db` (`Add past-only teacher forcing mode`): added a training-only `teacher_forcing_observation_mode` / `--teacher-forcing-observation-mode` so later teacher-forced chunks can observe only the true past, directly testing whether future-prefix leakage is driving the late-motion failure.
+- Commit `48f2883` (`Add predicted-prefix teacher forcing`): added a `predicted_prefix` teacher-forcing mode that feeds detached model-predicted clean chunks back as the observed prefix for later chunks, directly testing whether rollout-style prefix feedback is required to fix the late-motion failure.
+- Commit `cc64dce` (`Match teacher forcing future inputs to rollout`): keeps the `teacher_forcing_future_input_mode=active_chunk` lever available if the single-chunk control shows chunking is the real problem and multi-chunk train/infer mismatch is still worth revisiting.
+- Commit `e271c40` (`Add exact-k chunk schedule mode`): keeps exact-`k` rollout available if the single-chunk control wins and chunk-count becomes worth revisiting from a cleaner baseline.
+- Commit `703a306` (`Add action-token output scale`): adds a checkpoint-compatible `action_token_scale` lever so post-projection action-token gain can be tested directly at train or infer time without changing old checkpoints.
+- Commit `16c8f47` (`Plumb action token scale through local sweeps`): adds `--action-token-scale` to `scripts/check/sweep_local_repo_resolutions.py` so the canonical checkpoint-evaluation path can actually run the new token-gain control.
+- Commit `d73b3e9` (`Route latent action priors through both VACE branches`): adds `action_control_prior_mode=dual_fill` so the existing latent prior can modulate both future VACE control branches instead of only the reactive branch.
