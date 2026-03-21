@@ -8,8 +8,8 @@ complexity and the best video link.
 ## Next complexity to test
 Only one, including the rung name and why it is next. It is flexible.
 - Rung: observation-only short-window absolute-target scout.
-- `conditioning_mode=none`, `context_len=17`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`
-- Why next: the short-window residual scout also stayed static through frames `14-16` and then exploded into a pale/brown-green blob on frame `17` for the main clip plus held-out episodes `1` and `2`, so residual targets are exhausted. The simplest remaining discriminator before another code-side redesign is the same cheap short-window scout without residualization, to test whether the easier geometry itself can produce earlier fork motion or whether the whole observation-only family is structurally late.
+- `conditioning_mode=none`, `context_len=17`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200`
+- Why next: the short-window residual scout also stayed static through frames `14-16` and then exploded into a pale/brown-green blob on frame `17` for the main clip plus held-out episodes `1` and `2`, so residual targets are exhausted. The simplest remaining discriminator before another code-side redesign is the same cheap short-window scout without residualization, to test whether the easier geometry itself can produce earlier fork motion or whether the whole observation-only family is structurally late. Per operator guidance, simple low-latent scout runs stop at `200` steps.
 
 ## Best rung for current complexity
 Only one for the current complexity being researched, including the mp4 link
@@ -23,8 +23,12 @@ Clear when complexity increases. Use one point per rung.
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
   treat plausibility as a safety gate, and rank runs visual first
+- Stay on the complexity ladder: find the simplest rung that works, then
+  promote upward one axis at a time.
 - In this repo, the closest local Wan/VACE-style inference contract uses
   `single_chunk_rollout=true` with at least `50` integration steps.
+- For simple runs with few latent steps, cap the scout at `200` training steps
+  before deciding whether that rung earns promotion.
 - The late-motion failure is not obviously action-specific on the harder
   benchmark geometry: observation-only `conditioning_mode=none` also stayed
   late-heavy on `ctx21/h8`, so the backbone/objective must be treated as a
