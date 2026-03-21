@@ -7,18 +7,18 @@ complexity and the best video link.
 
 ## Next complexity to test
 Only one, including the rung name and why it is next. It is flexible.
-- Rung: observation-only short-window residual scout.
-- `conditioning_mode=none`, `context_len=17`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `future_latent_residual_mode=last_context_frame`, `gradient_checkpointing=true`
-- Why next: the harder `ctx21/h8` residual run stayed frozen until frame `21` and then collapsed into a late color-shifted smear on the main clip plus held-out episodes `1` and `2`, so the best remaining residual-target test is the cheaper scout rung before rejecting the reformulation globally.
+- Rung: observation-only short-window absolute-target scout.
+- `conditioning_mode=none`, `context_len=17`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`
+- Why next: the short-window residual scout also stayed static through frames `14-16` and then exploded into a pale/brown-green blob on frame `17` for the main clip plus held-out episodes `1` and `2`, so residual targets are exhausted. The simplest remaining discriminator before another code-side redesign is the same cheap short-window scout without residualization, to test whether the easier geometry itself can produce earlier fork motion or whether the whole observation-only family is structurally late.
 
 ## Best rung for current complexity
 Only one for the current complexity being researched, including the mp4 link
 and a short description of the run.
-- None yet for the short-window residual scout rung.
+- None yet for the short-window absolute-target scout rung.
 
 ## Rung Findings for current complexity
 Clear when complexity increases. Use one point per rung.
-- Hard benchmark residual probe rejected: `conditioning_mode=none`, `ctx21/h8`, `future_latent_residual_mode=last_context_frame`, `gradient_checkpointing=true`, `fresh400` stayed nearly static through frames `14-21` and then broke into a late brown/green smear from frame `21` onward on the main clip and both held-outs; all three windows failed plausibility on frames `21-25`, and the arm-motion reports stayed `misaligned` (`late_motion_ratio≈3.62/2.55/5.94`).
+- Short-window residual scout rejected: `conditioning_mode=none`, `ctx17/h4`, `single_chunk_rollout=true`, `future_latent_residual_mode=last_context_frame`, `gradient_checkpointing=true`, `step_0000200` stayed essentially static through frames `14-16` and then collapsed into a pale/brown-green blob on frame `17` in the main clip plus held-out episodes `1` and `2`; the arm crops never formed a readable fork shape or contact trajectory, all three windows failed plausibility on frame `17`, and the arm-motion reports stayed `misaligned` (`late_motion_ratio≈2.57/3.55/5.89`).
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -29,6 +29,10 @@ Clear when complexity increases. Use one point per rung.
   benchmark geometry: observation-only `conditioning_mode=none` also stayed
   late-heavy on `ctx21/h8`, so the backbone/objective must be treated as a
   first-class suspect, not only the action path.
+- Residual-target reformulation is exhausted: the hard `ctx21/h8` residual run
+  stayed frozen through frames `14-21` before a late smear, and the cheaper
+  `ctx17/h4` scout also stayed static through frames `14-16` before exploding
+  into an implausible blob on frame `17` for the main clip and both held-outs.
 - Longer context helped stability on the harder benchmark geometry, so wins on
   short-window scout rungs should still be rechecked before promoting them to
   the main benchmark.
