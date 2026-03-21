@@ -336,3 +336,14 @@ current decision state and use this ledger only when a turn needs older context.
   - `image_quality_verdict`: all three windows stay plausible and fairly clean, but there is no visible motion-first gain over the latent-prior baselines
   - `continue_training`: no plain continuation; the only remaining cheap rescue in this neighborhood is checkpoint selection at step `900`
   - Why: the last-horizon comparison sheets and arm-crop strips remain visibly late-heavy in all three windows. The reports confirm the same pattern: main `late_motion_ratio≈1.99`, episode `1≈1.41`, and episode `2≈2.47`, all still `misaligned`, while plausibility stays `PASS` with `mean_frame_mae≈2.85/2.59/2.33`. Training also collapsed late again, with `best_val_loss≈0.0283` but `val_loss≈0.2363` at step `1000`. Since only steps `900` and `1000` were saved, step `900` is the smallest remaining rescue before the branch should pivot to a stronger train-side action redesign.
+
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_rerun_resume800to1000` step `900`
+  - `arm_motion_verdict`: still `misaligned` on the main clip plus held-out episodes `1` and `2`, with the same late fork commitment pattern and no motion-first win
+  - `image_quality_verdict`: step `900` looks a bit earlier than step `1000` on the main clip and episode `1`, but it is blurrier there and it reintroduces an episode-`2` plausibility failure on frame `21`
+  - `continue_training`: no more zero-init hidden-state-bias retries in this neighborhood; pivot to a projector redesign instead of another scalar or checkpoint follow-up
+  - Why: the last-horizon comparison sheets still hold too static for too long before late motion. Main `late_motion_ratio≈1.83` and episode `1≈1.37` improve only slightly relative to step `1000`, but both windows get blurrier (`mean_frame_mae≈3.92/4.38` versus `≈2.85/2.59`), and episode `2` regresses from plausible to implausible with `failing_frame_indices=[21]`, `late_motion_ratio≈2.54`, and `mean_frame_mae≈4.06`. That closes the checkpoint-selection rescue. The most plausible explanation is structural: the fresh `ActionControlProjector` on these resumed branches still starts from an exact zero mapping, so it has almost no chance to become useful in only `200` extra steps.
+
+- `cf7ebc9` `Add configurable action-control projector init`
+  - Added `action_control_projector_init_mode` to train/infer configs, CLI parsing, checkpoint-config restore, and runtime projector construction.
+  - Kept the old exact-zero projector start as the default for reproducibility, but added `linear_default` so resumed latent-prior and hidden-state-bias branches can start from a real linear mapping when old checkpoints have no projector weights.
+  - Validated with `116` focused pytest passes plus train/infer CLI smoke checks for `--action-control-projector-init-mode`.

@@ -27,20 +27,21 @@ Important but less-stable takeaways that may change as new experiments land.
 - The matching `action_token_scale=0.0` ablation also stayed visually near-identical to the default single-chunk control while remaining plausible (`late_motion_ratio≈1.92`, `profile_correlation≈0.34`, `mean_frame_mae≈2.48`), so projected action tokens are effectively inert on the canonical `ctx21/h8` step-`800` checkpoint.
 - Resuming the same `ctx21/h8` step-`800` anchor with `action_control_prior_scale=0.5` on the default `reactive_only` latent-prior path also stayed plausible but still late-heavy and `misaligned` across the main clip plus held-out episodes `1` and `2` (`late_motion_ratio≈1.98/1.47/2.39`, `mean_frame_mae≈2.79/2.57/2.26`), so the one-sided latent prior does not rescue the branch either.
 - The stronger `dual_fill` latent-prior routing also stayed plausible but effectively unchanged from the one-sided prior (`late_motion_ratio≈2.06/1.43/2.53`, `mean_frame_mae≈2.91/2.72/2.34`), so the whole latent-prior routing family is now exhausted on the `ctx21/h8` anchor.
-- The rerun of `action_hidden_state_bias_scale=0.5` from the `ctx21/h8` step-`800` anchor stayed plausible on the main clip plus held-out episodes `1` and `2`, but all three windows still showed the same late-heavy `misaligned` motion pattern (`late_motion_ratio≈1.99/1.41/2.47`) and training collapsed late again (`best_val_loss≈0.0283`, `val_loss≈0.2363` at step `1000`).
+- The hidden-state-bias checkpoint rescue also failed: step `900` stayed visibly late-heavy, worsened main and episode-`1` MAE versus step `1000`, and reintroduced an episode-`2` plausibility failure on frame `21`, so the zero-init hidden-state-bias branch is exhausted.
+- The latent-prior and hidden-state-bias branches added a fresh `ActionControlProjector` on top of old checkpoints, and that projector previously started from an exact zero mapping. On 200-step resumes, that likely made the whole latent action route effectively inert, so projector initialization is now the smallest justified redesign.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Is the hidden-state-bias branch truly dead, or is the final checkpoint only hiding the best saved checkpoint before the late validation collapse?
-- Smallest next move: evaluate `runs/optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_rerun_resume800to1000/checkpoints/step_0000900.pt` on the main clip plus held-out episodes `1` and `2`.
-- If step `900` still shows the same late-heavy pattern, pivot from conditioning-route tweaks to a stronger train-side action objective or projection redesign.
+- Can the latent action route finally matter if the fresh `ActionControlProjector` does not start from an exact zero mapping on resumed checkpoints?
+- Smallest next move: rerun the `ctx21/h8` step-`800` to `1000` hidden-state-bias branch with `action_hidden_state_bias_scale=0.5` and `action_control_projector_init_mode=linear_default`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If the nonzero-init projector still leaves the same late-heavy pattern, pivot from conditioning-route tweaks to a stronger train-side action objective or broader action-projection redesign.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If hidden-state-bias step `900` still barely changes motion timing, what is the smallest justified next redesign: simpler action projection, a stronger train-side action objective, or a broader backbone-conditioning change?
-- If hidden-state-bias step `900` changes behavior sharply, should the next step be a calibrated bias-scale sweep or a cleaner train-side ablation of latent-bias vs. token conditioning before revisiting multi-chunk rollout?
+- If the nonzero-init hidden-state-bias rerun still barely changes motion timing, what is the smallest justified next redesign: a stronger train-side action objective, a learned latent-delta projector, or a broader backbone-conditioning change?
+- If the nonzero-init hidden-state-bias rerun changes behavior sharply, should the next step be a calibrated hidden-bias sweep or a cleaner ablation of projector init vs. hidden-state bias before revisiting multi-chunk rollout?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -55,6 +56,7 @@ Branches that should not get another near-duplicate retry.
 - Single-window inference-side raw action-scale controls on `ctx21/h8` step `800`.
 - Single-window projected-token scale sweeps on `ctx21/h8` step `800`.
 - Latent control-prior routing on `ctx21/h8` step `800`, including `reactive_only` and `dual_fill`.
+- Zero-init hidden-state-bias rescue on `ctx21/h8` step `800`, including checkpoint selection.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
@@ -75,3 +77,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `d73b3e9` (`Route latent action priors through both VACE branches`): adds `action_control_prior_mode=dual_fill` so the existing latent prior can modulate both future VACE control branches instead of only the reactive branch.
 - Commit `6006617` (`Add direct action bias to future latents`): adds `action_hidden_state_bias_scale` so the existing action-derived latent signal can bias future latent hidden states directly before the Wan backbone.
 - Commit `6ccb840` (`Fix validation plumbing for action hidden-state bias`): forwards `action_hidden_state_bias_scale` through validation-loss evaluation so hidden-state-bias training runs can complete instead of failing at the first validation step.
+- Commit `cf7ebc9` (`Add configurable action-control projector init`): adds `action_control_projector_init_mode` so resumed latent-prior and hidden-state-bias branches can opt out of the exact-zero projector start that likely left the fresh latent route inert.
