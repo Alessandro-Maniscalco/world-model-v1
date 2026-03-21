@@ -6,6 +6,7 @@ Durable facts that should survive multiple controller turns.
 - The single-chunk simplicity controls are now complete on the canonical episode-`0` / start-`60` window: prompt-only smoke works as a plausible upstream-style path, but action-conditioned runs with `action_scale=0.0`, `1.0`, and `2.0` all keep the same late-heavy motion pattern, so chunking and raw action amplitude are not the main blockers.
 - On the best held-out-safe `ctx21/h8` step-`800` anchor, projected action-token scaling and both tested latent-prior routes leave the same late-heavy single-chunk rollout, so the current action-conditioning routes into Wan/VACE look weakly coupled.
 - The late-motion failure has survived scalar `ctx21/h8` tweaks, ordered full-plan conditioning, h12/h16 multi-chunk coverage, rollout-prefix and past-only teacher forcing, rollout-matched future inputs, and short-horizon exact-`k` chunk scheduling.
+- Wan-side action routing now looks exhausted on the `ctx21/h8` neighborhood: projected-token gain, latent-projector paths, hidden-state bias, and the added-K/V backbone route all failed to produce an earlier held-out-safe fork commitment.
 
 ## Best Run
 Current winners and the ranking takeaway to anchor comparisons.
@@ -37,19 +38,20 @@ Important but less-stable takeaways that may change as new experiments land.
 - The follow-up fresh added-K/V retry with `lora_rank=16` also failed before checkpointing or evaluation, this time missing about `16 MiB`. So the added-K/V hypothesis is still untested on model quality; the only information gained is that this branch still needs a smaller memory footprint on the 16 GB RTX 3080.
 - The base-config fresh added-K/V retry with `lora_rank=8` also failed before checkpointing or evaluation, still inside the Wan/VACE backbone. That closes plain LoRA-rank cuts as a fit strategy for this branch; the next meaningful test is activation-memory reduction via gradient checkpointing, not another smaller rank sweep.
 - The first gradient-checkpointed added-K/V run finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but all three windows still looked late-heavy and `misaligned` (`late_motion_ratio≈2.28/2.03/3.17`, `profile_correlation≈0.28/0.52/0.47`). So the branch is not yet a motion-first win; its only cheap remaining rescue is checkpoint selection because validation kept improving through step `350` before regressing at step `400`.
+- The saved `step_0000300.pt` checkpoint rescue for that same gradient-checkpointed added-K/V run also failed as a motion-first candidate: the main window stayed only barely acceptable while held-out episodes `1` and `2` failed plausibility, and all three windows remained visibly late-heavy and `misaligned`. That closes the whole added-K/V backbone family, not just its final checkpoint.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can a stronger backbone-conditioning route help where all latent-projector variants failed?
-- Smallest next move: evaluate the saved `step_0000300.pt` checkpoint from the gradient-checkpointed added-K/V run on the main clip plus held-out episodes `1` and `2`, because it is the best saved checkpoint before the final regression.
-- If the added-K/V backbone route is still late-heavy or implausible, stop local action-conditioning tweaks in this architecture family and pivot out of Wan-side action routing entirely.
+- Can direct train-only supervision make the existing action-token path causal without adding another Wan-side routing hook?
+- Smallest next move: resume the best held-out-safe `ctx21/h8` step-`800` action checkpoint for `200` more steps with `action_token_latent_aux_loss_scale=1.0`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If direct action-token supervision still barely changes timing or held-out safety, stop local action-conditioning tweaks entirely and pivot to a non-action-conditioning explanation for the late-motion failure.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the added-K/V backbone route still barely changes motion timing, what is the smallest justified next redesign outside Wan-side action routing entirely?
-- If the added-K/V backbone route changes behavior sharply, should the next step be a calibrated fresh-training sweep or a cleaner ablation of cross-attention text tokens vs. added-K/V image tokens?
+- If direct action-token supervision helps, is the next step a fresh `400`-step run from step `0` or a cleaner sweep over the aux-loss scale on the safe `ctx21/h8` anchor?
+- If direct action-token supervision still fails, what is the smallest justified redesign outside local action-conditioning tweaks entirely?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -69,6 +71,7 @@ Branches that should not get another near-duplicate retry.
 - Linear-init hidden-state-bias rescue with direct projector supervision but no observed latent context on `ctx21/h8` step `800`.
 - Linear-init hidden-state-bias rescue with direct projector supervision and observed latent context on `ctx21/h8` step `800`.
 - Fresh latent-projector training on `ctx21/h8`, including the observed-context `fresh400` branch.
+- Added-K/V Wan-backbone conditioning on `ctx21/h8`, including LoRA-rank fit retries, gradient checkpointing, and step-`300` checkpoint selection.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
@@ -93,3 +96,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `81fd6b1` (`Add action-control aux loss`): adds a train-only `action_control_aux_loss_scale` that directly supervises the fresh action-control projector against the clean future latent summary, so short resumed latent branches are no longer learning only through indirect denoising gradients.
 - Commit `0d714da` (`Add observed-context action control projector`): adds `action_control_projector_observed_context_mode` so the fresh latent projector can condition on the pooled last observed latent frame during train, infer, and checkpoint sweeps while keeping the old action-only path unchanged by default.
 - Commit `1717b5f` (`Add action added-K/V backbone path`): mirrors action tokens into Wan's added-K/V image-conditioning slot and keeps those newly introduced image-path weights trainable under LoRA, creating the first non-projector backbone-conditioning route for action.
+- Commit `560fa96` (`Add action-token latent aux loss`): adds a train-only `action_token_latent_aux_loss_scale` that directly supervises projected action tokens against per-step clean future latent summaries, creating the first non-Wan-routing action intervention.
