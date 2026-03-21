@@ -1,14 +1,14 @@
 # world-model-v1
 
-Latent-space world model for LIBERO data using a frozen Wan VAE, chunkwise
-teacher-forced flow matching, and AdaLN-conditioned DiT blocks.
+Latent-space world model for LeRobot data using a frozen Wan VAE, chunkwise
+teacher-forced flow matching, and a Wan VACE-compatible transformer backbone.
 
 ## Architecture Snapshot
 
 - Visual backbone: Wan VAE encoder/decoder (frozen).
-- Prediction backbone: Wan DiT-style wrapper in latent token space.
-- Conditioning: null conditioning for the current future-observation stage, with action conditioning kept available for a later stage.
-- Temporal logic: all masking/splitting/chunking is defined in latent time.
+- Prediction backbone: Wan VACE-compatible transformer in latent video space.
+- Conditioning: action conditioning through Wan cross-attention tokens, with null or prompt conditioning available for diagnostics.
+- Temporal logic: all masking, splitting, and chunking is defined in latent time.
 
 ## Canonical Layout
 
@@ -47,12 +47,12 @@ Training optimization controller:
 python scripts/train/training_optimizer.py --train-config configs/train/aloha_fork_pick_up.yaml --memory-path docs/training_optimizer.md
 ```
 
-Local overfit smoke run:
+ALOHA smoke run:
 
 ```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python scripts/train/world_model.py \
-  --config configs/train/droid_local_smoke.yaml \
-  --video-path runs/check_droid_preview_start25/preview.mp4
+  --config configs/train/aloha_fork_pick_up_smoke.yaml
 ```
 
 Infer:
@@ -81,9 +81,9 @@ On the current development machine, PyTorch reports `bf16_supported=True` for th
 Training dtype: torch.bfloat16
 ```
 
-This reduces activation memory, but it does not make full 1.3B fine-tuning cheap. On a 16 GB GPU, the canonical `480x832` DROID config can still OOM in backward even with bf16 and gradient checkpointing. Use the local smoke config first, then scale up.
+This reduces activation memory, but it does not make full 1.3B fine-tuning cheap. On a 16 GB GPU, full Wan VACE fine-tuning can still OOM in backward even with bf16 and gradient checkpointing. Use the ALOHA smoke config first, then scale up.
 
-The local smoke config also switches `trainable_backbone: head`, which trains only the VACE control patch embedder plus the output head instead of the full 1.3B backbone. That is a plumbing/overfit mode for a 16 GB GPU. The broader `trainable_backbone: vace` option is still available when you want to train the full VACE-side control stack on a larger GPU budget.
+The smoke config switches `trainable_backbone: head`, which trains only the VACE control patch embedder plus the output head instead of the full 1.3B backbone. That is a plumbing/overfit mode for a 16 GB GPU. The broader `trainable_backbone: vace` option is still available when you want to train the full VACE-side control stack on a larger GPU budget.
 
 ## Latent-Time Schedule
 

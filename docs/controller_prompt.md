@@ -1,206 +1,174 @@
 # Shared-Session Controller Prompt
 
 Use this file as the persistent operating contract for the shared Codex session.
-The first session-start prompt inlines this file. Resumed turns refer back to the
-section headings below instead of repeating the whole file.
+The first session-start prompt inlines it. Later turns should refer back to the
+section headings instead of repeating the whole file.
 
-- When deciding what to do next, read `docs/training_optimizer.md` first.
-- Treat `docs/training_optimizer.md` as decision memory only.
-- Use `runs/training_optimizer/experiment_ledger.md` only when you need detailed
-  chronology, older validation notes, or a tie-break against older branches.
-- Default policy: keep making progress until the controller disallows more long
-  commands or the operator asks to stop.
-- Prefer one concrete next action over extended exploration. If progress is still
-  possible, do not stop just to summarize.
+- Read `docs/training_optimizer.md` first.
+- Treat `docs/training_optimizer.md` as decision memory and
+  `runs/training_optimizer/experiment_ledger.md` as chronology only.
+
+Everything is run on a RTX 3080 with 16GB of VRAM.
 
 ## Repo Edits And Rollback
 
-- You may edit tracked repo files directly when a repo edit is the strongest next step.
-- At the start of each fresh shared session, create a session-start git checkpoint
-  commit before making repo edits. Use an empty commit if needed so you do not
-  accidentally include unrelated worktree changes.
-- After every validated repo code change you keep, create a git commit that
-  includes only the files you changed for that step. Do not bundle unrelated user
-  changes into these commits.
-- Validate any repo edits you want to keep before returning your final JSON.
-- Return `repo_edit_status=validated` only when kept repo edits were validated
-  in-session.
-- Return `repo_edit_status=rollback_requested` only when you want the controller
-  to undo every repo edit made during the current turn.
-- Otherwise return `repo_edit_status=none`.
-- Rollback only restores editable repo files. It does not delete or restore
-  artifacts under `runs/`.
+- Repo edits are allowed when they are the strongest next step, including larger
+  structural edits that test one coherent hypothesis better than another narrow
+  sweep.
+- Before editing, create a session-start git checkpoint commit.
+- Keep only validated edits. After any kept validated code change, create a
+  commit containing only your files.
+- Use `repo_edit_status=validated` only for kept validated edits,
+  `rollback_requested` when the controller should undo all edits from this turn,
+  otherwise `none`.
+- Use rollback freely for speculative edits that fail validation or do not earn
+  a better next decision.
+- Rollback affects repo files only, not `runs/`.
 - Record kept code-changing commits in `docs/training_optimizer.md` under
-  `## Kept Code Changes`.
-- Record detailed validation chronology in `runs/training_optimizer/experiment_ledger.md`.
-- Do not record memory-only or ledger-only doc commits under `## Kept Code Changes`.
-- You may delete artifacts under `runs/` only when they are clearly dominated and
-  no longer needed for resume, validation, the latest run, the best run in any
-  branch, or referenced summaries. When unsure, keep them.
+  `## Kept Code Changes`. Put detailed chronology in
+  `runs/training_optimizer/experiment_ledger.md`.
+- Delete `runs/` artifacts only when they are clearly dominated and no longer
+  needed. When unsure, keep them.
 
 ## Long Experiment Commands
 
-- Do not start long-running work inside the shared Codex session.
-- If training or another long experiment is needed, return exactly one shell
-  command string via `run_long_command`.
-- Prefer one bounded shell chain that activates `.venv`, runs
-  `scripts/train/world_model.py` when needed, then runs
-  `scripts/check/sweep_local_repo_resolutions.py` and
-  `scripts/check/check_generated_video_plausibility.py`.
-- Run Python and pytest commands inside `.venv`.
-- The command must produce all artifacts needed for the next validation step: the
-  concrete checkpoint path, the generated MP4, the side-by-side comparison MP4,
-  `plausibility_report.json`, and any arm-motion artifacts emitted by the sweep
-  such as `*_arm_motion_report.json` and `*_arm_crop_comparison.mp4`.
-- Include the concrete checkpoint path, output directory, repo id, episode index,
-  start frame, video key, context length, horizon length, `k`, and resolution in
-  the sweep command.
-- `long_command.reason` must explain why this is the highest-value next bounded action.
-- `long_command.expected_artifacts` must list the concrete artifact paths needed
-  for validation.
-- If a latest run result still needs validation, validate it before launching
-  another long command unless there is a true blocker.
+- Never start long-running work inside the shared session. If needed, return
+  exactly one shell command via `run_long_command`.
+- Run Python and pytest inside `.venv`.
+- Prefer one bounded shell chain: train if needed, then
+  `scripts/check/sweep_local_repo_resolutions.py`.
+- Treat the sweep's `plausibility_report.json` as the canonical plausibility
+  output unless you need separate ad hoc validation.
+- The command must produce the checkpoint path and the artifacts needed for
+  review: generated video, comparison video, plausibility report, and any
+  arm-motion artifacts.
+- Include the concrete checkpoint path, output directory, repo id, episode
+  index, start frame, video key, context length, horizon length, `k`, and
+  resolution in sweep commands.
+- `long_command.reason` should say why this is the highest-value bounded action,
+  justified with concrete video visual description.
+- In-session code edits are effectively free relative to another training or
+  evaluation run.
+- `long_command.expected_artifacts` should list the concrete artifact paths to
+  review.
+- Validate the latest result before launching another long command unless there
+  is a true blocker.
+- Cap new exploratory runs at `400` steps first. Continue to `800` only if the
+  run is still plausible and clearly improving.
+- Prefer the highest expected-value next action for the overall runtime budget.
+  If one structural edit plus one run is more likely to change the outcome than
+  a cheap rescue check, prefer the structural edit.
 
 ## Validation
 
-- Validation stays inside the shared Codex session and should use short commands only.
-- Validate the latest completed result first when one is available.
-- Use `docs/training_optimizer.md` to decide. Use
-  `runs/training_optimizer/experiment_ledger.md` only to recover detailed history.
+- Use short commands only.
 - Review artifacts in this order:
-  - full side-by-side comparison video first (`left=reference`, `right=generated`),
+  - Visual inspection of all videos. Never skip this. `left=target/reference` and `right=prediction`. Begin by reviewing the last `horizon_len` frames.
   - then `*_arm_crop_comparison.mp4` and `*_arm_motion_report.json` if present,
-  - then metrics, logs, extracted frames, or other supporting artifacts as needed.
-- Default video review command shape: `ffplay -loop 0 <comparison_video>`. If the
-  clip is hard to judge in real time, extract frames with
-  `ffmpeg -i <comparison_video> /tmp/<experiment_name>_%03d.png`.
-- Start from concrete visible observations only. Describe what is happening in the
-  generated rollout relative to the reference before proposing causes.
-- Separate observations from hypotheses. Use only a small number of plausible
-  causes and say what remains uncertain.
-- Use these failure classes only as anchors, not as a rigid checklist: motion path
-  mismatch, collapse to a common or default pose, temporal drift, late-rollout
-  degradation, ghosting or instability on moving parts, contact or kinematic
-  inconsistency, and brightness or color artifacts only when actually relevant.
-- Even if a clip looks acceptable, explain the visible evidence that supports that conclusion.
+  - then `plausibility_report.json`,
+  - then `metrics.jsonl` and logs
+  - inspect what you think is useful
+- Watch enough of each reviewed clip to describe the
+  visible motion pattern in sentences, not just labels or metrics.
+- If the video visibly goes bad, `*_arm_motion_report.json` is not needed. Visible collapse, incoherent motion, or late-horizon failure is enough to reject it even when scalar metrics look acceptable.
+- Use `docs/training_optimizer.md` to choose the next step and the ledger only
+  for detail.
 
 ### Motion-First Ranking
 
-- Rank runs by visible task-relevant motion first, not by image sharpness first.
-- For this repo, use this ranking order:
-  - `1. arm/tool movement and commitment`
-  - `2. contact and trajectory correctness`
-  - `3. temporal stability on moving parts`
-  - `4. overall scene fidelity and sharpness`
-  - `5. aggregate metrics such as MAE`
-- Treat `check_generated_video_plausibility.py` as a safety gate and tie-break input.
-- If `*_arm_motion_report.json` is present, use its verdict and flags as
-  supporting evidence, but do not let the JSON override an obvious human-visible
-  motion win or motion failure.
-- Use motion language that is decision-relevant, for example:
-  `best arm movement so far`, `undercommitted`, `stops early`, `distorted late`,
-  `good motion but blurry`, or `sharp but mostly static`.
+- Rank runs by visible task-relevant motion first.
+- Use this order:
+  - `1. visual inspection`
+  - `2. arm/tool movement and commitment`
+  - `3. contact and trajectory correctness`
+  - `4. temporal stability on moving parts`
+  - `5. overall scene fidelity and sharpness`
+  - `6. aggregate metrics such as MAE`
+- Treat plausibility as a safety gate and tie-break input.
+- When visual quality and metrics disagree, trust the video for keep/drop
+  decisions.
+- Use `*_arm_motion_report.json` as supporting evidence, not as a replacement
+  for obvious human-visible judgment.
+- Reasons and findings should mention the main clip and each held-out clip that
+  was reviewed when their visible behavior differs in a decision-relevant way.
 
-### Memory Maintenance
+## Memory Maintenance
 
-- Keep `docs/training_optimizer.md` short and decision-oriented. It should usually
-  fit on one screen without scrolling much.
-- `docs/training_optimizer.md` must contain only these sections:
-  - `## Stable Findings`
-  - `## Best Run`
-  - `## Active Decision`
-  - `## Exhausted Families`
-  - `## Kept Code Changes`
-  - `## Resume From`
-- Section contracts for `docs/training_optimizer.md`:
-  - `## Stable Findings`: only durable facts that still change the next decision;
-    target at most `8` bullets.
-  - `## Best Run`: current winner, required comparison references, and the ranking
-    takeaway that should guide the next move.
-  - `## Active Decision`: the single active question. Use these bullets:
-    `Question`, `Next step`, `Success signal`, and `Exit condition`. If the loop
-    is paused, include `Status` first and keep the paused `Next step` as the
-    concrete resume action.
-  - `## Exhausted Families`: one bullet per branch family or local neighborhood
-    that should not receive another near-duplicate follow-up.
-  - `## Kept Code Changes`: only code-changing commits that still matter to future
-    interpretation. Do not include memory-only doc commits.
-  - `## Resume From`: only the concrete checkpoints, references, and artifact
-    paths needed to restart quickly.
-- `runs/training_optimizer/experiment_ledger.md` is the chronology file. Put
-  detailed validation summaries, archived family notes, and per-run observations there.
-- Delete repeated conclusions instead of restating them in multiple sections.
-- If the latest result is the new best run, update `## Best Run` and remove stale
-  references rather than preserving a full chronology in memory.
+- Keep `docs/training_optimizer.md` short and decision-oriented.
+- It must contain only:
+  - `## Stable Findings`: durable facts.
+  - `## Best Run`: current winner and ranking takeaway.
+  - `## Findings`: important but less-stable takeaways.
+  - `## Active Questions`: the one question to answer next, broken into the minimum parts needed for the next check.
+  - `## Future Questions`: deferred questions to revisit only after the active question is answered.
+  - `## Exhausted Families`: branches that should not get another near-duplicate try.
+  - `## Kept Code Changes`: still-relevant code-changing commits only.
+- Put detailed validation summaries and chronology in
+  `runs/training_optimizer/experiment_ledger.md`.
+- Re-review `## Active Questions` after every validated run and before choosing
+  the next action. Rewrite whenever the latest evidence changes what the
+  next question should be. It may be replaced completely.
+- In memory findings, record the specific visible behavior that changed the
+  decision, especially main-vs-held-out differences in motion timing, contact,
+  and late-horizon artifacts.
+- Delete repeated conclusions instead of restating them.
 
-### Local Neighborhood Control
+## Local Neighborhood Control
 
-- A local neighborhood is a branch family where only one narrow lever is moving,
-  such as checkpoint selection, one scalar sweep, one cap sweep, one context-only
-  sweep, or plain continuation of the same checkpoint family.
-- Every proposed long command must name the local neighborhood it belongs to and
-  the distinct hypothesis it tests beyond the previous run.
-- Do not spend more than `2` non-improving follow-ups inside the same local
-  neighborhood after the current anchor or baseline.
-- If a structural baseline is plausible and its direct continuation regresses, do
-  not run another plain continuation in that same branch. Change one major lever
-  or mark the family exhausted.
-- Do not stack more than one new lever in a run unless the memory explicitly says
-  the single-lever space is exhausted and the new run is an intentional interaction test.
-- If the last `2` runs in a neighborhood both fail to improve the family anchor on
-  the motion-first ranking, add that family to `## Exhausted Families` and move on.
-- Prefer changing neighborhoods over making a third near-duplicate attempt.
+- Every proposed run must name its local neighborhood and the distinct
+  hypothesis it tests.
+- Do not spend more than `2` non-improving follow-ups inside the same
+  neighborhood after the current anchor.
+- If a direct continuation regresses, do not run another plain continuation in
+  that branch. Change one major lever or mark the family exhausted.
+- If the same visible failure survives `3` neighborhoods inside one architecture
+  family, mark that family exhausted and pivot.
+- Once a family looks structurally wrong, prefer one bounded structural edit
+  over several more scalar sweeps.
+- A structural experiment may bundle multiple coordinated code changes when they
+  are all required to test one architecture hypothesis.
 
-### Decision Rule
+## Decision Rule
 
-- After validation, choose among only these outcomes:
-  - make a short validated repo edit if a code change is the strongest next step,
-  - return one bounded `run_long_command` if a sensible next experiment still exists,
-  - return `stop` only if the operator asked to stop, the controller disallows
-    more long commands, or there is a truly unfixable blocker that cannot be
-    resolved in the current turn by short inspection, repo edits, or tests.
-- Treat `stop` as exceptional.
-- Do not use `stop` just because the current branch family, scalar sweep, or
-  local hyperparameter neighborhood looks exhausted.
-- If the latest validation says the next improvement should come from a code-level
-  change, make that repo edit and validate it instead of stopping.
-- Prefer converting "no sensible next experiment" into one small repo edit, test,
-  or validation improvement when there is a plausible code-level lever to try.
+- After validation, do exactly one of:
+  - make a validated repo edit,
+  - return one `run_long_command`,
+  - return `stop` only for explicit operator stop, exhausted long-command
+    budget, or a truly unfixable blocker.
+- `stop` is exceptional. One exhausted family is not enough.
+- If the next improvement likely requires code, make the bounded edit and
+  validate it instead of digging deeper into an architecture family that is not
+  working.
+- Prefer a repo edit, test, or validation improvement over “no sensible next
+  experiment” when a plausible code-level lever exists.
+- Base the choice on the best next action for the total long-run budget, not on
+  the smallest decisive check. A cheap checkpoint-selection pass is not
+  preferred when the visible failure mode already shows the family is exhausted.
+- If validation answers or obsoletes the current active question, update
+  `docs/training_optimizer.md` first and then choose the next action against
+  the new active question, even when that means a full pivot away from the
+  previous neighborhood.
 
 ## Operator Control
 
-- Human messages added directly to the same Codex session are authoritative.
-- If the operator asks to stop after the full loop, finish post-run validation and
-  then return `stop`.
+- Human messages in the same session are authoritative.
+- If the operator asks to stop after the full loop, finish post-run validation
+  and then return `stop`.
 
 ## Ending
 
-- Return one raw JSON object only as your final answer.
-- Always include these top-level keys:
+- Return one raw JSON object only.
+- Always include:
   - `action_type`
   - `summary`
   - `session_work_summary`
   - `repo_edit_status`
   - `long_command`
   - `stop`
-- `action_type` must be either `run_long_command` or `stop`.
-- `summary` must be non-empty and should capture the overall outcome of the latest
-  completed run or latest validated result in one paragraph.
-- `session_work_summary` must be an ordered list of short paragraphs, not fragments.
-- `repo_edit_status` must be one of `none`, `validated`, or `rollback_requested`.
-- Always include both `long_command` and `stop` objects:
-  - When `action_type=run_long_command`, fill `long_command.command`,
-    `long_command.reason`, and `long_command.expected_artifacts`, and leave
-    `stop.reason` empty unless needed.
-  - When `action_type=stop`, set `stop.reason` to the concrete stop reason, and
-    leave `long_command.command` and `long_command.reason` empty with
-    `long_command.expected_artifacts=[]`.
-- Use `action_type=stop` only for these cases:
-  - the operator explicitly asked to stop,
-  - the controller has no remaining long-command budget for this invocation,
-  - a truly unfixable blocker prevents further progress in the current turn even
-    after reasonable short inspection, repo edits, and tests.
-- If you return `stop`, make it a full final summary that can be written directly
-  into a markdown report file.
-- If you return `stop`, make the final item in `session_work_summary` the overall
-  takeaway and the next thing to do if optimization resumes later.
+- `action_type` must be `run_long_command` or `stop`.
+- `repo_edit_status` must be `none`, `validated`, or `rollback_requested`.
+- When `action_type=run_long_command`, fill `long_command.command`,
+  `long_command.reason`, and `long_command.expected_artifacts`.
+- When `action_type=stop`, set `stop.reason` and leave
+  `long_command.command`/`reason` empty with
+  `long_command.expected_artifacts=[]`.

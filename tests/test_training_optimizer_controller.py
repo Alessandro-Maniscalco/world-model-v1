@@ -88,6 +88,54 @@ def test_controller_logs_state_path_at_run_start(
     assert "[controller] state: runs/training_optimizer/controller_state.json" in stdout
 
 
+def test_controller_status_logging_flushes_immediately(monkeypatch) -> None:
+    """Flush controller status prints so piped sessions show startup progress."""
+    captured: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_print(*args: object, **kwargs: object) -> None:
+        captured.append((args, dict(kwargs)))
+
+    monkeypatch.setattr("builtins.print", fake_print)
+
+    controller_module._log_controller_status("hello")
+
+    assert captured == [(("[controller] hello",), {"flush": True})]
+
+
+def test_controller_defaults_codex_timeout_to_twenty_five_minutes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Use a controller-local 25 minute timeout for in-session Codex turns."""
+    state_path, memory_path, prompt_path = _make_controller_paths(tmp_path)
+    train_config_path = tmp_path / "train.yaml"
+    train_config_path.write_text("repo_id: demo\n", encoding="utf-8")
+
+    timeouts: list[int] = []
+
+    monkeypatch.setattr(controller_module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(controller_module, "ensure_codex_chatgpt_login", lambda: None)
+
+    def fake_run_codex_exec(*, timeout_seconds: int, **_: object) -> SimpleNamespace:
+        timeouts.append(timeout_seconds)
+        return SimpleNamespace(
+            payload=_stop_payload("done"),
+            session_id="session-timeout",
+        )
+
+    monkeypatch.setattr(controller_module, "run_codex_exec", fake_run_codex_exec)
+
+    controller_module.run_training_optimization_loop(
+        train_config_path=train_config_path,
+        memory_path=memory_path,
+        prompt_path=prompt_path,
+        state_path=state_path,
+    )
+
+    assert timeouts == [controller_module.DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS]
+    assert controller_module.DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS == 1500
+
+
 def test_missing_train_config_path_fails_fast(tmp_path: Path) -> None:
     """Raise a clear error before starting the controller when the config is missing."""
     state_path, memory_path, prompt_path = _make_controller_paths(tmp_path)
@@ -160,6 +208,8 @@ def test_shared_session_loop_runs_one_full_external_command_cycle(
     assert "First read and adopt docs/controller_prompt.md before doing any work." in prompts[0]
     assert "Read runs/training_optimizer/controller_state.json for the latest controller history" in prompts[0]
     assert "Read train.yaml for the base training configuration." in prompts[0]
+    assert "Optimize for the best next action under long-run experiment cost" in prompts[0]
+    assert "Ground validation summaries and next-action reasons in concrete video observations" in prompts[0]
     assert (
         "At the start of a fresh session, after reading the controller state and optimization memory, "
         "you may delete only clearly dominated checkpoints"
@@ -170,6 +220,10 @@ def test_shared_session_loop_runs_one_full_external_command_cycle(
     assert '"latest_artifacts"' not in prompts[0]
     assert "Check docs/controller_prompt.md before deciding" in prompts[1]
     assert "Read runs/training_optimizer/controller_state.json for the latest controller history" in prompts[1]
+    assert "- ### Motion-First Ranking" in prompts[1]
+    assert "- ## Decision Rule" in prompts[1]
+    assert "Choose the best next action for the overall long-run budget" in prompts[1]
+    assert "Describe the reviewed videos concretely in your summary and reasoning" in prompts[1]
     assert "you may delete only clearly dominated checkpoints" not in prompts[1]
     assert '"state_path": "runs/training_optimizer/controller_state.json"' in prompts[1]
     assert '"latest_result_available": true' in prompts[1]
@@ -316,6 +370,60 @@ def test_initialize_controller_state_resets_or_preserves_run_summaries() -> None
     assert preserved_state["current_invocation_run_summaries"] == ["keep summary"]
 
 
+def test_initialize_controller_state_drops_deleted_successful_latest_result(
+    tmp_path: Path,
+) -> None:
+    """Reopen in-session work when the last successful result was deleted."""
+    expected_artifact = tmp_path / "runs" / "demo" / "comparison.mp4"
+    expected_artifact.parent.mkdir(parents=True, exist_ok=True)
+    expected_artifact.write_text("frame", encoding="utf-8")
+
+    recovered_state = controller_module._initialize_controller_state(
+        state={
+            "status": "running",
+            "phase": "post_run_validation",
+            "session_id": "session-mid-loop",
+            "last_long_command_result": {
+                "returncode": 0,
+                "artifacts": [
+                    {
+                        "path": str(expected_artifact),
+                        "exists": True,
+                        "kind": "expected",
+                    }
+                ],
+            },
+            "latest_artifacts": [
+                {
+                    "path": str(expected_artifact),
+                    "exists": True,
+                    "kind": "expected",
+                }
+            ],
+        },
+        codex_session_id=None,
+        codex_force_fresh_session=False,
+    )
+    assert recovered_state["phase"] == "post_run_validation"
+    assert recovered_state["last_long_command_result"]["returncode"] == 0
+
+    expected_artifact.unlink()
+
+    recovered_state = controller_module._initialize_controller_state(
+        state=recovered_state,
+        codex_session_id=None,
+        codex_force_fresh_session=False,
+    )
+
+    assert recovered_state["session_id"] == "session-mid-loop"
+    assert recovered_state["phase"] == "in_session"
+    assert recovered_state["active_long_command"] is None
+    assert recovered_state["last_long_command_result"] is None
+    assert recovered_state["latest_artifacts"] == []
+    assert recovered_state["history"][-1]["entry_type"] == "state_recovery"
+    assert recovered_state["history"][-1]["reason"] == "deleted_latest_result_artifacts"
+
+
 def test_running_state_reuses_persisted_session_on_new_invocation(
     monkeypatch,
     tmp_path: Path,
@@ -356,6 +464,52 @@ def test_running_state_reuses_persisted_session_on_new_invocation(
     )
 
     assert session_calls == ["session-mid-loop"]
+
+
+def test_render_controller_status_hides_last_stop_fields_while_running(
+    tmp_path: Path,
+) -> None:
+    """Hide stale stop metadata while the controller is actively running."""
+    state_path, _, _ = _make_controller_paths(tmp_path)
+    controller_module.save_controller_state(
+        state_path,
+        {
+            "status": "running",
+            "phase": "in_session",
+            "session_id": "session-mid-loop",
+            "last_stop_reason": "old stop reason",
+            "last_stop_summary_path": str(tmp_path / "runs" / "training_optimizer" / "stop.md"),
+        },
+    )
+
+    status_text = controller_module.render_controller_status(state_path)
+
+    assert "status: running" in status_text
+    assert "last_stop_reason:" not in status_text
+    assert "last_stop_summary_path:" not in status_text
+
+
+def test_render_controller_status_shows_last_stop_fields_when_not_running(
+    tmp_path: Path,
+) -> None:
+    """Keep last stop metadata visible once the controller is no longer running."""
+    state_path, _, _ = _make_controller_paths(tmp_path)
+    summary_path = tmp_path / "runs" / "training_optimizer" / "stop.md"
+    controller_module.save_controller_state(
+        state_path,
+        {
+            "status": "stopped",
+            "phase": "idle",
+            "last_stop_reason": "validation complete",
+            "last_stop_summary_path": str(summary_path),
+        },
+    )
+
+    status_text = controller_module.render_controller_status(state_path)
+
+    assert "status: stopped" in status_text
+    assert "last_stop_reason: validation complete" in status_text
+    assert f"last_stop_summary_path: {summary_path}" in status_text
 
 
 def test_stop_after_full_loop_is_honored_by_validation_turn(

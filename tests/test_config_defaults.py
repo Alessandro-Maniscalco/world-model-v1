@@ -40,7 +40,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.validation_episodes == ()
     assert cfg.validation_split_ratio == 0.1
     assert cfg.validation_max_batches == 8
-    assert cfg.validation_patience_checks == 3
+    assert cfg.validation_patience_checks == 0
     assert cfg.validation_min_relative_improvement == 0.01
     assert cfg.lora_target_modules == (
         "to_q",

@@ -231,6 +231,7 @@ def test_chunkwise_teacher_forcing_loss_chunk_bias_favors_earlier_chunk_errors(m
             noisy_future_video: torch.Tensor,
             observed_video: torch.Tensor,
             action_tokens: torch.Tensor,
+            action_image_tokens: torch.Tensor | None = None,
             timestep_t: torch.Tensor,
             block_causal_attention_mask: torch.Tensor,
             observed_mask: torch.Tensor | None = None,
@@ -240,6 +241,7 @@ def test_chunkwise_teacher_forcing_loss_chunk_bias_favors_earlier_chunk_errors(m
             del (
                 observed_video,
                 action_tokens,
+                action_image_tokens,
                 timestep_t,
                 block_causal_attention_mask,
                 observed_mask,
@@ -302,6 +304,7 @@ class _ChunkActionWindowRecorder:
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
@@ -309,7 +312,7 @@ class _ChunkActionWindowRecorder:
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Capture the active action window and emit zero velocities."""
-        del timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        del action_image_tokens, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
         self.noisy_future_videos.append(noisy_future_video.detach().clone())
         self.action_windows.append(action_tokens.detach().clone())
         self.observed_videos.append(observed_video.detach().clone())
@@ -477,6 +480,7 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
             noisy_future_video: torch.Tensor,
             observed_video: torch.Tensor,
             action_tokens: torch.Tensor,
+            action_image_tokens: torch.Tensor | None = None,
             timestep_t: torch.Tensor,
             block_causal_attention_mask: torch.Tensor,
             observed_mask: torch.Tensor | None = None,
@@ -486,6 +490,7 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
             """Capture observed prefixes and return a constant unit velocity."""
             del (
                 action_tokens,
+                action_image_tokens,
                 timestep_t,
                 block_causal_attention_mask,
                 observed_mask,
@@ -635,6 +640,7 @@ class _ZeroVelocityModel:
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
@@ -645,6 +651,7 @@ class _ZeroVelocityModel:
         del (
             observed_video,
             action_tokens,
+            action_image_tokens,
             timestep_t,
             block_causal_attention_mask,
             observed_mask,

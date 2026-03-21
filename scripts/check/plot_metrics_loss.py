@@ -2,7 +2,7 @@
 
 source .venv/bin/activate
 python scripts/check/plot_metrics_loss.py \
-  runs/hour_test_action/metrics.jsonl \
+  runs/optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h12_lora32_action_noinputln_mlp128resid/metrics.jsonl \
   --rolling-window 50
 """
 
@@ -44,13 +44,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_step_loss_series(metrics_path: Path) -> tuple[list[int], list[float]]:
-    """Load `(step, loss)` pairs from a JSONL metrics file."""
+def load_step_loss_series(
+    metrics_path: Path,
+) -> tuple[list[int], list[float], list[int], list[float]]:
+    """Load training and sparse validation loss series from a JSONL metrics file."""
     if not metrics_path.exists():
         raise FileNotFoundError(f"Metrics file not found: {metrics_path}")
 
     steps: list[int] = []
     losses: list[float] = []
+    val_steps: list[int] = []
+    val_losses: list[float] = []
     with metrics_path.open("r", encoding="utf-8") as file_obj:
         for line_number, raw_line in enumerate(file_obj, start=1):
             line = raw_line.strip()
@@ -63,11 +67,14 @@ def load_step_loss_series(metrics_path: Path) -> tuple[list[int], list[float]]:
                 )
             steps.append(int(payload["step"]))
             losses.append(float(payload["loss"]))
+            if "val_loss" in payload and payload["val_loss"] is not None:
+                val_steps.append(int(payload["step"]))
+                val_losses.append(float(payload["val_loss"]))
 
     if not steps:
         raise ValueError(f"No metric rows found in {metrics_path}.")
 
-    return steps, losses
+    return steps, losses, val_steps, val_losses
 
 
 def build_moving_average(values: list[float], window: int) -> list[float]:
@@ -94,6 +101,8 @@ def plot_loss(
     *,
     steps: list[int],
     losses: list[float],
+    val_steps: list[int],
+    val_losses: list[float],
     output_path: Path,
     rolling_window: int,
     title: str,
@@ -105,6 +114,15 @@ def plot_loss(
     if rolling_window > 1:
         smoothed = build_moving_average(losses, rolling_window)
         axis.plot(steps, smoothed, label=f"moving avg ({rolling_window})", linewidth=2.0)
+    if val_steps:
+        axis.plot(
+            val_steps,
+            val_losses,
+            label="val_loss",
+            linewidth=1.8,
+            marker="o",
+            markersize=4,
+        )
 
     axis.set_title(title)
     axis.set_xlabel("Step")
@@ -121,11 +139,13 @@ def plot_loss(
 def main() -> None:
     """Load a metrics file and save a loss-over-steps plot."""
     args = parse_args()
-    steps, losses = load_step_loss_series(args.metrics_path)
+    steps, losses, val_steps, val_losses = load_step_loss_series(args.metrics_path)
     output_path = args.output if args.output is not None else default_output_path(args.metrics_path)
     plot_loss(
         steps=steps,
         losses=losses,
+        val_steps=val_steps,
+        val_losses=val_losses,
         output_path=output_path,
         rolling_window=args.rolling_window,
         title=args.title,

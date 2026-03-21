@@ -6,33 +6,48 @@ This document describes the current default architecture for the Wan VACE
 world-model path as of March 12, 2026. Training and inference use the Wan
 VACE-compatible path end to end.
 
-## Overview
+## Project goal
 
-The world model predicts future visual observations entirely in the latent space
-of a frozen Wan video VAE. Training keeps the repo's existing chunkwise
-teacher-forcing structure as the outer loop, but replaces the inner denoiser
-with a Wan VACE-compatible backbone vendored from upstream Wan code.
+Build a latent-space, action-conditioned world model for LIBERO that predicts
+future visual observations using a Wan VACE-compatible diffusion transformer,
+following the repo's chunkwise teacher-forcing flow-matching style without
+predicting actions.
+
+Target conditional distribution:
+
+$$
+\pi_\theta\!\left(o_{t:t+H}\mid o_{t-\ell:t}, a_{t:t+H-1}\right)
+$$
+
+Key decisions:
+
+1. Dataset: LeRobot, starting with `lerobot/libero` at 10 Hz.
+2. Visual representation: Wan2.1 pretrained video VAE, frozen.
+3. Backbone: Wan2.1 VACE 1.3B transformer, fine tuned through a local adapter.
+4. Conditioning: actions enter as Wan cross-attention tokens and past observed
+   latents enter through the VACE control stream.
+5. Temporal definition: all causality, chunking, masking, and objectives are defined in latent time, because the VAE may change the effective timestep count.
 
 ## Optimizer control plane
 
-The staged training optimizer is now split into two explicit roles:
+The staged training optimizer uses one shared-session controller:
 
-1. Codex planning and analysis:
-   - `scripts/train/training_optimizer.py --planner codex` uses the local
-     `codex` CLI, authenticated through ChatGPT sign-in, to decide whether the
-     next loop action should be `run_experiment`, `inspect_artifact`,
-     `apply_repo_edit`, or `stop`
-   - Codex can inspect comparison artifacts and propose validated repo edits,
-     including training-logic fixes, but it does not directly own the
-     long-running training/eval subprocesses
-2. Deterministic controller execution:
-   - `src/world_model/optimization/controller.py` remains the executor for
-     actual training, checkpoint sweep, plausibility checks, state persistence,
-     budget enforcement, lockfiles, and edit rollback on failed validation
+1. `scripts/train/training_optimizer.py`
+   - exposes the CLI for the optimizer loop
+   - passes the train config, prompt, memory markdown, and shared controller
+     state path into the controller runtime
+2. `src/world_model/optimization/controller.py`
+   - owns the persistent Codex session, snapshot/rollback protection, state
+     persistence, and bounded long-command execution
+   - keeps short inspection and repo-edit work inside the Codex session while
+     launching long training and sweep commands outside the chat session
+3. `src/world_model/optimization/codex_runner.py`
+   - wraps `codex exec` with ChatGPT-login checks and structured JSON output
+     parsing for controller turns
 
-This keeps the autonomous loop auditable: model judgment is used only for
-planning and analysis, while execution, validation, and recovery stay local and
-deterministic.
+This keeps the autonomous loop auditable: short model-guided analysis happens
+in a persistent local session, while long execution, validation, and recovery
+stay explicit and local.
 
 Canonical checkpoint format:
 
@@ -54,10 +69,12 @@ Current parameter sources in the default VACE path are:
      `load_pretrained_backbone=true`
 3. Locally initialized and then trained when applicable:
    - the action-token encoder in `wan_vace_conditioning.py`
+   - the action-control projector in `wan_vace_conditioning.py`
    - or the null-conditioning encoder, which has no learned parameters
 4. Imported as local fine-tune overlays when a repo checkpoint is provided:
    - `model_state_dict` for the Wan VACE world-model module
    - `action_encoder_state_dict` for the action-token encoder
+   - `action_control_projector_state_dict` for the latent control-prior path
 
 The current training code supports four backbone policies:
 
@@ -120,12 +137,43 @@ Temporally, the rule is exact rather than a generic `T/4`:
 
 ### Action window alignment
 
-Action conditioning exactly matches the sampled video window. Because the Wan VAE compresses time by a factor of 4, a single latent step represents a 4-frame chunk. 
+Action conditioning is built in latent time. Because the Wan VAE compresses
+time by a factor of 4, a single latent step represents a 4-frame chunk.
 
 To prevent data loss (especially for high-frequency, continuous tasks like ALOHA), we do **not** use nearest-neighbor sampling. Instead, the action-plan builder flattens the 4 raw actions within each block into a single dense token:
 
 1. `[B, 4*T_latent, A]` (frame-rate) -> flattened to $`a_{plan} \in \mathbb{R}^{B \times T_{hor}^{lat} \times (4A)}`$
 
+### ALOHA motor-signal semantics
+
+Each ALOHA fork-pick-up frame has 6 arm joints plus 1 gripper for two arms and carries three aligned length-14 motor vectors:
+
+1. `observation.state`: position-like measurement of each motor/joint
+2. `action`: commanded target position-like value
+3. `observation.effort`: raw motor current/load-style signal
+
+
+Example for `motor_0` in episode `0`:
+
+| frame | state_0 | effort_0 | action_0 |
+| --- | ---: | ---: | ---: |
+| 0 | 0.0015339808 | 0.0 | 0.0046019424 |
+| 1 | 0.0015339808 | 0.0 | 0.0061359233 |
+| 2 | 0.0015339808 | 18.8299999 | 0.0046019424 |
+
+Those repeated action values line up almost exactly with a single servo
+position tick:
+
+1. `2π / 4096 ≈ 0.0015339808`
+2. `0.0046019424 ≈ 3` ticks
+3. `0.0061359233 ≈ 4` ticks
+
+This makes the repeated `action` values easier to interpret: they are
+consistent with quantized joint-position targets rather than arbitrary floating
+point noise.
+
+For prediction, this `action` vector is the key signal: it is the commanded
+future control input.
 
 Training inherits a spatial alignment constraint from this frozen codec and
 the Wan backbone. The shared preprocessing path center-crops RGB frames so
@@ -161,6 +209,60 @@ The trainer still owns:
 
 This logic stays local to the repo rather than being pushed into the vendored
 Wan backbone.
+
+### How K+1 chunking works
+
+The repo defines chunking over future latent timesteps only. The config value
+`k` does not mean "number of chunks"; it means "build `k + 1` contiguous future
+chunks."
+
+The schedule builder in `src/world_model/chunking/schedule.py` does exactly
+this:
+
+1. let `num_chunks = k + 1`
+2. divide `future_steps` latent timesteps as evenly as possible across those
+   chunks
+3. assign any remainder to the earliest chunks
+4. emit contiguous `(start, end)` boundaries plus one `chunk_id` per future
+   latent timestep
+
+So if `future_steps = 10` and `k = 2`, the future window is split into `3`
+chunks with sizes `[4, 3, 3]`, boundaries `((0, 4), (4, 7), (7, 10))`, and
+chunk ids `[0, 0, 0, 0, 1, 1, 1, 2, 2, 2]`.
+
+Past/context latent steps are not part of that K+1 split. When the repo needs
+chunk ids for the full `[past, future]` sequence, every past latent step
+receives chunk id `-1`, and only the future suffix uses chunk ids `0..k`.
+
+At training stage `j`, the schedule is used as follows:
+
+1. chunks `< j` are moved into `observed_video` as clean teacher-forced
+   history
+2. chunk `j` is the active supervised chunk, so it is the only chunk that gets
+   noised and the only chunk that contributes to the loss
+3. chunks `> j` remain present in the future suffix tensor as clean latents,
+   but they carry larger chunk ids and are blocked by the block-causal
+   self-attention mask
+4. the cross-attention action tokens can either be sliced to the active chunk
+   boundary (`action_conditioning_window=chunk`) or reused as the full future
+   plan on every chunk (`action_conditioning_window=full`)
+5. the action-derived latent control prior is aligned to the same denoised
+   future tensor: chunk mode fills only the active chunk inside the suffix,
+   while full-plan mode uses the future suffix starting at the current chunk
+
+At inference, the same boundaries are reused but teacher forcing disappears:
+
+1. chunk `0` starts from Gaussian noise and is denoised using the real context
+2. once a chunk is finished, its prediction is appended to `observed_video`
+3. the next chunk is then denoised conditioned on context plus previously
+   generated chunks
+4. if `single_chunk_rollout=true`, or if the future window is shorter than
+   `k + 1`, inference collapses to one full future chunk instead
+
+Training is stricter than inference here. Training fails fast if latent-time
+compression leaves fewer than `k + 1` future latent steps, because a true K+1
+schedule would be impossible. Inference is allowed to collapse to one chunk for
+short-horizon or upstream-style smoke-test runs.
 
 ### Inner Wan VACE-compatible denoiser
 
@@ -229,7 +331,11 @@ Stage 2: per-token projection into Wan text width
    - `Linear(D_in, D_wan_text)`
    - `Dropout`
 3. the result has shape `[B, T_future_latent, D_wan_text]`
-4. those projected tokens are then passed to Wan as `encoder_hidden_states`
+4. optional order conditioning adds a learned continuous-time feature from
+   `[p, 1-p]` at each latent step before any temporal mixing
+5. optional temporal-difference and temporal-mixer residuals then operate on
+   the projected tokens
+6. those projected tokens are then passed to Wan as `encoder_hidden_states`
 
 An optional 2-layer MLP variant exists in the encoder implementation when
 `mlp_dim` is set, but the current factory path uses the default shallow
@@ -238,7 +344,20 @@ projection. So the active action encoder is best described as:
 1. exact future action chunking at the data level
 2. flattening within each Wan 4-frame future block
 3. independent per-block projection with `LayerNorm + Linear`
-4. no temporal mixing between action blocks inside the local encoder
+4. optional continuous order features over latent-time progress
+5. optional lightweight temporal residuals inside the local encoder
+
+The ordered-plan path also adds a second local module:
+
+1. `ActionControlProjector` receives the same `a_plan`
+2. it concatenates the continuous order features `[p, 1-p]` to each raw action
+   token
+3. it projects those per-step features into latent channels
+4. the result is broadcast over latent space to produce
+   `[B, C_lat, T_future_latent, H_lat, W_lat]`
+5. `WanVACEWorldModel` adds that tensor, scaled by
+   `action_control_prior_scale`, to the future gray VACE filler latents before
+   building `[inactive; reactive; mask]`
 
 This is deliberate for the current world-model stage. It preserves short-range
 control detail from datasets like ALOHA while keeping the Wan-compatible
@@ -653,8 +772,9 @@ Chunk stage $j$ supervises only the active future chunk of length $\Delta_j$,
 with $N_j$ equal to the number of latent elements in that chunk.
 $\tilde{z}_{j:}^{(j)}$ is the future suffix whose first chunk is noised at
 level $t_j$ and whose later suffix remains clean, $z_{<j}$ are the earlier
-future chunks exposed through teacher forcing via `observed_video`, $a_{j:}$
-are the aligned action tokens sliced from the active chunk onward, and $M_j$
+future chunks exposed through teacher forcing via `observed_video`, $a_j$
+are either the active action chunk or the full future action plan depending on
+`action_conditioning_window`, and $M_j$
 is the block-causal attention mask for that stage. In implementation, the loss
 is a weighted mean squared error over all supervised chunk elements, not a
 plain `1 / K` average over chunks.

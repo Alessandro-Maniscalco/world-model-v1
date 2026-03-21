@@ -8,6 +8,7 @@ Durable facts that should survive multiple controller turns.
 - The late-motion failure has survived scalar `ctx21/h8` tweaks, ordered full-plan conditioning, h12/h16 multi-chunk coverage, rollout-prefix and past-only teacher forcing, rollout-matched future inputs, and short-horizon exact-`k` chunk scheduling.
 - Wan-side action routing now looks exhausted on the `ctx21/h8` neighborhood: projected-token gain, latent-projector paths, hidden-state bias, and the added-K/V backbone route all failed to produce an earlier held-out-safe fork commitment.
 - Direct train-only supervision on the existing action tokens also failed to wake up the `ctx21/h8` step-`800` anchor, so the local action-conditioning family is now exhausted rather than just the Wan-side routing subfamily.
+- The late-motion failure is not specific to the action path: the fresh observation-only `conditioning_mode=none` control on the same `ctx21/h8` / `lora32` geometry also fit under gradient checkpointing and still stayed late-heavy on the main clip plus held-out episodes `1` and `2`.
 
 ## Best Run
 Current winners and the ranking takeaway to anchor comparisons.
@@ -41,19 +42,21 @@ Important but less-stable takeaways that may change as new experiments land.
 - The saved `step_0000300.pt` checkpoint rescue for that same gradient-checkpointed added-K/V run also failed as a motion-first candidate. On the main clip, the fork still sits near its starting pose through most of the last-horizon sheet and only starts swinging near the end; on held-out episodes `1` and `2`, the same late snap comes with visible blur/ghosting around the tool tip and contact region, matching plausibility failures on frame `21` for episode `1` and frames `21-22` for episode `2`. All three windows remain visibly late-heavy and `misaligned`, so the whole added-K/V backbone family is closed.
 - The first `ctx21/h8` action-token-latent-aux resume from step `800` did not produce a model result yet: it resumed correctly, skipped optimizer restore because the new aux head is optional, then OOMed on the first train step inside the Wan/VACE backbone while missing only about `16 MiB`. So the hypothesis remains open; only the initial memory budget was too tight.
 - The gradient-checkpointed `ctx21/h8` action-token-latent-aux resume finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but it still showed the same long static hold followed by a late fork snap on all three windows. The reports confirm that it remains `misaligned` everywhere: main `late_motion_ratio≈2.52`, `profile_correlation≈0.21`, `mean_frame_mae≈3.15`; episode `1≈2.04`, `≈0.50`, `≈3.31`; episode `2≈2.95`, `≈0.52`, `≈2.33`, all with plausibility `PASS`. Validation improved strongly through step `950` (`best_val_loss≈0.0554`) before regressing at step `1000` (`val_loss≈0.2248`), but because the last saved checkpoint before regression is only step `900` and the visible failure mode is unchanged across all reviewed windows, local checkpoint-rescue retries do not currently earn another turn.
+- The first observation-only reset on the same `ctx21/h8` / `lora32` geometry (`conditioning_mode=none`, fresh `400` steps) did not produce any videos or checkpoints because it OOMed on the first train step inside the Wan backbone while missing only about `84 MiB`. That leaves the non-action hypothesis open: the result says the fresh no-action control needs a memory-fit rescue, not that observation-only conditioning already failed motion-first.
+- The gradient-checkpointed observation-only fit rescue answered that open question negatively. On the main clip plus held-out episodes `1` and `2`, the fork still stays near its starting pose through most of the final `8` frames and only swings late near the end; the arm-crop sheets show the same delayed commit without the action path, while plausibility stays `PASS` on all three windows. The reports remain `misaligned` everywhere (`late_motion_ratio≈1.87/1.21/1.89`, `profile_correlation≈0.46/0.59/0.53`, `mean_frame_mae≈3.34/2.95/2.85`), and validation already stopped at step `300` after regressing from `best_val_loss≈0.0391` to `≈0.0410`. That makes the failure look backbone/objective-local rather than action-specific.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Local action-conditioning tweaks are now exhausted on the best held-out-safe `ctx21/h8` anchor.
-- There is no justified next long command inside the current hypothesis family that outranks a hypothesis reset.
-- If work resumes, pivot to a non-action-conditioning explanation for the late-motion failure instead of another nearby action-path retry.
+- The action-versus-no-action causality question is now answered: the same late-heavy motion survives even when the action path is removed.
+- Before another long command, identify the strongest structural redesign that changes the backbone/objective or data path rather than another nearby conditioning or checkpoint rescue.
+- If work resumes with a new long command, it should test a genuinely different architecture hypothesis instead of another local `ctx21/h8` control.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- What is the best justified redesign outside local action-conditioning tweaks entirely?
-- Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
+- What is the best justified redesign now that both action-conditioned and observation-only controls share the same late-motion failure?
+- Which structural lever should move first: objective timing bias, backbone conditioning geometry, or data/target reformulation?
 
 ## Exhausted Families
 Branches that should not get another near-duplicate retry.
@@ -74,6 +77,7 @@ Branches that should not get another near-duplicate retry.
 - Fresh latent-projector training on `ctx21/h8`, including the observed-context `fresh400` branch.
 - Added-K/V Wan-backbone conditioning on `ctx21/h8`, including LoRA-rank fit retries, gradient checkpointing, and step-`300` checkpoint selection.
 - Direct action-token supervision on `ctx21/h8` step `800`, including the gradient-checkpointed resume from step `800` to `1000`.
+- Observation-only `ctx21/h8` / `lora32` local controls, including the gradient-checkpointed fit rescue.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes

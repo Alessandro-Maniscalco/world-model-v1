@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable
 
 import torch
@@ -23,6 +24,85 @@ def collate_tensor_dict(batch: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             out[key] = [sample[key] for sample in batch]
     return out
+
+
+def resolve_lerobot_episode_ids(
+    *,
+    repo_id: str,
+    video_backend: str = "pyav",
+) -> list[int]:
+    """Return sorted episode ids available in a LeRobot dataset's metadata."""
+    LeRobotDataset = _load_lerobot_dataset_class()
+    dataset = LeRobotDataset(
+        repo_id,
+        video_backend=video_backend,
+        download_videos=False,
+    )
+    meta = getattr(dataset, "meta", None)
+    meta_episodes = getattr(meta, "episodes", None)
+    if meta_episodes is None:
+        raise ValueError(f"LeRobot dataset {repo_id!r} does not expose metadata episodes")
+    column_names = getattr(meta_episodes, "column_names", ())
+    if "episode_index" not in column_names:
+        raise ValueError(f"LeRobot dataset {repo_id!r} metadata is missing 'episode_index'")
+
+    episode_ids = sorted({int(value) for value in meta_episodes["episode_index"]})
+    if not episode_ids:
+        raise ValueError(f"LeRobot dataset {repo_id!r} exposes no episodes")
+    return episode_ids
+
+
+def split_train_validation_episode_ids(
+    *,
+    available_episode_ids: list[int] | tuple[int, ...],
+    requested_episode_ids: list[int] | tuple[int, ...] | None = None,
+    validation_episode_ids: list[int] | tuple[int, ...] | None = None,
+    validation_split_ratio: float = 0.1,
+) -> tuple[list[int], list[int]]:
+    """Split a candidate episode pool into deterministic train and validation ids."""
+    available = sorted({int(episode_id) for episode_id in available_episode_ids})
+    if not available:
+        raise ValueError("available_episode_ids must not be empty")
+
+    candidate = available
+    if requested_episode_ids:
+        requested = sorted({int(episode_id) for episode_id in requested_episode_ids})
+        unknown_requested = sorted(set(requested) - set(available))
+        if unknown_requested:
+            raise ValueError(
+                "Requested training episodes are unavailable: "
+                f"{unknown_requested}"
+            )
+        candidate = requested
+
+    if validation_episode_ids:
+        validation = sorted({int(episode_id) for episode_id in validation_episode_ids})
+        unknown_validation = sorted(set(validation) - set(candidate))
+        if unknown_validation:
+            raise ValueError(
+                "Validation episodes must be drawn from the active candidate episode pool, got "
+                f"{unknown_validation}."
+            )
+    else:
+        if not 0.0 < validation_split_ratio < 1.0:
+            raise ValueError(
+                "validation_split_ratio must be strictly between 0 and 1, "
+                f"got {validation_split_ratio}."
+            )
+        validation_count = max(1, int(math.ceil(len(candidate) * validation_split_ratio)))
+        if validation_count >= len(candidate):
+            raise ValueError(
+                "Validation split must leave at least one training episode, got "
+                f"{len(candidate)} candidate episodes and validation_count={validation_count}."
+            )
+        validation = candidate[-validation_count:]
+
+    train = [episode_id for episode_id in candidate if episode_id not in set(validation)]
+    if not train:
+        raise ValueError("Validation split left no training episodes")
+    if not validation:
+        raise ValueError("Validation split left no validation episodes")
+    return train, validation
 
 
 def build_lerobot_dataloader(
@@ -49,10 +129,7 @@ def build_lerobot_dataloader(
     if num_workers < 0:
         raise ValueError(f"num_workers must be non-negative, got {num_workers}")
 
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    except ImportError as exc:
-        raise ImportError("lerobot is required to build the LIBERO dataloader") from exc
+    LeRobotDataset = _load_lerobot_dataset_class()
 
     deltas = build_frame_deltas(context_len=context_len, horizon_len=horizon_len, dt=dt)
     dataset_kwargs: dict[str, Any] = {
@@ -77,3 +154,12 @@ def build_lerobot_dataloader(
         collate_fn=collate_fn,
         drop_last=drop_last,
     )
+
+
+def _load_lerobot_dataset_class():
+    """Import and return the canonical LeRobot dataset class."""
+    try:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError as exc:
+        raise ImportError("lerobot is required to build the LIBERO dataloader") from exc
+    return LeRobotDataset

@@ -151,7 +151,7 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         "--validation-patience-checks",
         type=int,
         default=defaults.validation_patience_checks,
-        help="Number of consecutive non-improving validation checks allowed before stopping.",
+        help="Number of consecutive non-improving validation checks allowed before stopping; 0 disables validation early stopping.",
     )
     parser.add_argument(
         "--validation-min-relative-improvement",
@@ -442,9 +442,9 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             f"validation_max_batches must be positive, got {cfg.validation_max_batches}."
         )
-    if cfg.validation_patience_checks <= 0:
+    if cfg.validation_patience_checks < 0:
         raise ValueError(
-            "validation_patience_checks must be positive, got "
+            "validation_patience_checks must be >= 0, got "
             f"{cfg.validation_patience_checks}."
         )
     if cfg.validation_min_relative_improvement < 0.0:
@@ -556,6 +556,22 @@ def _update_validation_tracking(
     if relative_improvement >= min_relative_improvement:
         return current_val_loss, 0, relative_improvement
     return best_val_loss, bad_checks + 1, relative_improvement
+
+
+def _update_validation_best_only(
+    *,
+    best_val_loss: float | None,
+    current_val_loss: float,
+) -> tuple[float, float | None]:
+    """Track the lowest observed validation loss without advancing patience."""
+    if best_val_loss is None:
+        return current_val_loss, None
+
+    relative_improvement = _relative_block_improvement(
+        previous_mean_loss=best_val_loss,
+        current_mean_loss=current_val_loss,
+    )
+    return min(best_val_loss, current_val_loss), relative_improvement
 
 
 def _should_continue_after_block(
@@ -1235,12 +1251,19 @@ def main() -> None:
                 device=device,
                 runtime_dtype=runtime_dtype,
             )
-            best_val_loss, val_bad_checks, val_relative_improvement = _update_validation_tracking(
-                best_val_loss=best_val_loss,
-                current_val_loss=val_loss,
-                bad_checks=val_bad_checks,
-                min_relative_improvement=cfg.validation_min_relative_improvement,
-            )
+            if cfg.validation_patience_checks > 0:
+                best_val_loss, val_bad_checks, val_relative_improvement = _update_validation_tracking(
+                    best_val_loss=best_val_loss,
+                    current_val_loss=val_loss,
+                    bad_checks=val_bad_checks,
+                    min_relative_improvement=cfg.validation_min_relative_improvement,
+                )
+            else:
+                best_val_loss, val_relative_improvement = _update_validation_best_only(
+                    best_val_loss=best_val_loss,
+                    current_val_loss=val_loss,
+                )
+                val_bad_checks = 0
             log_payload["val_loss"] = float(val_loss)
             log_payload["val_num_batches"] = int(val_num_batches)
             log_payload["best_val_loss"] = float(best_val_loss)
@@ -1260,7 +1283,10 @@ def main() -> None:
                 f"bad_checks={val_bad_checks}/{cfg.validation_patience_checks}",
                 flush=True,
             )
-            stop_for_validation = val_bad_checks >= cfg.validation_patience_checks
+            stop_for_validation = (
+                cfg.validation_patience_checks > 0
+                and val_bad_checks >= cfg.validation_patience_checks
+            )
 
         if should_save_checkpoint:
             path = save_checkpoint(

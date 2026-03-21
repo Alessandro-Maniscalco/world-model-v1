@@ -20,7 +20,6 @@ from typing import Any
 
 from world_model.config import DEFAULT_TRAIN_CONFIG_PATH
 from world_model.optimization.codex_runner import (
-    DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
     ensure_codex_chatgpt_login,
     run_codex_exec,
 )
@@ -31,6 +30,7 @@ DEFAULT_MEMORY_PATH = REPO_ROOT / "docs" / "training_optimizer.md"
 DEFAULT_PROMPT_PATH = REPO_ROOT / "docs" / "controller_prompt.md"
 DEFAULT_INSTRUCTIONS_PATH = DEFAULT_PROMPT_PATH
 DEFAULT_STATE_PATH = REPO_ROOT / "runs" / "training_optimizer" / "controller_state.json"
+DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS = 25 * 60
 DEFAULT_LOG_TAIL_CHARS = 4000
 SNAPSHOT_EXCLUDED_PATH_PARTS = frozenset(
     {
@@ -55,7 +55,7 @@ def run_training_optimization_loop(
     prompt_path: str | Path = DEFAULT_PROMPT_PATH,
     state_path: str | Path = DEFAULT_STATE_PATH,
     codex_model: str | None = None,
-    codex_timeout_seconds: int = DEFAULT_CODEX_EXEC_TIMEOUT_SECONDS,
+    codex_timeout_seconds: int = DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS,
     codex_session_id: str | None = None,
     codex_force_fresh_session: bool = False,
     iterations: int = 1,
@@ -203,9 +203,14 @@ def render_controller_status(state_path: str | Path = DEFAULT_STATE_PATH) -> str
         f"phase: {state['phase']}",
         f"session_id: {state['session_id'] or '(none)'}",
         f"resume_command: {state['resume_command'] or '(none)'}",
-        f"last_stop_reason: {state['last_stop_reason'] or '(none)'}",
-        f"last_stop_summary_path: {state.get('last_stop_summary_path') or '(none)'}",
     ]
+    if state["status"] != "running":
+        lines.extend(
+            [
+                f"last_stop_reason: {state['last_stop_reason'] or '(none)'}",
+                f"last_stop_summary_path: {state.get('last_stop_summary_path') or '(none)'}",
+            ]
+        )
     active_long_command = state.get("active_long_command")
     if isinstance(active_long_command, dict) and active_long_command:
         lines.append(f"active_long_command: {active_long_command.get('command', '')}")
@@ -266,6 +271,8 @@ def _initialize_controller_state(
         updated["current_invocation_run_summaries"] = []
     if codex_session_id is not None:
         updated["session_id"] = codex_session_id
+    if _should_reuse_persisted_session(updated):
+        updated = _recover_deleted_latest_result_state(updated)
     return updated
 
 
@@ -454,6 +461,8 @@ def _build_initial_turn_prompt(
             "Do short work inside this Codex session: inspect code/artifacts, edit repo files, update the memory markdown, inspect metrics, and validate MP4/video outputs.",
             "If there is no latest run result to validate yet, do only the minimum quick inspection needed to decide the next action. Prefer a concrete `run_long_command` over extended repository exploration.",
             "Do not start long-running work inside the session. If training, sweep generation, or another long experiment command is needed, stop tool use and return it as `run_long_command` instead.",
+            "Optimize for the best next action under long-run experiment cost, not the smallest or cheapest follow-up. In-session code edits are effectively free compared with another train/eval cycle.",
+            "Ground validation summaries and next-action reasons in concrete video observations from the reviewed clips, especially last-horizon timing, held-out differences, and visible blur/ghosting or missed contact.",
             "When you edit repo files and want to keep them, validate them inside the session before returning and set `repo_edit_status` to `validated`.",
             "If you want the controller to undo all repo edits made during this turn, set `repo_edit_status` to `rollback_requested`.",
             "At the start of a fresh session, after reading the controller state and optimization memory, you may delete only clearly dominated checkpoints that are explicitly superseded in the memory; never delete the best overall checkpoint, the best checkpoint in any branch, the latest checkpoint from the most recent run, or anything still needed for resume, validation, or referenced summaries.",
@@ -486,13 +495,16 @@ def _build_resume_turn_prompt(
             "- ## Repo Edits And Rollback",
             "- ## Long Experiment Commands",
             "- ## Validation",
+            "- ### Motion-First Ranking",
+            "- ## Decision Rule",
             "- ## Operator Control",
             "- ## Ending",
             f"Read {_display_path(state_path)} for the latest controller history, current controller status, active command if any, latest artifacts, and the latest completed long-command result.",
             f"Read {_display_path(train_config_path)} for the base training configuration.",
             f"Use {_display_path(memory_path)} as the mutable optimization memory.",
             "Validate the latest result if one was just completed, update the memory markdown if needed, and then decide the next action.",
-            "If there is no new result to validate, avoid extended inspection loops and choose the next concrete action quickly.",
+            "Choose the best next action for the overall long-run budget, not just the smallest follow-up. In-session code edits are effectively free compared with another long run.",
+            "Describe the reviewed videos concretely in your summary and reasoning, including when motion starts, how long it stays static, and any blur, ghosting, or missed contact in the held-out clips.",
             action_instruction,
             "Return one raw JSON object only as your final answer.",
             note_block,
@@ -739,6 +751,51 @@ def _should_reuse_persisted_session(state: dict[str, Any]) -> bool:
     }
 
 
+def _recover_deleted_latest_result_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Drop stale validation state when a successful latest result was deleted."""
+    updated = _normalize_controller_state(state)
+    if str(updated.get("phase", "")).strip().lower() != "post_run_validation":
+        return updated
+    if not _latest_successful_result_has_missing_expected_artifacts(updated):
+        return updated
+
+    updated["phase"] = "in_session"
+    updated["active_long_command"] = None
+    updated["last_long_command_result"] = None
+    updated["latest_artifacts"] = []
+    updated.setdefault("history", []).append(
+        {
+            "entry_type": "state_recovery",
+            "reason": "deleted_latest_result_artifacts",
+            "timestamp": _utc_timestamp(),
+        }
+    )
+    return updated
+
+
+def _latest_successful_result_has_missing_expected_artifacts(state: dict[str, Any]) -> bool:
+    """Return whether a successful latest result now points at deleted outputs."""
+    result = state.get("last_long_command_result")
+    if not isinstance(result, dict) or not result:
+        return False
+    if int(result.get("returncode", 1)) != 0:
+        return False
+    artifacts = result.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+
+    expected_artifact_paths = [
+        Path(str(item.get("path", "")).strip())
+        for item in artifacts
+        if isinstance(item, dict)
+        and str(item.get("kind", "")).strip() == "expected"
+        and str(item.get("path", "")).strip()
+    ]
+    if not expected_artifact_paths:
+        return False
+    return any(not path.exists() for path in expected_artifact_paths)
+
+
 def _normalize_controller_state(state: dict[str, Any]) -> dict[str, Any]:
     """Backfill the minimal shared-session controller state shape."""
     source = dict(state)
@@ -889,7 +946,7 @@ def _utc_timestamp() -> str:
 
 def _log_controller_status(message: str) -> None:
     """Print one controller status line."""
-    print(f"[controller] {message}")
+    print(f"[controller] {message}", flush=True)
 
 
 def _log_resume_command(resume_command: str) -> None:

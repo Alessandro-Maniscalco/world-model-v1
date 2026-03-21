@@ -1,7 +1,6 @@
 <INSTRUCTIONS>
 ## Docstrings
-- Every source file must start with a short module docstring (1–3 lines) describing the module’s purpose.
-- The docstring must appear at the top of the file.
+- Every source file must start with a top of the file module docstring describing the module’s purpose.
 - Exclude vendored, generated, or third-party code.
 - Every function should have a concise docstring describing its purpose.
 ## Testing
@@ -15,6 +14,7 @@
 - Before running Python tools, execute: `source .venv/bin/activate`.
 ##Design decisions
 - Every major design choice must be written in the chat (what changed and why).
+- After changing code, review whether any older code has become unused and delete it when it is no longer needed.
 - Do not create `docs/plans/` design or implementation markdown files for lightweight manual smoke-check scripts under `scripts/check/`.
 ##Dependencies
 - If a new library must be installed, add it to requirements.txt in the same change.

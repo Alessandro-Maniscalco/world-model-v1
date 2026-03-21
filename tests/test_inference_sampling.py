@@ -25,18 +25,22 @@ class _RecordingVideoInferenceModel(nn.Module):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Record active chunk shapes and return a simple velocity field."""
-        del timestep_t, observed_mask, control_hidden_states_scale
+        prior_frames = None if future_action_control_prior is None else future_action_control_prior.shape[2]
+        del action_image_tokens, timestep_t, observed_mask, future_action_control_prior, control_hidden_states_scale
         self.calls.append(
             {
                 "future_frames": noisy_future_video.shape[2],
                 "observed_frames": observed_video.shape[2],
                 "action_frames": action_tokens.shape[1],
+                "prior_frames": prior_frames,
                 "mask_shape": None if block_causal_attention_mask is None else tuple(block_causal_attention_mask.shape),
             }
         )
@@ -52,13 +56,23 @@ class _TokenDrivenInferenceModel(nn.Module):
         noisy_future_video: torch.Tensor,
         observed_video: torch.Tensor,
         action_tokens: torch.Tensor,
+        action_image_tokens: torch.Tensor | None = None,
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
+        future_action_control_prior: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Fill the latent chunk with the mean token value."""
-        del observed_video, timestep_t, block_causal_attention_mask, observed_mask, control_hidden_states_scale
+        del (
+            observed_video,
+            action_image_tokens,
+            timestep_t,
+            block_causal_attention_mask,
+            observed_mask,
+            future_action_control_prior,
+            control_hidden_states_scale,
+        )
         value = action_tokens.mean(dim=(1, 2)).view(-1, 1, 1, 1, 1)
         return value.expand_as(noisy_future_video)
 
@@ -129,6 +143,25 @@ def test_infer_future_videos_chunkwise_supports_single_chunk_prompt_conditioning
     assert model.calls[0]["observed_frames"] == 3
     assert model.calls[0]["future_frames"] == 8
     assert model.calls[0]["action_frames"] == 6
+
+
+def test_infer_future_videos_chunkwise_uses_active_chunk_control_prior() -> None:
+    """Slice the action-derived latent prior to the active denoised future chunk."""
+    torch.manual_seed(0)
+    model = _RecordingVideoInferenceModel()
+    out = infer_future_videos_chunkwise(
+        model,
+        z_past_video=torch.randn(1, 16, 3, 8, 8),
+        future_steps=8,
+        cross_attention_tokens=torch.randn(1, 8, 16),
+        future_action_control_prior=torch.randn(1, 16, 8, 8, 8),
+        k=1,
+        integration_steps=2,
+    )
+
+    assert out.shape == (1, 16, 8, 8, 8)
+    assert model.calls[0]["prior_frames"] == 4
+    assert model.calls[2]["prior_frames"] == 4
 
 
 def test_infer_future_videos_chunkwise_can_disable_block_causal_attention() -> None:
@@ -238,12 +271,14 @@ def test_build_rollout_boundaries_matches_single_and_k_plus_one_modes() -> None:
     assert _build_rollout_boundaries(
         future_steps=8,
         k=1,
+        chunk_schedule_mode="k_plus_one",
         single_chunk_rollout=False,
         device=torch.device("cpu"),
     ) == ((0, 4), (4, 8))
     assert _build_rollout_boundaries(
         future_steps=8,
         k=3,
+        chunk_schedule_mode="k_plus_one",
         single_chunk_rollout=True,
         device=torch.device("cpu"),
     ) == ((0, 8),)

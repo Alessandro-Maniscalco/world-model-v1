@@ -8,6 +8,10 @@ same region and with similar temporal commitment as the reference.
 The checker derives a motion ROI directly from the reference clip, so it works
 best for static-camera robot tasks where the moving manipulator occupies a
 localized region of the frame.
+
+It raises qualitative flags: undercommitted_motion, stops_early, temporal_profile_mismatch, 
+motion_region_mismatch, and overactive_motion. Verdicts are then collapsed to undercommitted,
+misaligned, overactive, or good
 """
 
 from __future__ import annotations
