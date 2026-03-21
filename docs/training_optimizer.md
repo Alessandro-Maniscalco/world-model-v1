@@ -34,12 +34,13 @@ Important but less-stable takeaways that may change as new experiments land.
 - The fresh `ctx21/h8` observed-context projector run from step `0` also failed decisively: the main clip plus held-out episodes `1` and `2` all stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.98/1.65/2.58`) and all three windows failed plausibility (`failing_frame_indices main=[21,22], ep1=[21], ep2=[21]`) even though validation improved steadily to `best_val_loss≈0.2501` at step `400`. That exhausts the whole latent-projector family, not just the resumed variants.
 - The next unused action path is inside the Wan backbone itself, not another latent projector: mirroring the existing action tokens into Wan's added-K/V image-conditioning slot is a distinct stronger conditioning route that does not depend on a fresh latent projector learning from scratch.
 - The first fresh `ctx21/h8` added-K/V backbone run with `lora_rank=32` did not produce a model result at all: training OOMed inside the Wan backbone LoRA path before the first checkpoint or evaluation artifacts were written (`torch.OutOfMemoryError`, missing about `20 MiB`). That means the architecture question is still open; only the initial memory budget was too large.
+- The follow-up fresh added-K/V retry with `lora_rank=16` also failed before checkpointing or evaluation, this time missing about `16 MiB`. So the added-K/V hypothesis is still untested on model quality; the only information gained is that this branch still needs a smaller memory footprint on the 16 GB RTX 3080.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
 - Can a stronger backbone-conditioning route help where all latent-projector variants failed?
-- Smallest next move: rerun the same fresh `ctx21/h8` `400`-step added-K/V backbone job with `action_backbone_added_kv_mode=reuse_action_tokens`, but reduce `lora_rank` from `32` to `16` so the run fits memory before evaluation.
+- Smallest next move: rerun the same fresh `ctx21/h8` `400`-step added-K/V backbone job with `action_backbone_added_kv_mode=reuse_action_tokens`, but reduce `lora_rank` from `16` to `8` so the run can finally fit and produce evaluation artifacts.
 - If the added-K/V backbone route is still late-heavy or implausible, stop local action-conditioning tweaks in this architecture family and pivot out of Wan-side action routing entirely.
 
 ## Future Questions
