@@ -688,6 +688,7 @@ def _evaluate_loss(
     teacher_forcing_future_input_mode: str,
     chunk_schedule_mode: str,
     action_control_prior_scale: float,
+    action_hidden_state_bias_scale: float,
     t_min: float,
     t_max: float,
     weight_mode: str,
@@ -709,7 +710,10 @@ def _evaluate_loss(
     with _training_autocast_context(device=device, disable_amp=disable_amp, dtype=runtime_dtype):
         action_tokens = action_encoder(a_plan)
         action_control_prior = None
-        if action_control_projector is not None and action_control_prior_scale > 0.0:
+        if (
+            action_control_projector is not None
+            and (action_control_prior_scale > 0.0 or action_hidden_state_bias_scale > 0.0)
+        ):
             action_control_prior = action_control_projector(
                 a_plan,
                 latent_height=z_future_video.shape[3],

@@ -771,7 +771,13 @@ def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch
     losses = iter([0.6, 0.3, 0.1])
 
     monkeypatch.setattr(train_script, "prepare_packed_batch", lambda **_: prepared)
-    monkeypatch.setattr(train_script, "_evaluate_loss", lambda **_: next(losses))
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _fake_evaluate_loss(**kwargs):
+        captured_kwargs.append(kwargs)
+        return next(losses)
+
+    monkeypatch.setattr(train_script, "_evaluate_loss", _fake_evaluate_loss)
 
     class _FakeEncoder:
         """Minimal encoder placeholder for validation-loss tests."""
@@ -788,6 +794,8 @@ def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch
 
     assert num_batches == 2
     assert val_loss == pytest.approx(0.45)
+    assert len(captured_kwargs) == 2
+    assert captured_kwargs[0]["action_hidden_state_bias_scale"] == pytest.approx(0.0)
 
 
 def test_train_script_restores_validation_state_from_checkpoint() -> None:
