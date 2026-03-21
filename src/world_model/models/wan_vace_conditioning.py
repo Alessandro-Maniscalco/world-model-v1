@@ -18,9 +18,11 @@ class ActionTokenEncoder(nn.Module):
         mlp_residual: bool = False,
         dropout: float = 0.0,
         input_layernorm: bool = True,
+        order_conditioning: bool = False,
         temporal_difference_scale: float = 0.0,
         temporal_mixer_kernel_size: int = 0,
         temporal_mixer_scale: float = 0.0,
+        token_scale: float = 1.0,
     ) -> None:
         """Initialize an action-token projection stack."""
         super().__init__()
@@ -55,14 +57,18 @@ class ActionTokenEncoder(nn.Module):
                 "temporal_mixer_scale requires temporal_mixer_kernel_size >= 3, got "
                 f"kernel_size={temporal_mixer_kernel_size}"
             )
+        if token_scale < 0:
+            raise ValueError(f"token_scale must be non-negative, got {token_scale}")
 
         self.action_dim = int(action_dim)
         self.hidden_dim = int(hidden_dim)
         self.input_layernorm = bool(input_layernorm)
         self.mlp_residual = bool(mlp_residual)
+        self.order_conditioning = bool(order_conditioning)
         self.temporal_difference_scale = float(temporal_difference_scale)
         self.temporal_mixer_kernel_size = int(temporal_mixer_kernel_size)
         self.temporal_mixer_scale = float(temporal_mixer_scale)
+        self.token_scale = float(token_scale)
         input_norm = nn.LayerNorm(self.action_dim) if self.input_layernorm else nn.Identity()
 
         if self.mlp_residual and mlp_dim is None:
@@ -102,6 +108,17 @@ class ActionTokenEncoder(nn.Module):
                 )
                 self.residual_net = None
 
+        self.order_net: nn.Sequential | None = None
+        if self.order_conditioning:
+            self.order_net = nn.Sequential(
+                nn.Linear(2, self.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+            )
+            nn.init.zeros_(self.order_net[-1].weight)
+            if self.order_net[-1].bias is not None:
+                nn.init.zeros_(self.order_net[-1].bias)
+
         self.temporal_mixer: nn.Conv1d | None = None
         if self.temporal_mixer_kernel_size > 1:
             padding = self.temporal_mixer_kernel_size // 2
@@ -126,10 +143,11 @@ class ActionTokenEncoder(nn.Module):
             )
         tokens = self._project_tokens(a_plan)
         if self.temporal_difference_scale <= 0.0 or a_plan.shape[1] <= 1:
-            return self._apply_temporal_mixer(tokens)
+            return self._apply_output_scale(self._apply_temporal_mixer(tokens))
         delta_source = _build_temporal_differences(a_plan)
         delta_tokens = self._project_tokens(delta_source) - self._project_tokens(torch.zeros_like(delta_source))
-        return self._apply_temporal_mixer(tokens + (self.temporal_difference_scale * delta_tokens))
+        mixed = self._apply_temporal_mixer(tokens + (self.temporal_difference_scale * delta_tokens))
+        return self._apply_output_scale(mixed)
 
     def _project_tokens(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project one action tensor through the configured base and residual paths."""
@@ -137,8 +155,12 @@ class ActionTokenEncoder(nn.Module):
             normalized_actions = self.net[0](a_plan)
             base_tokens = self.net[1:](normalized_actions)
             residual_tokens = self.residual_net(normalized_actions)
-            return base_tokens + residual_tokens
-        return self.net(a_plan)
+            tokens = base_tokens + residual_tokens
+        else:
+            tokens = self.net(a_plan)
+        if self.order_net is None:
+            return tokens
+        return tokens + self.order_net(_build_plan_progress_features(a_plan))
 
     def _apply_temporal_mixer(self, tokens: torch.Tensor) -> torch.Tensor:
         """Optionally add a lightweight temporal residual over projected action tokens."""
@@ -147,13 +169,79 @@ class ActionTokenEncoder(nn.Module):
         mixed = self.temporal_mixer(tokens.transpose(1, 2)).transpose(1, 2)
         return tokens + (self.temporal_mixer_scale * mixed)
 
+    def _apply_output_scale(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Scale projected action tokens before they enter Wan cross-attention."""
+        if self.token_scale == 1.0:
+            return tokens
+        return tokens * self.token_scale
+
     def allowed_missing_state_dict_keys(self) -> set[str]:
         """List optional state-dict keys that older checkpoints may legitimately omit."""
-        if self.temporal_mixer is None:
-            return set()
+        missing: set[str] = set()
+        if self.order_net is not None:
+            missing.update(
+                {
+                    "order_net.0.weight",
+                    "order_net.0.bias",
+                    "order_net.2.weight",
+                    "order_net.2.bias",
+                }
+            )
+        if self.temporal_mixer is not None:
+            missing.update(
+                {
+                    "temporal_mixer.weight",
+                    "temporal_mixer.bias",
+                }
+            )
+        return missing
+
+
+class ActionControlProjector(nn.Module):
+    """Project action plans into a per-step latent control prior for future VACE fillers."""
+
+    def __init__(self, action_dim: int, latent_channels: int) -> None:
+        """Initialize the action-to-latent prior projection layer."""
+        super().__init__()
+        if action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {action_dim}")
+        if latent_channels <= 0:
+            raise ValueError(f"latent_channels must be positive, got {latent_channels}")
+        self.action_dim = int(action_dim)
+        self.latent_channels = int(latent_channels)
+        self.projection = nn.Linear(self.action_dim + 2, self.latent_channels)
+        nn.init.zeros_(self.projection.weight)
+        if self.projection.bias is not None:
+            nn.init.zeros_(self.projection.bias)
+
+    def forward(
+        self,
+        a_plan: torch.Tensor,
+        *,
+        latent_height: int,
+        latent_width: int,
+    ) -> torch.Tensor:
+        """Project `[B,T,A]` actions into `[B,C,T,H,W]` broadcast latent priors."""
+        if a_plan.ndim != 3:
+            raise ValueError(f"a_plan must be [B,T,A], got {tuple(a_plan.shape)}")
+        if a_plan.shape[-1] != self.action_dim:
+            raise ValueError(
+                f"a_plan last dim A={a_plan.shape[-1]} does not match action_dim={self.action_dim}"
+            )
+        if latent_height <= 0:
+            raise ValueError(f"latent_height must be positive, got {latent_height}")
+        if latent_width <= 0:
+            raise ValueError(f"latent_width must be positive, got {latent_width}")
+
+        plan_features = torch.cat((_build_plan_progress_features(a_plan), a_plan), dim=-1)
+        projected = self.projection(plan_features).permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+        return projected.expand(-1, -1, -1, latent_height, latent_width)
+
+    def allowed_missing_state_dict_keys(self) -> set[str]:
+        """List optional projector keys that older checkpoints may legitimately omit."""
         return {
-            "temporal_mixer.weight",
-            "temporal_mixer.bias",
+            "projection.weight",
+            "projection.bias",
         }
 
 
@@ -173,6 +261,38 @@ class NullConditioningEncoder(nn.Module):
             raise ValueError(f"token_source must be [B,T,F], got {tuple(token_source.shape)}")
         batch_size, steps = token_source.shape[:2]
         return token_source.new_zeros(batch_size, steps, self.hidden_dim)
+
+
+class NullActionControlProjector(nn.Module):
+    """Emit zero latent control priors while ignoring action-plan values."""
+
+    def __init__(self, latent_channels: int) -> None:
+        """Store the latent-channel width used by the world-model control stream."""
+        super().__init__()
+        if latent_channels <= 0:
+            raise ValueError(f"latent_channels must be positive, got {latent_channels}")
+        self.latent_channels = int(latent_channels)
+
+    def forward(
+        self,
+        a_plan: torch.Tensor,
+        *,
+        latent_height: int,
+        latent_width: int,
+    ) -> torch.Tensor:
+        """Return a zero `[B,C,T,H,W]` latent prior using only batch/time from `a_plan`."""
+        if a_plan.ndim != 3:
+            raise ValueError(f"a_plan must be [B,T,A], got {tuple(a_plan.shape)}")
+        if latent_height <= 0:
+            raise ValueError(f"latent_height must be positive, got {latent_height}")
+        if latent_width <= 0:
+            raise ValueError(f"latent_width must be positive, got {latent_width}")
+        batch_size, steps = a_plan.shape[:2]
+        return a_plan.new_zeros(batch_size, self.latent_channels, steps, latent_height, latent_width)
+
+    def allowed_missing_state_dict_keys(self) -> set[str]:
+        """Return the empty optional-key set because this stub has no parameters."""
+        return set()
 
 
 def build_vace_control_tensor(
@@ -225,6 +345,20 @@ def _build_temporal_differences(a_plan: torch.Tensor) -> torch.Tensor:
     deltas = torch.zeros_like(a_plan)
     deltas[:, 1:] = a_plan[:, 1:] - a_plan[:, :-1]
     return deltas
+
+
+def _build_plan_progress_features(a_plan: torch.Tensor) -> torch.Tensor:
+    """Build continuous forward/reverse progress features for each action timestep."""
+    if a_plan.ndim != 3:
+        raise ValueError(f"a_plan must be [B,T,A], got {tuple(a_plan.shape)}")
+    steps = a_plan.shape[1]
+    if steps <= 1:
+        progress = torch.zeros((steps,), device=a_plan.device, dtype=a_plan.dtype)
+    else:
+        progress = torch.arange(steps, device=a_plan.device, dtype=a_plan.dtype) / float(steps - 1)
+    reverse_progress = 1.0 - progress
+    plan_features = torch.stack((progress, reverse_progress), dim=-1)
+    return plan_features.unsqueeze(0).expand(a_plan.shape[0], -1, -1)
 
 
 def _resolve_control_fill_latents(

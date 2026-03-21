@@ -69,6 +69,7 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--chunk-schedule-mode" in option_strings
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" in option_strings
+    assert "--action-token-scale" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -287,6 +288,45 @@ def test_infer_script_builds_action_encoder_with_temporal_difference_scale_when_
     assert action_encoder.temporal_difference_scale == pytest.approx(0.75)
 
 
+def test_infer_script_builds_action_encoder_with_token_scale_when_requested() -> None:
+    """Allow the infer config to scale projected action tokens directly."""
+    infer_script = _load_infer_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=6,
+        context_latent_steps=2,
+        horizon_latent_steps=4,
+    )
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        action_token_scale=2.0,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, action_encoder, _ = infer_script.build_runtime_modules(
+        cfg=cfg,
+        prepared=prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.token_scale == pytest.approx(2.0)
+
+
 def test_infer_script_builds_action_encoder_with_temporal_mixer_when_requested() -> None:
     """Allow the infer config to request a temporal mixer over action tokens."""
     infer_script = _load_infer_script_module()
@@ -411,6 +451,25 @@ def test_infer_script_restores_action_temporal_difference_scale_from_checkpoint_
 
     assert restored.conditioning_mode == "action"
     assert restored.action_temporal_difference_scale == pytest.approx(0.75)
+
+
+def test_infer_script_restores_action_token_scale_from_checkpoint_defaults() -> None:
+    """Reuse saved token-scale settings when infer config uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_token_scale": 2.0,
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_token_scale == pytest.approx(2.0)
 
 
 def test_infer_script_restores_action_temporal_mixer_settings_from_checkpoint_defaults() -> None:

@@ -308,6 +308,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.action_temporal_mixer_scale,
         help="Residual scale for the optional temporal action-token mixer.",
     )
+    parser.add_argument(
+        "--action-token-scale",
+        type=float,
+        default=defaults.action_token_scale,
+        help="Final gain applied to projected action tokens before Wan cross-attention.",
+    )
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
@@ -434,6 +440,8 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "action_control_prior_scale must be >= 0, got "
             f"{cfg.action_control_prior_scale}."
         )
+    if cfg.action_token_scale < 0.0:
+        raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
     if cfg.validation_enabled and cfg.video_path:
         raise ValueError("Validation loss is not supported for local-video training in v1.")
 

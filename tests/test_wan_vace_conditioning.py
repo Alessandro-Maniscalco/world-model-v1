@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder, build_vace_control_tensor
+from world_model.models.wan_vace_conditioning import (
+    ActionControlProjector,
+    ActionTokenEncoder,
+    build_vace_control_tensor,
+)
 
 
 def test_action_token_encoder_projects_actions_to_wan_text_width() -> None:
@@ -77,6 +81,23 @@ def test_action_token_encoder_scale_invariance_depends_on_input_layernorm() -> N
     assert not torch.allclose(unnormalized_tokens, unnormalized_scaled_tokens)
 
 
+def test_action_token_encoder_token_scale_multiplies_projected_tokens() -> None:
+    """Scale final projected action tokens before they reach cross-attention."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    scaled = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        token_scale=2.5,
+    )
+    scaled.load_state_dict(baseline.state_dict(), strict=False)
+
+    assert torch.allclose(scaled(actions), 2.5 * baseline(actions), atol=1e-5)
+
+
 def test_action_token_encoder_temporal_difference_scale_is_noop_for_constant_actions() -> None:
     """Keep outputs unchanged when temporal differences are identically zero."""
     torch.manual_seed(0)
@@ -130,6 +151,65 @@ def test_action_token_encoder_temporal_mixer_is_noop_until_trained() -> None:
     assert temporal.allowed_missing_state_dict_keys() == {"temporal_mixer.weight", "temporal_mixer.bias"}
 
 
+def test_action_token_encoder_order_conditioning_is_noop_until_trained() -> None:
+    """Keep legacy outputs unchanged when learned order features start from zero."""
+    torch.manual_seed(0)
+    actions = torch.randn(2, 4, 7)
+
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    ordered = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        order_conditioning=True,
+    )
+    ordered.load_state_dict(baseline.state_dict(), strict=False)
+
+    assert torch.allclose(baseline(actions), ordered(actions))
+    assert {
+        "order_net.0.weight",
+        "order_net.0.bias",
+        "order_net.2.weight",
+        "order_net.2.bias",
+    }.issubset(ordered.allowed_missing_state_dict_keys())
+
+
+def test_action_token_encoder_order_conditioning_can_distinguish_permuted_plans() -> None:
+    """Let learned order features change outputs when the same actions appear in a new order."""
+    torch.manual_seed(0)
+    actions = torch.tensor(
+        [[[1.0], [2.0], [3.0], [4.0]]],
+        dtype=torch.float32,
+    )
+    permuted = actions[:, [3, 2, 1, 0], :]
+
+    encoder = ActionTokenEncoder(
+        action_dim=1,
+        hidden_dim=4,
+        input_layernorm=False,
+        order_conditioning=True,
+    )
+    encoder.net[1].weight.data.fill_(1.0)
+    encoder.net[1].bias.data.zero_()
+    assert encoder.order_net is not None
+    encoder.order_net[0].weight.data.copy_(
+        torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.5, -0.5],
+            ],
+            dtype=torch.float32,
+        )
+    )
+    encoder.order_net[0].bias.data.zero_()
+    encoder.order_net[2].weight.data.copy_(torch.eye(4))
+    encoder.order_net[2].bias.data.zero_()
+
+    assert not torch.allclose(encoder(actions), encoder(permuted))
+
+
 def test_action_token_encoder_rejects_residual_mlp_without_width() -> None:
     """Require a hidden width when enabling the residual action MLP path."""
     with pytest.raises(ValueError, match="mlp_residual requires a positive mlp_dim"):
@@ -140,6 +220,12 @@ def test_action_token_encoder_rejects_negative_temporal_difference_scale() -> No
     """Reject negative temporal-difference residual scales."""
     with pytest.raises(ValueError, match="temporal_difference_scale must be non-negative"):
         ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_difference_scale=-0.1)
+
+
+def test_action_token_encoder_rejects_negative_token_scale() -> None:
+    """Reject negative post-projection token gains."""
+    with pytest.raises(ValueError, match="token_scale must be non-negative"):
+        ActionTokenEncoder(action_dim=7, hidden_dim=32, token_scale=-0.1)
 
 
 def test_action_token_encoder_rejects_invalid_temporal_mixer_config() -> None:
@@ -193,3 +279,19 @@ def test_build_vace_control_tensor_uses_fill_latents_for_masked_regions() -> Non
     assert torch.equal(observed_control[:, 2:4], reactive_fill)
     assert torch.equal(generated_control[:, :2], inactive_fill)
     assert torch.equal(generated_control[:, 2:4], latents)
+
+
+def test_action_control_projector_broadcasts_latent_prior_over_space() -> None:
+    """Project action plans into broadcast latent priors with the expected `[B,C,T,H,W]` shape."""
+    projector = ActionControlProjector(action_dim=3, latent_channels=5)
+    projector.projection.weight.data.fill_(1.0)
+    projector.projection.bias.data.zero_()
+
+    prior = projector(
+        torch.tensor([[[1.0, 2.0, 3.0], [0.5, 0.5, 0.5]]], dtype=torch.float32),
+        latent_height=4,
+        latent_width=6,
+    )
+
+    assert prior.shape == (1, 5, 2, 4, 6)
+    assert torch.allclose(prior[:, :, :, 0, 0], prior[:, :, :, -1, -1])

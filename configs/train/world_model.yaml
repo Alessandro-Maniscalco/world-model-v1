@@ -62,6 +62,7 @@ conditioning_mode: none
 action_conditioning_window: chunk
 action_order_conditioning: false
 action_control_prior_scale: 0.0
+action_token_scale: 1.0
 num_workers: 0
 log_every: 10
 checkpoint_every: 100

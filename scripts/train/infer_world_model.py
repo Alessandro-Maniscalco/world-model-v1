@@ -205,6 +205,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Residual scale for the optional temporal action-token mixer.",
     )
     parser.add_argument(
+        "--action-token-scale",
+        type=float,
+        default=defaults.action_token_scale,
+        help="Final gain applied to projected action tokens before Wan cross-attention.",
+    )
+    parser.add_argument(
         "--prompt",
         default=defaults.prompt,
         help="Prompt text used when --conditioning-mode prompt.",
@@ -282,6 +288,8 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
         raise ValueError(
             f"action_control_prior_scale must be >= 0, got {cfg.action_control_prior_scale}"
         )
+    if cfg.action_token_scale < 0.0:
+        raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}")
     if cfg.conditioning_mode == "action" and not cfg.checkpoint:
         raise ValueError(
             "Action conditioning requires --checkpoint because the action encoder is random otherwise. "
@@ -333,6 +341,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",
+        "action_token_scale",
         "chunk_schedule_mode",
     )
     updates: dict[str, Any] = {}
