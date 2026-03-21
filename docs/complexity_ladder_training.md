@@ -5,9 +5,9 @@ The process is to find the easiest setup that can produce a good-looking plausib
 - None yet.
 
 ## Next complexity to test
-- Rung: max-context single-generated-frame action scout.
-- `conditioning_mode=action`, `context_len=21`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200`, `no_action_input_layernorm=true`, `action_mlp_dim=128`, `action_mlp_residual=true`
-- Why next: the trained `ctx21/h4` checkpoint is the current best easy-video candidate, but its comparison sheets show frames `14-20` copied exactly on the main clip and held-out episodes `1` and `2`, with only frame `21` actually generated; that final frame stays plausible on the main clip and episode `1` but smears badly, and episode `2` fails plausibility on frame `21`. Because the failure is isolated to the single generated frame, the highest-value bounded follow-up is a same-checkpoint inference-step rescue inside this rung before paying for more training.
+- Rung: max-context single-generated-frame action residual scout.
+- `conditioning_mode=action`, `context_len=21`, `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `future_latent_residual_mode=last_context_frame`, `max_steps=200`, `no_action_input_layernorm=true`, `action_mlp_dim=128`, `action_mlp_residual=true`
+- Why next: the `ctx21/h4` action checkpoint is still the best easy-video base, but both its standard `50`-step and rescue `100`-step comparisons copy frames `14-20` on the main clip and held-out episodes `1` and `2` and only generate frame `21`; that single generated frame remains a smear on the main clip and episode `1` and still fails plausibility on episode `2`. Because the sampler rescue did not change the visible failure, the highest-value next action is now the strongest remaining structural lever inside the same easy-video base: keep the short one-latent horizon and action path, but train the future as a residual from the last observed latent frame to test whether frame `21` can become a clean fork-contact frame instead of a blob.
 
 ## Best rung for current complexity
 - Best current run: [`step_0000200` comparison](../runs/training_optimizer/eval/optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h4_lora32_action_noinputln_mlp128resid_gradckpt_singlechunk_fresh200_final_for_eval/optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h4_lora32_action_noinputln_mlp128resid_gradckpt_singlechunk_fresh200_final_for_eval_comparison.mp4). It holds the scene stable through frames `14-20` on the main clip and both held-outs, but only frame `21` is generated and that final frame still smears instead of producing a clean fork contact.
@@ -15,6 +15,7 @@ The process is to find the easiest setup that can produce a good-looking plausib
 ## Rung Findings for current complexity
 - Action-conditioned short-window two-latent scout rejected as an easy-video rung: `conditioning_mode=action`, `ctx17/h8`, `single_chunk_rollout=true`, `gradient_checkpointing=true`, `max_steps=200` generated frames `17-21` instead of only the last frame, but all five generated frames on the main clip were brown/green ghosted smears around the fork and plate; held-out episode `1` showed the same persistent blur across frames `17-21`, and held-out episode `2` was worst, with every generated frame failing plausibility and the plate/fork region washing out into a bright blob (`late_motion_ratio≈2.17/1.38/5.04`, all `misaligned`).
 - Max-context one-latent action scout is the right easy-video base but not yet a keep: `conditioning_mode=action`, `ctx21/h4`, `single_chunk_rollout=true`, `step_0000200` copies frames `14-20` exactly on the main clip and held-out episodes `1` and `2`, then generates only frame `21`; that frame turns into a green/brown smear on the main clip, the same tool-tip blur on episode `1`, and a brighter washed-out blob on episode `2`, which fails plausibility on frame `21` (`late_motion_ratio≈1.70/1.40/3.35`, motion verdict `misaligned`/`overactive`/`misaligned`).
+- Plain sampler-step rescue is rejected for this rung: rerunning the same `ctx21/h4` checkpoint at `100` inference steps leaves frames `14-20` copied and frame `21` still collapsed on all three windows, with slightly worse scalar checks than the `50`-step baseline (`max_frame_mae≈20.95/19.11/27.22` vs. `≈20.51/18.74/26.92` and the same episode-`2` plausibility failure on frame `21`).
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -33,8 +34,10 @@ The process is to find the easiest setup that can produce a good-looking plausib
   `17` changed, while on the validated `ctx17/h8` action scout frames
   `17-21` were all generated.
 - On the validated `ctx21/h4` action scout, frames `14-20` are still copied
-  and only frame `21` is synthesized, so inference-step sweeps are justified
-  before retraining this rung.
+  and only frame `21` is synthesized.
+- Raising the sampler from `50` to `100` inference steps does not materially
+  change that `ctx21/h4` failure, so more plain inference-step sweeps are not
+  justified in this rung.
 - Observation-only is exhausted for easy-video scouting on this task: the hard
   `ctx21/h8` control stayed late-heavy, the residual `ctx17/h4` scout imploded
   on frame `17`, and the absolute-target `ctx17/h4` scout was readable but
