@@ -7,6 +7,7 @@ Durable facts that should survive multiple controller turns.
 - On the best held-out-safe `ctx21/h8` step-`800` anchor, projected action-token scaling and both tested latent-prior routes leave the same late-heavy single-chunk rollout, so the current action-conditioning routes into Wan/VACE look weakly coupled.
 - The late-motion failure has survived scalar `ctx21/h8` tweaks, ordered full-plan conditioning, h12/h16 multi-chunk coverage, rollout-prefix and past-only teacher forcing, rollout-matched future inputs, and short-horizon exact-`k` chunk scheduling.
 - Wan-side action routing now looks exhausted on the `ctx21/h8` neighborhood: projected-token gain, latent-projector paths, hidden-state bias, and the added-K/V backbone route all failed to produce an earlier held-out-safe fork commitment.
+- Direct train-only supervision on the existing action tokens also failed to wake up the `ctx21/h8` step-`800` anchor, so the local action-conditioning family is now exhausted rather than just the Wan-side routing subfamily.
 
 ## Best Run
 Current winners and the ranking takeaway to anchor comparisons.
@@ -20,7 +21,6 @@ Important but less-stable takeaways that may change as new experiments land.
 
 - Longer context helped stability. The `context_len=21`, `horizon_len=8` branch was a meaningful improvement over shorter-memory baselines.
 - The strongest action-conditioned checkpoints remain `optimizer_aloha_static_fork_pick_up_full_320x240_lora32_action_noinputln_mlp128resid` at step `800` for raw motion and `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid` at step `800` for held-out safety.
-- The prompt-conditioned single-chunk smoke on episode `0` / start `60` stayed plausible but undercommitted (`motion_verdict=undercommitted`, `late_motion_ratio≈0.43`, `profile_correlation≈0.72`), so the upstream-style Wan/VACE path basically works but does not solve task motion by itself.
 - The action-conditioned `ctx21/h8` step-`800` single-chunk control on the same window still stayed late-heavy and `misaligned` (`late_motion_ratio≈2.11`, `profile_correlation≈0.31`) while remaining plausible, so chunked rollout is not the main cause of the late-motion failure.
 - The zero-action version of that same single-chunk control stayed almost unchanged on motion (`late_motion_ratio≈2.08`, `profile_correlation≈0.31`) while getting blurrier (`mean_frame_mae≈3.95` versus `≈2.41`), so the default action path affects image quality more than it affects the late-motion pattern on the canonical window.
 - Doubling raw action scale on that same single-chunk control also kept the same late-heavy `misaligned` motion (`late_motion_ratio≈2.21`, `profile_correlation≈0.30`) with image quality close to the default action-on case (`mean_frame_mae≈2.53`), so inference-side raw action scaling is exhausted as a causality test.
@@ -40,19 +40,19 @@ Important but less-stable takeaways that may change as new experiments land.
 - The first gradient-checkpointed added-K/V run finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but the videos still showed the same failure pattern: for most of the last `8` frames the fork barely commits, then it rushes forward in the final frames with an overactive snap instead of matching the earlier, smoother reference motion. The reports stay `misaligned` on all three windows (`late_motion_ratio≈2.28/2.03/3.17`, `profile_correlation≈0.28/0.52/0.47`), so the branch is not a motion-first win even before considering validation regression.
 - The saved `step_0000300.pt` checkpoint rescue for that same gradient-checkpointed added-K/V run also failed as a motion-first candidate. On the main clip, the fork still sits near its starting pose through most of the last-horizon sheet and only starts swinging near the end; on held-out episodes `1` and `2`, the same late snap comes with visible blur/ghosting around the tool tip and contact region, matching plausibility failures on frame `21` for episode `1` and frames `21-22` for episode `2`. All three windows remain visibly late-heavy and `misaligned`, so the whole added-K/V backbone family is closed.
 - The first `ctx21/h8` action-token-latent-aux resume from step `800` did not produce a model result yet: it resumed correctly, skipped optimizer restore because the new aux head is optional, then OOMed on the first train step inside the Wan/VACE backbone while missing only about `16 MiB`. So the hypothesis remains open; only the initial memory budget was too tight.
+- The gradient-checkpointed `ctx21/h8` action-token-latent-aux resume finally fit and stayed plausible on the main clip plus held-out episodes `1` and `2`, but it still showed the same long static hold followed by a late fork snap on all three windows. The reports confirm that it remains `misaligned` everywhere: main `late_motion_ratio≈2.52`, `profile_correlation≈0.21`, `mean_frame_mae≈3.15`; episode `1≈2.04`, `≈0.50`, `≈3.31`; episode `2≈2.95`, `≈0.52`, `≈2.33`, all with plausibility `PASS`. Validation improved strongly through step `950` (`best_val_loss≈0.0554`) before regressing at step `1000` (`val_loss≈0.2248`), but because the last saved checkpoint before regression is only step `900` and the visible failure mode is unchanged across all reviewed windows, local checkpoint-rescue retries do not currently earn another turn.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can direct train-only supervision make the existing action-token path causal without adding another Wan-side routing hook?
-- Best next move under long-run budget: rerun that same `ctx21/h8` step-`800` action-token-latent-aux resume with `gradient_checkpointing=true`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If direct action-token supervision still barely changes timing or held-out safety, stop local action-conditioning tweaks entirely and pivot to a non-action-conditioning explanation for the late-motion failure.
+- Local action-conditioning tweaks are now exhausted on the best held-out-safe `ctx21/h8` anchor.
+- There is no justified next long command inside the current hypothesis family that outranks a hypothesis reset.
+- If work resumes, pivot to a non-action-conditioning explanation for the late-motion failure instead of another nearby action-path retry.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the gradient-checkpointed action-token-aux rerun fits and helps, is the next step a fresh `400`-step run from step `0` or a cleaner sweep over the aux-loss scale on the safe `ctx21/h8` anchor?
-- If direct action-token supervision still fails, what is the best justified redesign outside local action-conditioning tweaks entirely?
+- What is the best justified redesign outside local action-conditioning tweaks entirely?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -73,6 +73,7 @@ Branches that should not get another near-duplicate retry.
 - Linear-init hidden-state-bias rescue with direct projector supervision and observed latent context on `ctx21/h8` step `800`.
 - Fresh latent-projector training on `ctx21/h8`, including the observed-context `fresh400` branch.
 - Added-K/V Wan-backbone conditioning on `ctx21/h8`, including LoRA-rank fit retries, gradient checkpointing, and step-`300` checkpoint selection.
+- Direct action-token supervision on `ctx21/h8` step `800`, including the gradient-checkpointed resume from step `800` to `1000`.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
