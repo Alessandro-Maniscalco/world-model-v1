@@ -158,6 +158,12 @@ def _parse_args() -> argparse.Namespace:
         help="Scale the checkpoint-mode action sequence before encoding it.",
     )
     parser.add_argument(
+        "--action-token-scale",
+        type=float,
+        default=1.0,
+        help="Scale projected action tokens before Wan cross-attention during checkpoint-mode inference.",
+    )
+    parser.add_argument(
         "--control-scale",
         type=float,
         default=None,
@@ -1258,6 +1264,7 @@ def _run_one_checkpoint_resolution(
     device_name: str,
     action_source: str,
     action_scale: float,
+    action_token_scale: float,
     control_scale: float | None,
     prompt: str,
     negative_prompt: str,
@@ -1301,6 +1308,7 @@ def _run_one_checkpoint_resolution(
             runtime_cfg.guidance_scale = guidance_scale
             runtime_cfg.max_sequence_length = max_sequence_length
             runtime_cfg.single_chunk_rollout = True
+        runtime_cfg.action_token_scale = float(action_token_scale)
         if control_scale is not None:
             runtime_cfg.control_scale = float(control_scale)
         if mode == "base":
@@ -1313,6 +1321,10 @@ def _run_one_checkpoint_resolution(
             )
             if action_scale != 1.0:
                 runtime_notes.append(f"Scaled checkpoint-mode actions by {action_scale:.3f} for this probe.")
+            if action_token_scale != 1.0:
+                runtime_notes.append(
+                    f"Scaled projected action tokens by {action_token_scale:.3f} for this probe."
+                )
         if control_scale is not None:
             runtime_notes.append(
                 f"Overrode runtime control scale to {float(control_scale):.3f} for this probe."
@@ -1320,6 +1332,7 @@ def _run_one_checkpoint_resolution(
         device = _resolve_device(device_name=device_name)
         runtime_dtype = _select_runtime_dtype(device=device)
         result_metadata["conditioning_scale"] = float(getattr(runtime_cfg, "control_scale", 1.0))
+        result_metadata["action_token_scale"] = float(getattr(runtime_cfg, "action_token_scale", 1.0))
         total_frames = (
             context_len + horizon_len
             if mode == "checkpoint"
@@ -1423,6 +1436,7 @@ def _run_one_checkpoint_resolution(
             "elapsed_s": time.time() - start_time,
             "mode": mode,
             "action_scale": action_scale,
+            "action_token_scale": action_token_scale,
             "notes": runtime_notes,
             **result_metadata,
         }
@@ -1441,6 +1455,7 @@ def _run_one_checkpoint_resolution(
             "elapsed_s": time.time() - start_time,
             "mode": mode,
             "action_scale": action_scale,
+            "action_token_scale": action_token_scale,
             "notes": runtime_notes,
             **result_metadata,
         }
@@ -1511,6 +1526,7 @@ def main() -> None:
             device_name=args.device,
             action_source=args.action_source,
             action_scale=args.action_scale,
+            action_token_scale=args.action_token_scale,
             control_scale=args.control_scale,
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
