@@ -297,6 +297,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
     )
     parser.add_argument(
+        "--action-hidden-state-bias-scale",
+        type=float,
+        default=defaults.action_hidden_state_bias_scale,
+        help="Scale for adding the action-derived latent control signal directly to future latent hidden states before the Wan backbone.",
+    )
+    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -450,6 +456,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(
             "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
             f"{cfg.action_control_prior_mode!r}."
+        )
+    if cfg.action_hidden_state_bias_scale < 0.0:
+        raise ValueError(
+            "action_hidden_state_bias_scale must be >= 0, got "
+            f"{cfg.action_hidden_state_bias_scale}."
         )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
@@ -767,6 +778,7 @@ def _evaluate_validation_loss(
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_control_prior_scale=cfg.action_control_prior_scale,
+            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
             weight_mode=cfg.weight_mode,

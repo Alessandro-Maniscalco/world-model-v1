@@ -170,6 +170,30 @@ def test_wan_vace_world_model_can_add_action_control_prior_to_both_future_branch
     assert torch.equal(backbone.last_control_hidden_states[:, :2, 1:, :, :], expected_future_inactive)
 
 
+def test_wan_vace_world_model_can_add_action_signal_to_future_hidden_states() -> None:
+    """Allow the action-derived latent signal to bias future hidden states directly."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        action_hidden_state_bias_scale=0.5,
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+
+    output = model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.ones(1, 2, 1, 1, 1),
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+        future_action_control_prior=torch.full((1, 2, 1, 1, 1), 2.0),
+    )
+
+    assert torch.equal(output, torch.ones(1, 2, 1, 1, 1))
+
+
 def test_expand_block_causal_mask_to_patch_tokens_repeats_2d_masks() -> None:
     """Repeat each latent-frame mask entry across the patch-token grid."""
     mask = torch.tensor([[0.0, float("-inf")], [0.0, 0.0]], dtype=torch.float32)

@@ -71,6 +71,7 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-control-prior-scale" in option_strings
     assert "--action-token-scale" in option_strings
     assert "--action-control-prior-mode" in option_strings
+    assert "--action-hidden-state-bias-scale" in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -536,6 +537,25 @@ def test_infer_script_restores_action_control_prior_mode_from_checkpoint_default
     assert restored.conditioning_mode == "action"
     assert restored.action_control_prior_scale == pytest.approx(1.0)
     assert restored.action_control_prior_mode == "dual_fill"
+
+
+def test_infer_script_restores_action_hidden_state_bias_scale_from_checkpoint_defaults() -> None:
+    """Reuse saved hidden-state action bias scale when the infer config still uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_hidden_state_bias_scale": 0.75,
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_hidden_state_bias_scale == pytest.approx(0.75)
 
 
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:

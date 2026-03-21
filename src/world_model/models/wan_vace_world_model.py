@@ -43,6 +43,7 @@ class WanVACEWorldModel(nn.Module):
         control_scale: float = 1.0,
         action_control_prior_scale: float = 0.0,
         action_control_prior_mode: str = "reactive_only",
+        action_hidden_state_bias_scale: float = 0.0,
         mask_channels: int = 64,
         control_black_latents: torch.Tensor | None = None,
         control_gray_latents: torch.Tensor | None = None,
@@ -58,6 +59,7 @@ class WanVACEWorldModel(nn.Module):
         self.control_scale = float(control_scale)
         self.action_control_prior_scale = float(action_control_prior_scale)
         self.action_control_prior_mode = str(action_control_prior_mode)
+        self.action_hidden_state_bias_scale = float(action_hidden_state_bias_scale)
         self.mask_channels = int(mask_channels)
         self.register_buffer("control_black_latents", control_black_latents, persistent=False)
         self.register_buffer("control_gray_latents", control_gray_latents, persistent=False)
@@ -106,7 +108,6 @@ class WanVACEWorldModel(nn.Module):
                 f"got {tuple(observed_mask.shape)} for observed_video {tuple(observed_video.shape)}"
             )
 
-        full_hidden_states = torch.cat([observed_video, noisy_future_video], dim=2)
         black_control_latents = _slice_control_latent_template(
             template=self.control_black_latents,
             observed_video=observed_video,
@@ -118,6 +119,7 @@ class WanVACEWorldModel(nn.Module):
             noisy_future_video=noisy_future_video,
         )
         inactive_fill_latents = black_control_latents
+        future_hidden_states = noisy_future_video
         future_control_video = gray_control_latents[:, :, observed_video.shape[2] :, :, :]
         if future_action_control_prior is not None:
             if future_action_control_prior.shape != future_control_video.shape:
@@ -125,16 +127,22 @@ class WanVACEWorldModel(nn.Module):
                     "future_action_control_prior must match noisy future-control shape "
                     f"{tuple(future_control_video.shape)}, got {tuple(future_action_control_prior.shape)}"
                 )
-            action_control_delta = self.action_control_prior_scale * future_action_control_prior.to(
+            action_control_source = future_action_control_prior.to(
                 device=future_control_video.device,
                 dtype=future_control_video.dtype,
             )
+            if self.action_hidden_state_bias_scale > 0.0:
+                future_hidden_states = future_hidden_states + (
+                    self.action_hidden_state_bias_scale * action_control_source
+                )
+            action_control_delta = self.action_control_prior_scale * action_control_source
             future_control_video = future_control_video + action_control_delta
             if self.action_control_prior_mode == "dual_fill":
                 inactive_fill_latents = inactive_fill_latents.clone()
                 inactive_fill_latents[:, :, observed_video.shape[2] :, :, :] = (
                     inactive_fill_latents[:, :, observed_video.shape[2] :, :, :] + action_control_delta
                 )
+        full_hidden_states = torch.cat([observed_video, future_hidden_states], dim=2)
         future_control_mask = torch.ones(
             noisy_future_video.shape[0],
             1,

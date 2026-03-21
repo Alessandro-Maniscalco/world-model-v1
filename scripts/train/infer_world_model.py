@@ -193,6 +193,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
     )
     parser.add_argument(
+        "--action-hidden-state-bias-scale",
+        type=float,
+        default=defaults.action_hidden_state_bias_scale,
+        help="Scale for adding the action-derived latent control signal directly to future latent hidden states before the Wan backbone.",
+    )
+    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -299,6 +305,10 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
             "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
             f"{cfg.action_control_prior_mode!r}"
         )
+    if cfg.action_hidden_state_bias_scale < 0.0:
+        raise ValueError(
+            f"action_hidden_state_bias_scale must be >= 0, got {cfg.action_hidden_state_bias_scale}"
+        )
     if cfg.action_token_scale < 0.0:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}")
     if cfg.conditioning_mode == "action" and not cfg.checkpoint:
@@ -350,6 +360,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_order_conditioning",
         "action_control_prior_scale",
         "action_control_prior_mode",
+        "action_hidden_state_bias_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",
@@ -1045,7 +1056,7 @@ def main() -> None:
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
             future_action_control_prior = None
-            if cfg.action_control_prior_scale > 0.0:
+            if cfg.action_control_prior_scale > 0.0 or cfg.action_hidden_state_bias_scale > 0.0:
                 future_action_control_prior = action_control_projector(
                     prepared.a_plan,
                     latent_height=prepared.z_future_video.shape[3],

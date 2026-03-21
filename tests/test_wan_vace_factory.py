@@ -313,6 +313,34 @@ def test_build_runtime_modules_respects_action_control_prior_mode() -> None:
     assert model.action_control_prior_mode == "dual_fill"
 
 
+def test_build_runtime_modules_respects_action_hidden_state_bias_scale() -> None:
+    """Propagate latent hidden-state bias scale into the runtime world-model wrapper."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_hidden_state_bias_scale=0.75,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert model.action_hidden_state_bias_scale == pytest.approx(0.75)
+
+
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()

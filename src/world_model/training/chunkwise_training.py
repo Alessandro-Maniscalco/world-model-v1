@@ -53,6 +53,7 @@ def train_chunkwise_batch(
     teacher_forcing_future_input_mode: str = "full_suffix",
     chunk_schedule_mode: str = "k_plus_one",
     action_control_prior_scale: float = 0.0,
+    action_hidden_state_bias_scale: float = 0.0,
     t_min: float = 0.0,
     t_max: float = 1.0,
     weight_mode: str = "uniform",
@@ -82,7 +83,10 @@ def train_chunkwise_batch(
     with autocast_context:
         action_tokens = action_encoder(a_plan)
         action_control_prior = None
-        if action_control_projector is not None and action_control_prior_scale > 0.0:
+        if (
+            action_control_projector is not None
+            and (action_control_prior_scale > 0.0 or action_hidden_state_bias_scale > 0.0)
+        ):
             action_control_prior = action_control_projector(
                 a_plan,
                 latent_height=z_future_video.shape[3],
