@@ -30,20 +30,21 @@ Important but less-stable takeaways that may change as new experiments land.
 - The hidden-state-bias checkpoint rescue also failed: step `900` stayed visibly late-heavy, worsened main and episode-`1` MAE versus step `1000`, and reintroduced an episode-`2` plausibility failure on frame `21`, so the zero-init hidden-state-bias branch is exhausted.
 - The nonzero-init hidden-state-bias rerun also failed: `action_control_projector_init_mode=linear_default` kept the main clip plus held-out episodes `1` and `2` plausible, but all three windows stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.00/1.43/2.56`) and validation was much weaker than the zero-init rerun (`best_val_loss≈0.1186` vs. `≈0.0283`), so projector init alone does not wake up the latent route.
 - The linear-init hidden-state-bias rerun with direct projector supervision also failed to rescue the motion-first ranking: main and episode `1` still stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.15/1.47`), only episode `2` improved to `motion_verdict=good`, and validation stayed very weak (`best_val_loss≈0.2918`, `final≈0.4600`). Aux loss alone is therefore exhausted as an action-only projector fix.
-- The latent-prior and hidden-state-bias branches add a fresh `ActionControlProjector` on top of old checkpoints. Zero-init, linear-init, and aux-loss variants all stayed inert over `200` extra steps when the projector only saw action plus progress features, so the next bounded redesign should add observed-state context rather than another scalar on the action-only projector.
+- The observed-context rerun also failed as a resumed-branch rescue: main, episode `1`, and episode `2` all stayed `misaligned` (`late_motion_ratio≈2.95/1.79/3.10`) despite plausibility passing on all three windows, and validation degraded further (`best_val_loss≈0.3806`, `final≈0.5594`).
+- The latent-prior and hidden-state-bias branches add a fresh `ActionControlProjector` on top of old checkpoints. Zero-init, linear-init, aux-loss, and observed-context resume variants all stayed inert or regressed over `200` extra steps, so more resumed projector-local tweaks are exhausted; the smallest remaining check is whether the same projector architecture only works when co-trained from step `0`.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can a fresh latent projector matter on short resumed checkpoints once it sees the last observed latent state instead of only action plus progress features?
-- Smallest next move: rerun the `ctx21/h8` step-`800` to `1000` hidden-state-bias branch with `action_hidden_state_bias_scale=0.5`, `action_control_projector_init_mode=linear_default`, `action_control_aux_loss_scale=1.0`, and `action_control_projector_observed_context_mode=last_frame`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If that observed-context rerun still leaves the same late-heavy pattern, stop local projector-path tweaks and pivot to a different action-conditioning architecture.
+- Can the observed-context latent projector help only when it is co-trained from step `0`, rather than being bolted onto the mature `ctx21/h8` step-`800` checkpoint?
+- Smallest next move: run a fresh `ctx21/h8` training job for `400` steps with `action_hidden_state_bias_scale=0.5`, `action_control_projector_init_mode=linear_default`, `action_control_aux_loss_scale=1.0`, and `action_control_projector_observed_context_mode=last_frame`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If that fresh observed-context run still leaves the same late-heavy pattern, stop projector-path experiments entirely and pivot to a stronger backbone-conditioning redesign.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the observed-context hidden-state-bias rerun still barely changes motion timing, what is the smallest justified next redesign: a learned latent-delta projector, a stronger backbone-conditioning change, or abandoning short resumed projector paths entirely?
-- If the observed-context rerun changes behavior sharply, should the next step be a calibrated observed-context / hidden-bias sweep or a cleaner ablation of state context vs. aux supervision before revisiting multi-chunk rollout?
+- If the fresh observed-context run still barely changes motion timing, what is the smallest justified next redesign: a learned latent-delta projector, a stronger backbone-conditioning change, or abandoning latent projector paths entirely?
+- If the fresh observed-context run changes behavior sharply, should the next step be a calibrated fresh-training sweep or a cleaner ablation of state context vs. aux supervision before revisiting multi-chunk rollout?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -61,6 +62,7 @@ Branches that should not get another near-duplicate retry.
 - Zero-init hidden-state-bias rescue on `ctx21/h8` step `800`, including checkpoint selection.
 - Linear-init hidden-state-bias rescue without direct projector supervision on `ctx21/h8` step `800`.
 - Linear-init hidden-state-bias rescue with direct projector supervision but no observed latent context on `ctx21/h8` step `800`.
+- Linear-init hidden-state-bias rescue with direct projector supervision and observed latent context on `ctx21/h8` step `800`.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
