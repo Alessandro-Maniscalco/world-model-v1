@@ -45,6 +45,12 @@ current decision state and use this ledger only when a turn needs older context.
 
 ## Recent Validation Notes
 
+- `optimizer_aloha_static_fork_pick_up_full_320x240_ctx21_h8_lora32_action_noinputln_mlp128resid_hiddenstatebias0p5_linearinit_resume800to1000` step `1000`
+  - `arm_motion_verdict`: nonzero-init projector rerun still late-heavy and `misaligned` on the main clip plus held-out episodes `1` and `2`
+  - `image_quality_verdict`: all three windows remain plausible and relatively clean, but there is no visible earlier commitment win
+  - `continue_training`: no more projector-init-only retries; move to a train-side projector-supervision change
+  - Why: the last-horizon comparison sheets and arm crops still show the same long static hold followed by late fork motion. The reports confirm that the branch stayed `misaligned` across all three windows (`late_motion_ratio≈2.00/1.43/2.56`, `mean_frame_mae≈2.86/2.66/2.39`), and validation was much weaker than the zero-init rerun (`best_val_loss≈0.1186` at step `950`, `val_loss≈0.3950` at step `1000` versus `best_val_loss≈0.0283` on the zero-init branch). That closes projector-init alone as a rescue and justifies the new direct projector-supervision lever in commit `81fd6b1`.
+
 - `optimizer_aloha_static_fork_pick_up_full_320x240_h16_lora32_action_noinputln_mlp128resid_rerun1_motionloss0p5_resume1000to1200` step `1200`
   - `arm_motion_verdict`: cleaner h16 motion-assisted trade, still undercommitted on the main clip and episode `1`
   - `image_quality_verdict`: best h16 motion-assisted image and stability trade so far
