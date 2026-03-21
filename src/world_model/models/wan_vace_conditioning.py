@@ -200,19 +200,32 @@ class ActionTokenEncoder(nn.Module):
 class ActionControlProjector(nn.Module):
     """Project action plans into a per-step latent control prior for future VACE fillers."""
 
-    def __init__(self, action_dim: int, latent_channels: int) -> None:
+    def __init__(
+        self,
+        action_dim: int,
+        latent_channels: int,
+        *,
+        init_mode: str = "zero",
+    ) -> None:
         """Initialize the action-to-latent prior projection layer."""
         super().__init__()
         if action_dim <= 0:
             raise ValueError(f"action_dim must be positive, got {action_dim}")
         if latent_channels <= 0:
             raise ValueError(f"latent_channels must be positive, got {latent_channels}")
+        if init_mode not in {"zero", "linear_default"}:
+            raise ValueError(
+                "init_mode must be 'zero' or 'linear_default', got "
+                f"{init_mode!r}"
+            )
         self.action_dim = int(action_dim)
         self.latent_channels = int(latent_channels)
+        self.init_mode = str(init_mode)
         self.projection = nn.Linear(self.action_dim + 2, self.latent_channels)
-        nn.init.zeros_(self.projection.weight)
-        if self.projection.bias is not None:
-            nn.init.zeros_(self.projection.bias)
+        if self.init_mode == "zero":
+            nn.init.zeros_(self.projection.weight)
+            if self.projection.bias is not None:
+                nn.init.zeros_(self.projection.bias)
 
     def forward(
         self,

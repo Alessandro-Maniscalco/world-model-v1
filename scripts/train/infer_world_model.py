@@ -193,6 +193,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
     )
     parser.add_argument(
+        "--action-control-projector-init-mode",
+        choices=("zero", "linear_default"),
+        default=defaults.action_control_projector_init_mode,
+        help="Initialization mode for the action-to-latent control projector when no projector weights are available in a checkpoint.",
+    )
+    parser.add_argument(
         "--action-hidden-state-bias-scale",
         type=float,
         default=defaults.action_hidden_state_bias_scale,

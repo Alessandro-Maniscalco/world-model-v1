@@ -341,6 +341,35 @@ def test_build_runtime_modules_respects_action_hidden_state_bias_scale() -> None
     assert model.action_hidden_state_bias_scale == pytest.approx(0.75)
 
 
+def test_build_runtime_modules_respects_action_control_projector_init_mode() -> None:
+    """Pass the projector init mode through to the runtime latent-prior projector."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_control_prior_scale=1.0,
+        action_control_projector_init_mode="linear_default",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, _, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_control_projector, ActionControlProjector)
+    assert action_control_projector.init_mode == "linear_default"
+
+
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()

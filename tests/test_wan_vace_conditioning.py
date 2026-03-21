@@ -237,6 +237,31 @@ def test_action_token_encoder_rejects_invalid_temporal_mixer_config() -> None:
         ActionTokenEncoder(action_dim=7, hidden_dim=32, temporal_mixer_scale=0.5)
 
 
+def test_action_control_projector_zero_init_starts_inert() -> None:
+    """Keep the latent-prior branch exactly off when zero-init is requested."""
+    projector = ActionControlProjector(action_dim=3, latent_channels=5, init_mode="zero")
+
+    projected = projector(torch.randn(2, 4, 3), latent_height=2, latent_width=2)
+
+    assert torch.count_nonzero(projected) == 0
+
+
+def test_action_control_projector_linear_default_init_is_nonzero() -> None:
+    """Allow a resumed latent-prior branch to start from a learned linear mapping instead of zeros."""
+    torch.manual_seed(0)
+    projector = ActionControlProjector(action_dim=3, latent_channels=5, init_mode="linear_default")
+
+    projected = projector(torch.randn(2, 4, 3), latent_height=2, latent_width=2)
+
+    assert torch.count_nonzero(projected) > 0
+
+
+def test_action_control_projector_rejects_unknown_init_mode() -> None:
+    """Reject unsupported projector init modes before building parameters."""
+    with pytest.raises(ValueError, match="init_mode must be 'zero' or 'linear_default'"):
+        ActionControlProjector(action_dim=3, latent_channels=5, init_mode="bad_mode")
+
+
 def test_build_vace_control_tensor_matches_vace_channel_contract() -> None:
     """Build `[inactive; reactive; mask]` channels matching Wan VACE defaults."""
     latents = torch.randn(2, 16, 6, 8, 8)
