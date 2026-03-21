@@ -27,6 +27,7 @@ Important but less-stable takeaways that may change as new experiments land.
 - The matching `action_token_scale=0.0` ablation also stayed visually near-identical to the default single-chunk control while remaining plausible (`late_motion_ratio≈1.92`, `profile_correlation≈0.34`, `mean_frame_mae≈2.48`), so projected action tokens are effectively inert on the canonical `ctx21/h8` step-`800` checkpoint.
 - Resuming the same `ctx21/h8` step-`800` anchor with `action_control_prior_scale=0.5` on the default `reactive_only` latent-prior path also stayed plausible but still late-heavy and `misaligned` across the main clip plus held-out episodes `1` and `2` (`late_motion_ratio≈1.98/1.47/2.39`, `mean_frame_mae≈2.79/2.57/2.26`), so the one-sided latent prior does not rescue the branch either.
 - The stronger `dual_fill` latent-prior routing also stayed plausible but effectively unchanged from the one-sided prior (`late_motion_ratio≈2.06/1.43/2.53`, `mean_frame_mae≈2.91/2.72/2.34`), so the whole latent-prior routing family is now exhausted on the `ctx21/h8` anchor.
+- The first `action_hidden_state_bias_scale=0.5` resume from the `ctx21/h8` step-`800` anchor was blocked by validation-loss plumbing after training resumed to step `850`, not by model behavior, so the correct next action remains a rerun of that exact hidden-state-bias probe.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
@@ -73,3 +74,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `16c8f47` (`Plumb action token scale through local sweeps`): adds `--action-token-scale` to `scripts/check/sweep_local_repo_resolutions.py` so the canonical checkpoint-evaluation path can actually run the new token-gain control.
 - Commit `d73b3e9` (`Route latent action priors through both VACE branches`): adds `action_control_prior_mode=dual_fill` so the existing latent prior can modulate both future VACE control branches instead of only the reactive branch.
 - Commit `6006617` (`Add direct action bias to future latents`): adds `action_hidden_state_bias_scale` so the existing action-derived latent signal can bias future latent hidden states directly before the Wan backbone.
+- Commit `6ccb840` (`Fix validation plumbing for action hidden-state bias`): forwards `action_hidden_state_bias_scale` through validation-loss evaluation so hidden-state-bias training runs can complete instead of failing at the first validation step.
