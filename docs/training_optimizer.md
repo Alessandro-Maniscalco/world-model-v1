@@ -31,20 +31,21 @@ Important but less-stable takeaways that may change as new experiments land.
 - The nonzero-init hidden-state-bias rerun also failed: `action_control_projector_init_mode=linear_default` kept the main clip plus held-out episodes `1` and `2` plausible, but all three windows stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.00/1.43/2.56`) and validation was much weaker than the zero-init rerun (`best_val_loss≈0.1186` vs. `≈0.0283`), so projector init alone does not wake up the latent route.
 - The linear-init hidden-state-bias rerun with direct projector supervision also failed to rescue the motion-first ranking: main and episode `1` still stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.15/1.47`), only episode `2` improved to `motion_verdict=good`, and validation stayed very weak (`best_val_loss≈0.2918`, `final≈0.4600`). Aux loss alone is therefore exhausted as an action-only projector fix.
 - The observed-context rerun also failed as a resumed-branch rescue: main, episode `1`, and episode `2` all stayed `misaligned` (`late_motion_ratio≈2.95/1.79/3.10`) despite plausibility passing on all three windows, and validation degraded further (`best_val_loss≈0.3806`, `final≈0.5594`).
-- The latent-prior and hidden-state-bias branches add a fresh `ActionControlProjector` on top of old checkpoints. Zero-init, linear-init, aux-loss, and observed-context resume variants all stayed inert or regressed over `200` extra steps, so more resumed projector-local tweaks are exhausted; the smallest remaining check is whether the same projector architecture only works when co-trained from step `0`.
+- The fresh `ctx21/h8` observed-context projector run from step `0` also failed decisively: the main clip plus held-out episodes `1` and `2` all stayed visibly late-heavy and `misaligned` (`late_motion_ratio≈2.98/1.65/2.58`) and all three windows failed plausibility (`failing_frame_indices main=[21,22], ep1=[21], ep2=[21]`) even though validation improved steadily to `best_val_loss≈0.2501` at step `400`. That exhausts the whole latent-projector family, not just the resumed variants.
+- The next unused action path is inside the Wan backbone itself, not another latent projector: mirroring the existing action tokens into Wan's added-K/V image-conditioning slot is a distinct stronger conditioning route that does not depend on a fresh latent projector learning from scratch.
 
 ## Active Questions
 The one question to answer next, broken down into the minimum parts.
 
-- Can the observed-context latent projector help only when it is co-trained from step `0`, rather than being bolted onto the mature `ctx21/h8` step-`800` checkpoint?
-- Smallest next move: run a fresh `ctx21/h8` training job for `400` steps with `action_hidden_state_bias_scale=0.5`, `action_control_projector_init_mode=linear_default`, `action_control_aux_loss_scale=1.0`, and `action_control_projector_observed_context_mode=last_frame`, then evaluate the main clip plus held-out episodes `1` and `2`.
-- If that fresh observed-context run still leaves the same late-heavy pattern, stop projector-path experiments entirely and pivot to a stronger backbone-conditioning redesign.
+- Can a stronger backbone-conditioning route help where all latent-projector variants failed?
+- Smallest next move: run a fresh `ctx21/h8` training job for `400` steps with `action_backbone_added_kv_mode=reuse_action_tokens`, then evaluate the main clip plus held-out episodes `1` and `2`.
+- If the added-K/V backbone route is still late-heavy or implausible, stop local action-conditioning tweaks in this architecture family and pivot out of Wan-side action routing entirely.
 
 ## Future Questions
 Questions to revisit only after the simplicity check is answered.
 
-- If the fresh observed-context run still barely changes motion timing, what is the smallest justified next redesign: a learned latent-delta projector, a stronger backbone-conditioning change, or abandoning latent projector paths entirely?
-- If the fresh observed-context run changes behavior sharply, should the next step be a calibrated fresh-training sweep or a cleaner ablation of state context vs. aux supervision before revisiting multi-chunk rollout?
+- If the added-K/V backbone route still barely changes motion timing, what is the smallest justified next redesign outside Wan-side action routing entirely?
+- If the added-K/V backbone route changes behavior sharply, should the next step be a calibrated fresh-training sweep or a cleaner ablation of cross-attention text tokens vs. added-K/V image tokens?
 - Should held-out single-chunk checks on episodes `1` and `2` wait until the action-path causality question is answered on the canonical main window?
 
 ## Exhausted Families
@@ -63,6 +64,7 @@ Branches that should not get another near-duplicate retry.
 - Linear-init hidden-state-bias rescue without direct projector supervision on `ctx21/h8` step `800`.
 - Linear-init hidden-state-bias rescue with direct projector supervision but no observed latent context on `ctx21/h8` step `800`.
 - Linear-init hidden-state-bias rescue with direct projector supervision and observed latent context on `ctx21/h8` step `800`.
+- Fresh latent-projector training on `ctx21/h8`, including the observed-context `fresh400` branch.
 - Dataset-subset restriction side branches.
 
 ## Kept Code Changes
@@ -86,3 +88,4 @@ Still-relevant code-changing commits that remain available as structural levers.
 - Commit `cf7ebc9` (`Add configurable action-control projector init`): adds `action_control_projector_init_mode` so resumed latent-prior and hidden-state-bias branches can opt out of the exact-zero projector start that likely left the fresh latent route inert.
 - Commit `81fd6b1` (`Add action-control aux loss`): adds a train-only `action_control_aux_loss_scale` that directly supervises the fresh action-control projector against the clean future latent summary, so short resumed latent branches are no longer learning only through indirect denoising gradients.
 - Commit `0d714da` (`Add observed-context action control projector`): adds `action_control_projector_observed_context_mode` so the fresh latent projector can condition on the pooled last observed latent frame during train, infer, and checkpoint sweeps while keeping the old action-only path unchanged by default.
+- Commit `1717b5f` (`Add action added-K/V backbone path`): mirrors action tokens into Wan's added-K/V image-conditioning slot and keeps those newly introduced image-path weights trainable under LoRA, creating the first non-projector backbone-conditioning route for action.
