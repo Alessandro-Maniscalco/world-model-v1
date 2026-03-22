@@ -37,26 +37,24 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: lower-learning-rate curriculum-transfer test from the best ep1 overfit
-  checkpoint into the full dataset.
-- Resume the validated ep1-only `ctx17/h4`, `k=1`, single-chunk,
+- Rung: continue the improving lower-learning-rate curriculum-transfer branch.
+- Resume the validated full-dataset `ctx17/h4`, `k=1`, single-chunk,
   residual+filllastctx, action-conditioned LoRA checkpoint
-  `step_0000200.pt` on the full dataset for `200` more steps at a lower
-  learning rate, then evaluate the same episode-1 window at `start_frame=60`
-  at `step 300` and `step 400`.
-- Why next: the same-LR curriculum transfer already answered the first mixing
-  question in the negative. On ep1, `step 200` is still the clean peak: the
-  copied context stays static through frame `16`, motion starts at frame `17`,
-  and frames `17-20` track the fork approach with only slight frame-20
-  softness. Resuming that checkpoint on the full dataset at the original
-  `1e-4` learning rate immediately washes it out by `step 300/400`, bringing
-  back bright blue/white ghosting, wider arm-crop silhouettes, and a more
-  overactive missed contact. The next stage question is whether that good ep1
-  solution is being overwritten by update size rather than by unavoidable
-  dataset mixing.
+  `curriculum_from_ep1overfit200_lr2e5_to400/checkpoints/step_0000400.pt`
+  for `200` more steps at the same low learning rate, then evaluate the same
+  episode-1 window at `start_frame=60` at `step 500` and `step 600`.
+- Why next: the lower-learning-rate transfer answered the update-size question
+  in the useful direction. On ep1, the branch still stays static through frame
+  `16` and starts moving at frame `17`, but by `step 400` the old bright
+  blue/white fork halo has largely disappeared and the frame-17-to-20 fork
+  approach is close to the ep1-only overfit peak again. Because this
+  neighborhood improved sharply from `step 300` to `step 400` while staying
+  plausible, the next stage question is whether continued small updates can
+  fully sharpen the remaining slight contact softness or whether `step 400` is
+  already the best mixed-data stop point.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step200_ep1_start60/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step_0000200_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to400_step400_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to400_step_0000400_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -219,6 +217,22 @@ improve that same anchor on the same canonical evaluation window.
   `spatial_motion_iou≈0.682`, `mean_frame_mae≈1.753`, and
   `max_frame_mae≈10.86`. Broader training at the original learning rate washes
   out the good ep1 solution instead of refining it.
+- Lowering the curriculum-transfer learning rate changes that conclusion. On
+  the same ep1 decision clip, lower-LR `step 300` is still visibly bad: the
+  copied context stays static through frame `16`, motion starts at frame `17`,
+  but frames `17-20` still carry blue/white fork ghosting and a thickened
+  frame-20 contact. By lower-LR `step 400`, the branch recovers sharply: the
+  old bright halo is mostly gone, the arm-crop silhouette is close to the
+  ep1-only overfit peak again, and frames `17-20` follow the fork approach
+  with only slight residual softness.
+- The lower-LR reports support that visual recovery. Relative to the same-LR
+  curriculum branch, lower-LR `step 400` improves to
+  `profile_correlation≈0.423`, `late_motion_ratio≈1.499`,
+  `spatial_motion_iou≈0.780`, and `temporal_delta_ratio≈1.254` while staying
+  plausible. Full-window MAE remains slightly worse than the ep1-only overfit
+  peak (`mean_frame_mae≈1.738`, `max_frame_mae≈10.79` vs `≈1.353/8.58`), but
+  motion-first the branch now preserves the operator-clip behavior far better
+  than the same-LR curriculum transfer.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -261,6 +275,11 @@ improve that same anchor on the same canonical evaluation window.
   stays static through frame `16` and starts moving at frame `17`, but the
   same-LR curriculum transfer quickly reintroduces fork/gripper ghosting and a
   blurrier frame-20 contact than the ep1-only peak.
+- A lower-learning-rate full-dataset warm start from that same ep1-only
+  `step 200` checkpoint preserves the operator clip much better. The branch is
+  still bad at `step 300`, but by `step 400` it regains a near-correct
+  frame-17-to-20 fork approach with far less ghosting than the same-LR
+  curriculum branch, making it the best mixed-data result so far.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
