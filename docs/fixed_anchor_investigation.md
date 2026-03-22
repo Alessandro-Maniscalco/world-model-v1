@@ -41,19 +41,19 @@ improve that same anchor on the same canonical evaluation window.
   best checkpoint.
 - Resume the validated full-dataset `ctx17/h4`, `k=1`, single-chunk,
   residual+filllastctx, action-conditioned LoRA checkpoint
-  `curriculum_from_ep1overfit200_lr2e5_to600_from400/checkpoints/step_0000600.pt`
+  `curriculum_from_ep1overfit200_lr2e5_to800_from600/checkpoints/step_0000800.pt`
   for `200` more steps at the same low learning rate, then evaluate the same
-  episode-1 window at `start_frame=60` at `step 700` and `step 800`.
-- Why next: this neighborhood did not peak at `step 400`. On ep1, the branch
-  still stays static through frame `16` and starts moving at frame `17`; a
-  noisy `step 500` dip is followed by a cleaner `step 600` recovery with less
-  ghosting and slightly better contact than `step 400`. The remaining stage
-  question is whether this gradual low-LR continuation can fully close the last
-  small sharpness gap to the overfit peak, or whether `step 600` is already
-  the best mixed-data stop point.
+  episode-1 window at `start_frame=60` at `step 900` and `step 1000`.
+- Why next: this neighborhood still has not peaked. On ep1, the branch keeps
+  the copied context static through frame `16` and starts moving at frame `17`;
+  `step 700` is a soft dip, but `step 800` recovers and slightly cleans up the
+  fork silhouette and final contact relative to `step 600` while staying
+  plausible. The remaining stage question is whether one more bounded
+  continuation sharpens the last small frame-20 softness or whether `step 800`
+  is already the best mixed-data stop point.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to600_from400_step600_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to600_from400_step_0000600_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step800_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step_0000800_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -247,6 +247,24 @@ improve that same anchor on the same canonical evaluation window.
   `mean_frame_mae≈1.583`, `max_frame_mae≈10.13`, and
   `temporal_delta_ratio≈1.230`. It is still not as crisp as the ep1-only
   overfit peak, but the gap is now small.
+- The next low-LR continuation keeps the same motion timing and stays
+  plausible, but remains noisy within that neighborhood. `step 700` still
+  stays static through frame `16` and first moves at frame `17`, yet frames
+  `17-20` soften again into a more washed-out fork/gripper blur than the prior
+  `step 600` best. `step 800` then recovers and slightly improves on `step 600`:
+  the fork silhouette through frames `17-20` is a little cleaner, the final
+  contact is less doubled, and the clip stays close to the ep1-only overfit
+  peak, though it still keeps a small amount of residual softness by frame `20`.
+- The reports support that updated ranking. `step 700` falls back to
+  `profile_correlation≈0.353`, `late_motion_ratio≈1.487`,
+  `spatial_motion_iou≈0.791`, `mean_frame_mae≈2.213`,
+  `max_frame_mae≈14.41`, and `temporal_delta_ratio≈1.323`. `step 800` becomes
+  the new best mixed-data checkpoint at `profile_correlation≈0.411`,
+  `late_motion_ratio≈1.425`, `spatial_motion_iou≈0.772`,
+  `mean_frame_mae≈1.487`, `max_frame_mae≈9.52`, and
+  `temporal_delta_ratio≈1.209`. Motion-first, `step 800` edges out `step 600`
+  because the future-horizon fork/contact blur is slightly smaller even though
+  the arm-motion scalars are mixed.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
