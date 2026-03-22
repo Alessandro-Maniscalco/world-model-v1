@@ -358,6 +358,23 @@ def test_train_script_disables_amp_outside_cuda() -> None:
     assert train_script._select_runtime_dtype(device=torch.device("cuda"), disable_amp=True) == torch.float32
 
 
+def test_train_script_moves_train_modules_to_runtime_dtype() -> None:
+    """Cast train-time modules to the selected runtime dtype before optimization."""
+    train_script = _load_train_script_module()
+    model = torch.nn.Linear(2, 3)
+    action_encoder = torch.nn.Linear(4, 5)
+
+    moved_model, moved_action_encoder = train_script._move_train_modules_to_runtime(
+        model=model,
+        action_encoder=action_encoder,
+        device=torch.device("cpu"),
+        runtime_dtype=torch.bfloat16,
+    )
+
+    assert next(moved_model.parameters()).dtype == torch.bfloat16
+    assert next(moved_action_encoder.parameters()).dtype == torch.bfloat16
+
+
 def test_train_script_validates_latent_schedule_for_exact_k_chunking() -> None:
     """Explain latent-time chunking failures before the train loop starts."""
     train_script = _load_train_script_module()

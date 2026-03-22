@@ -688,6 +688,20 @@ def build_action_encoder_from_config(
     return build_conditioning_encoder_for_model(cfg, prepared_batch, model)
 
 
+def _move_train_modules_to_runtime(
+    *,
+    model: nn.Module,
+    action_encoder: nn.Module,
+    device: torch.device,
+    runtime_dtype: torch.dtype,
+) -> tuple[nn.Module, nn.Module]:
+    """Move train-time modules onto the active device and runtime dtype."""
+    return (
+        model.to(device=device, dtype=runtime_dtype),
+        action_encoder.to(device=device, dtype=runtime_dtype),
+    )
+
+
 @torch.no_grad()
 def _evaluate_loss(
     *,
@@ -975,8 +989,14 @@ def main() -> None:
         vae.vae.to("cpu")
         torch.cuda.empty_cache()
 
-    model = build_model_from_config(cfg, prepared).to(device)
-    action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
+    model = build_model_from_config(cfg, prepared)
+    action_encoder = build_action_encoder_from_config(cfg, prepared, model)
+    model, action_encoder = _move_train_modules_to_runtime(
+        model=model,
+        action_encoder=action_encoder,
+        device=device,
+        runtime_dtype=runtime_dtype,
+    )
 
     parameter_groups = _configure_trainable_parameters(
         cfg,
