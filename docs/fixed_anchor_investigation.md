@@ -1,100 +1,151 @@
-# Fixed-Anchor Root-Cause Investigation
-
-Decision memory for one fixed-anchor debugging loop. Keep the short-window
-contract fixed until the first failing stage is clear enough to justify a fix
-or a pivot.
-
 ## Goal
-Find the first pipeline stage that causes the arm/fork morphing failure under
-the fixed short-window contract, then validate only changes that improve that
-same anchor on the same eval window.
+The process is to hold one short-window anchor fixed, trace the first stage
+that visibly breaks the arm/fork motion, and only validate changes that
+improve that same anchor on the same canonical evaluation window.
 
 ## Fixed Anchor
 - Hard constraints for every run in this loop: `context_len=17`,
   `horizon_len=4`, `k=1`, `chunk_schedule_mode=k_chunks`,
   `single_chunk_rollout=true`, `frame_width=320`, `frame_height=240`.
-- Canonical eval window: `repo_id=lerobot/aloha_static_fork_pick_up`,
+- Historical stage-diagnostic window: `repo_id=lerobot/aloha_static_fork_pick_up`,
   `episode_index=0`, `start_frame=60`,
   `video_key=observation.images.cam_high`.
+- Operator-directed evaluation window from this point onward:
+  `repo_id=lerobot/aloha_static_fork_pick_up`, `episode_index=1`,
+  `start_frame=60`, `video_key=observation.images.cam_high`.
 
-## Current First-Failing-Stage Hypothesis
-- The first visible failure is in denoising the single future latent residual
-  step. Raw/preprocess/VAE/export counts are consistent, and the last-context
-  future control path cancels to the intended zero-change prior.
+## Proven Stage Checks
+- Raw-window selection, preprocessing, VAE encode/decode, and export counts are
+  not the first visible failure on the canonical anchor. Best artifact:
+  `runs/training_optimizer/fixed_anchor_stage_probe/ctx17_h4_step400_ep0_start60/infer/comparison_grid.png`
+- Control/residual construction is not the first visible failure on the
+  canonical anchor: the saved stage-state report shows the single future latent
+  step uses the expected `[0,1]` chunk boundary and the last-context
+  future-control path cancels to exact zeros after residual subtraction. Best
+  artifact:
+  `runs/training_optimizer/fixed_anchor_stage_probe/ctx17_h4_step400_ep0_start60/stage_state_report.json`
+- Repeated scheduler integration is not the first visible failure on the
+  canonical anchor. At `integration_steps=1`, the generated future already
+  shows a thickened, softened fork that misses a clean plate-edge contact, and
+  `10/25/50` mainly increase brightness and double-edge ghosting rather than
+  changing the motion timing. Best artifact:
+  `runs/training_optimizer/fixed_anchor_denoising_step_sweep/ctx17_h4_step400_ep0_start60/steps_1/comparison_grid.png`
+- Sampling drift is not required to create the canonical failure. The
+  teacher-forced `t=1000` clean estimate on the true noisy target path already
+  reproduces the same widened, softened fork and missed plate-edge contact
+  before any scheduler rollout. Best artifact:
+  `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
-## Stage Findings
+## Next Diagnostic Step
+- Rung: checkpoint selection inside the first action-conditioned fixed-anchor
+  branch, under the operator's `ep1`-only evaluation rule.
+- Evaluate `step_0000200.pt` against `step_0000400.pt` from the new
+  `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx action-conditioned run
+  on episode `1` only.
+- Why next: the final `step_0000400.pt` checkpoint is the current decision
+  baseline on `ep1`, but it still shows the worst held-out ghosting in the
+  reviewed set. The operator explicitly asked whether `step_0000200.pt` is
+  materially worse than `step_0000400.pt`; if not, the branch should use the
+  earlier checkpoint because it halves training time.
+
+## Best current result for fixed anchor
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_final_for_eval_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_final_for_eval_comparison.mp4`
+
+## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
   rollout. For `ctx17/h4`, that means many scalar diagnostics are diluted by
   `17` copied context frames even when the visible failure is concentrated in
   the final `4` future frames.
-- The starting artifact is still visibly bad in the arm/fork region even though
-  plausibility passes, so future-horizon visual failure overrides aggregate
-  full-window metrics.
-- The canonical stage probe at
-  `runs/training_optimizer/fixed_anchor_stage_probe/ctx17_h4_step400_ep0_start60`
-  reproduced the same ep0 failure: both raw and generated windows stay static
-  through the last `4` context frames, then motion starts only in the final
-  `4` future frames; raw future and VAE roundtrip stay crisp enough, but the
-  generated future blooms into a bright fork/contact blur and misses clean
-  contact.
-- Frame accounting on the canonical window is internally consistent:
-  `21` preprocessed raw frames -> `6` latent steps -> split `5` context +
-  `1` future latent step -> `4` decoded future frames.
-- The VAE roundtrip is not the first visible failure on this anchor:
-  raw-vs-roundtrip future grids stay visually aligned, and sharpness stays
-  close (`raw/roundtrip≈1.014`, `generated/roundtrip≈0.974`).
-- The stage-state dump confirms the structural control path is behaving as
-  intended for this anchor: `future_control_fill_mode=last_context_frame` and
-  `future_latent_residual_mode=last_context_frame` cancel the future control
-  video to exact zeros after residual subtraction, while the true future
-  residual target stays comparatively small (`abs_mean≈0.122`) and the chunk
-  schedule is the single latent boundary `[0,1]`.
-
-## Open Hypotheses
-- The model's first clean estimate for that one future latent step may already
-  point toward the blurred fork/contact state.
-- The scheduler trajectory may drift from a reasonable early estimate as the
-  integration steps accumulate.
-- Packing the whole `4`-frame horizon into one future latent step may be too
-  coarse for clean last-horizon contact geometry even when control alignment is
-  correct.
-
-## Next Diagnostic Step
-- Sweep `scripts/train/infer_world_model.py` on the same canonical raw clip at
-  `integration_steps={1,10,25,50}` and compare the future-only grids to decide
-  whether blur/ghosting is present in the earliest denoising estimate or only
-  appears after repeated scheduler updates.
+- On the canonical stage probe, both raw and generated windows stay static
+  through the last `4` context frames and motion starts only in the final `4`
+  future frames. The raw future and VAE roundtrip stay visually crisp enough,
+  but the generated future blooms into a bright fork/contact blur and never
+  reaches a clean contact pose.
+- `frame_report.json` shows `21` preprocessed raw frames, `6` total latent
+  steps, a `5`-step context / `1`-step future split, and `4` decoded future
+  frames. `sharpness_report.json` stays close to the VAE baseline
+  (`generated/roundtrip≈0.974`, `raw/roundtrip≈1.014`), so the VAE is not the
+  first visible failure.
+- The saved stage-state report shows the chunk schedule is the single boundary
+  `[0,1]` and the future control video becomes exact zero after last-context
+  fill plus residual subtraction. That keeps the earliest remaining suspicious
+  stage on denoising of the single future latent residual step.
+- The denoising-step sweep keeps the same frame accounting at every
+  `integration_steps` setting, so the visible change is in the denoised future
+  content rather than in frame packing or decode/export length.
+- At `integration_steps=1`, the generated future still stays static through the
+  copied context and only moves in the last `4` future frames, but the fork is
+  already thicker and softer than the VAE roundtrip and never lands in a clean
+  plate-edge contact pose.
+- At `integration_steps=10`, `25`, and `50`, the motion onset still does not
+  move earlier; instead the future fork brightens and develops stronger doubled
+  edges across frames `2-4` of the horizon. `25` and `50` are the most ghosted
+  variants, so extra steps amplify a bad future instead of rescuing it.
+- The sharpness scalar rises from `generated/roundtrip≈0.873` at
+  `integration_steps=1` to `≈0.963/0.977/0.974` at `10/25/50`, but the visible
+  fork/contact behavior still worsens. On this anchor, sharper does not mean
+  more correct.
+- The teacher-forced probe on the actual dataset window produced the first
+  `t=1000` comparison before running out of GPU memory on later timesteps. That
+  first on-path clean estimate already matches the sampled `integration_steps=1`
+  failure: the fork is visibly widened and softened in all `4` future frames,
+  stays static until the horizon begins, and still misses a crisp plate-edge
+  contact pose.
+- Because the teacher-forced `t=1000` future is already wrong before any
+  scheduler updates, the first failing stage is the checkpoint's direct
+  velocity prediction for the single future latent residual step rather than
+  rollout drift, export, or control assembly.
+- The first action-conditioned `ctx17/h4` scout changes the family-level
+  behavior. Motion now starts with the first future frame instead of staying
+  nearly frozen until the horizon ends, and all three reviewed clips move
+  through all `4` future frames while staying plausible.
+- The branch is not clean yet. On ep0, the fork reaches toward the plate
+  across the whole horizon but carries a blue/purple ghost trail and ends as a
+  widened, brightened contact blur. On ep1, frames `17-20` also move through
+  the whole horizon, but the gripper/fork region is the most overactive and
+  washed out of the reviewed set, with blue/white/purple doubling already
+  obvious in frame `17` and a missed clean contact by frame `20`
+  (`profile_correlation≈0.285`, `late_motion_ratio≈1.962`).
+- Held-out ep2 is still the cleanest clip in this branch: the fork advances
+  through the full horizon with much less ghosting and a near-correct contact
+  approach, though it remains somewhat too energetic late in the horizon
+  (`motion_verdict=good`).
+- `metrics.jsonl` shows the action-conditioned branch improves sharply between
+  `step 100` and `step 300`, but the operator-directed checkpoint question is
+  now whether `step_0000200.pt` is already close enough to `step_0000400.pt` on
+  the harder `ep1` anchor to justify the shorter run time. The next validated
+  comparison should answer that directly before any new training.
 
 ## Stable Findings
-- Stay on this fixed anchor until the first failing stage is identified or the
+- Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
+  treat plausibility as a safety gate, and rank runs visual first.
+- Stay on the fixed anchor until the first failing stage is identified or the
   operator says to pivot.
-- Prefer short diagnostic probes, instrumentation, and future-only inspection
-  over another training continuation when the current failure is not yet
-  localized.
-- Keep the short-window contract fixed and let other settings move only when
-  they test a concrete hypothesis about the visible failure.
-- A turn is not complete unless it accounts for the whole pipeline on the
-  current anchor.
+- Fresh training runs are allowed, but the hard anchor stays fixed and every
+  new run must test one concrete hypothesis.
 - When using checkpoint-mode sweep artifacts for this anchor, visually inspect
   the final `horizon_len` frames first and do not rely on full-window scalar
   summaries alone.
 - For temporal bugs, always check raw window length, latent-time shapes,
   decoded future frame counts, and exported video frame counts together.
-- `ctx17/h4` packs the entire future horizon into exactly one latent step, so
-  denoising or residual-target errors there affect all `4` future frames at
-  once.
-- Earlier held-out reviews still matter when judging motion-first behavior:
-  episode `1` has the worst ghosting, episode `2` is the cleanest but still
+- Under Wan temporal packing, `horizon_len=4` gives one future latent step, so
+  the current anchor isolates the easiest single-step future denoising case.
+- Earlier held-out reviews remain decision-relevant: episode `1` has the worst
+  white/black ghosting, episode `2` is cleaner but still diffuse and
   undercommitted, and neither held-out clip rescues this checkpoint family.
+- Human operator override: future checkpoint comparisons in this loop should
+  use episode `1` only unless a later operator message changes that rule.
 
 ## Kept Code Changes
-- Commit `0f50064` (`Add residual future latent training mode`): keeps
-  `future_latent_residual_mode=last_context_frame` available for residual-target
-  debugging.
-- Commit `6323a3c` (`Add last-context future control fill mode`): keeps
-  `future_control_fill_mode=last_context_frame` available for true zero-change
-  future-control debugging.
-- Commit `dd8dccd` (`Add world-model stage-state dump script`): adds
-  `scripts/check/dump_world_model_stage_state.py` so fixed-anchor probes can
-  dump latent split, chunk schedule, residual-target size, and VACE control
-  assembly before denoising.
+Still-relevant code-changing commits that remain available as structural
+levers.
+- Commit `0f50064` (`Add residual future latent training mode`): adds
+  checkpoint-compatible `future_latent_residual_mode=last_context_frame` to
+  train/infer config, flow-matching training, and rollout sampling so the model
+  can denoise future latents relative to the last observed latent frame instead
+  of absolute latents.
+- Commit `6323a3c` (`Add last-context future control fill mode`): adds
+  `future_control_fill_mode=last_context_frame` through train/infer configs,
+  checkpoint restore, and Wan/VACE control assembly so masked future control
+  slots can copy the last observed latent frame instead of gray filler latents,
+  giving residual-mode runs a true zero-change future control prior.
