@@ -8,7 +8,7 @@ horizon_len: 8
 dt: 0.1
 batch_size: 2
 k: 1
-chunk_schedule_mode: k_plus_one
+chunk_schedule_mode: k_chunks
 max_steps: 2000
 validation_enabled: true
 validation_every: 50
@@ -62,7 +62,6 @@ lora_target_modules:
 conditioning_mode: none
 action_conditioning_window: chunk
 action_order_conditioning: false
-action_control_prior_scale: 0.0
 action_token_scale: 1.0
 num_workers: 0
 log_every: 10

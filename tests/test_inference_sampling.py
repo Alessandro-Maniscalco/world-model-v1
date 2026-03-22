@@ -17,7 +17,7 @@ class _RecordingVideoInferenceModel(nn.Module):
     def __init__(self):
         """Initialize call storage."""
         super().__init__()
-        self.calls: list[dict[str, int | tuple[int, ...]]] = []
+        self.calls: list[dict[str, int | float | tuple[int, ...] | None]] = []
 
     def forward(
         self,
@@ -29,18 +29,28 @@ class _RecordingVideoInferenceModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Record active chunk shapes and return a simple velocity field."""
-        prior_frames = None if future_action_control_prior is None else future_action_control_prior.shape[2]
-        del action_image_tokens, timestep_t, observed_mask, future_action_control_prior, control_hidden_states_scale
+        residual_base_frames = None if future_latent_residual_base is None else future_latent_residual_base.shape[2]
+        residual_base_value = None
+        if future_latent_residual_base is not None:
+            residual_base_value = float(future_latent_residual_base[0, 0, 0, 0, 0].item())
+        del (
+            action_image_tokens,
+            timestep_t,
+            observed_mask,
+            future_latent_residual_base,
+            control_hidden_states_scale,
+        )
         self.calls.append(
             {
                 "future_frames": noisy_future_video.shape[2],
                 "observed_frames": observed_video.shape[2],
                 "action_frames": action_tokens.shape[1],
-                "prior_frames": prior_frames,
+                "residual_base_frames": residual_base_frames,
+                "residual_base_value": residual_base_value,
                 "mask_shape": None if block_causal_attention_mask is None else tuple(block_causal_attention_mask.shape),
             }
         )
@@ -50,6 +60,11 @@ class _RecordingVideoInferenceModel(nn.Module):
 class _TokenDrivenInferenceModel(nn.Module):
     """Return a constant velocity field derived from the active token values."""
 
+    def __init__(self) -> None:
+        """Initialize residual-base call storage."""
+        super().__init__()
+        self.calls: list[dict[str, float | int | None]] = []
+
     def forward(
         self,
         *,
@@ -60,18 +75,27 @@ class _TokenDrivenInferenceModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Fill the latent chunk with the mean token value."""
+        residual_base_frames = None if future_latent_residual_base is None else future_latent_residual_base.shape[2]
+        residual_base_value = None
+        if future_latent_residual_base is not None:
+            residual_base_value = float(future_latent_residual_base[0, 0, 0, 0, 0].item())
         del (
             observed_video,
             action_image_tokens,
             timestep_t,
             block_causal_attention_mask,
             observed_mask,
-            future_action_control_prior,
             control_hidden_states_scale,
+        )
+        self.calls.append(
+            {
+                "residual_base_frames": residual_base_frames,
+                "residual_base_value": residual_base_value,
+            }
         )
         value = action_tokens.mean(dim=(1, 2)).view(-1, 1, 1, 1, 1)
         return value.expand_as(noisy_future_video)
@@ -107,7 +131,7 @@ def test_infer_future_videos_chunkwise_shapes_and_calls():
         z_past_video=z_past_video,
         future_steps=8,
         cross_attention_tokens=cross_attention_tokens,
-        k=1,
+        k=2,
         integration_steps=5,
     )
 
@@ -145,25 +169,6 @@ def test_infer_future_videos_chunkwise_supports_single_chunk_prompt_conditioning
     assert model.calls[0]["action_frames"] == 6
 
 
-def test_infer_future_videos_chunkwise_uses_active_chunk_control_prior() -> None:
-    """Slice the action-derived latent prior to the active denoised future chunk."""
-    torch.manual_seed(0)
-    model = _RecordingVideoInferenceModel()
-    out = infer_future_videos_chunkwise(
-        model,
-        z_past_video=torch.randn(1, 16, 3, 8, 8),
-        future_steps=8,
-        cross_attention_tokens=torch.randn(1, 8, 16),
-        future_action_control_prior=torch.randn(1, 16, 8, 8, 8),
-        k=1,
-        integration_steps=2,
-    )
-
-    assert out.shape == (1, 16, 8, 8, 8)
-    assert model.calls[0]["prior_frames"] == 4
-    assert model.calls[2]["prior_frames"] == 4
-
-
 def test_infer_future_videos_chunkwise_can_disable_block_causal_attention() -> None:
     """Allow pretrained base-mode sampling to reuse the local adapter without a causal mask."""
     torch.manual_seed(0)
@@ -186,8 +191,8 @@ def test_infer_future_videos_chunkwise_can_disable_block_causal_attention() -> N
     assert model.calls[0]["mask_shape"] is None
 
 
-def test_infer_future_videos_chunkwise_auto_collapses_when_future_is_shorter_than_k_plus_one() -> None:
-    """Fall back to one chunk when latent future length is too short for K+1 chunking."""
+def test_infer_future_videos_chunkwise_auto_collapses_when_future_is_shorter_than_k() -> None:
+    """Fall back to one chunk when latent future length is too short for exact-k chunking."""
     torch.manual_seed(0)
     model = _RecordingVideoInferenceModel()
     out = infer_future_videos_chunkwise(
@@ -195,7 +200,7 @@ def test_infer_future_videos_chunkwise_auto_collapses_when_future_is_shorter_tha
         z_past_video=torch.randn(2, 16, 3, 8, 8),
         future_steps=1,
         cross_attention_tokens=torch.randn(2, 1, 16),
-        k=1,
+        k=2,
         integration_steps=2,
     )
 
@@ -277,6 +282,8 @@ def test_infer_future_videos_chunkwise_restores_last_context_frame_baseline() ->
     )
 
     assert torch.allclose(out, torch.full_like(out, 7.0))
+    assert model.calls[0]["residual_base_frames"] == 2
+    assert model.calls[0]["residual_base_value"] == pytest.approx(7.0)
 
 
 def test_select_chunk_conditioning_tokens_slices_multi_chunk_window() -> None:
@@ -288,19 +295,19 @@ def test_select_chunk_conditioning_tokens_slices_multi_chunk_window() -> None:
     assert torch.equal(chunk_tokens, tokens[:, 2:5])
 
 
-def test_build_rollout_boundaries_matches_single_and_k_plus_one_modes() -> None:
+def test_build_rollout_boundaries_matches_single_and_exact_k_modes() -> None:
     """Return the expected chunk boundaries for chunked and single-chunk rollout."""
     assert _build_rollout_boundaries(
         future_steps=8,
-        k=1,
-        chunk_schedule_mode="k_plus_one",
+        k=2,
+        chunk_schedule_mode="k_chunks",
         single_chunk_rollout=False,
         device=torch.device("cpu"),
     ) == ((0, 4), (4, 8))
     assert _build_rollout_boundaries(
         future_steps=8,
         k=3,
-        chunk_schedule_mode="k_plus_one",
+        chunk_schedule_mode="k_chunks",
         single_chunk_rollout=True,
         device=torch.device("cpu"),
     ) == ((0, 8),)

@@ -78,7 +78,7 @@ def test_flatten_action_chunks_preserves_within_chunk_order() -> None:
 
 
 def test_build_future_action_plan_chunks_full_frame_window_for_wan() -> None:
-    """Convert raw frame-rate actions into exact future latent-block features."""
+    """Convert frame-rate actions into future transition blocks starting at the context boundary."""
     seq = torch.arange(1 * 17 * 2, dtype=torch.float32).reshape(1, 17, 2)
 
     plan = build_future_action_plan(
@@ -89,8 +89,8 @@ def test_build_future_action_plan_chunks_full_frame_window_for_wan() -> None:
     )
 
     assert plan.shape == (1, 2, 8)
-    assert torch.equal(plan[0, 0], seq[0, 9:13].reshape(-1))
-    assert torch.equal(plan[0, 1], seq[0, 13:17].reshape(-1))
+    assert torch.equal(plan[0, 0], seq[0, 8:12].reshape(-1))
+    assert torch.equal(plan[0, 1], seq[0, 12:16].reshape(-1))
 
 
 def test_build_future_action_plan_keeps_latent_aligned_sequences() -> None:

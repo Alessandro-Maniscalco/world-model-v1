@@ -96,7 +96,7 @@ def test_prepare_packed_batch_handles_missing_proprio() -> None:
 
 
 def test_prepare_packed_batch_chunks_frame_rate_actions_by_future_latent_block() -> None:
-    """Encode each future Wan latent block from the full raw action chunk it covers."""
+    """Encode each future Wan latent block from the transition actions that lead into it."""
     latents = torch.randn(1, 2, 5, 1, 1)
     encoder = _FakeEncoder(latents)
     batch = {
@@ -114,8 +114,8 @@ def test_prepare_packed_batch_chunks_frame_rate_actions_by_future_latent_block()
     )
 
     assert prepared.a_plan.shape == (1, 2, 12)
-    assert torch.equal(prepared.a_plan[0, 0], batch["action"][0, 9:13].reshape(-1))
-    assert torch.equal(prepared.a_plan[0, 1], batch["action"][0, 13:17].reshape(-1))
+    assert torch.equal(prepared.a_plan[0, 0], batch["action"][0, 8:12].reshape(-1))
+    assert torch.equal(prepared.a_plan[0, 1], batch["action"][0, 12:16].reshape(-1))
 
 
 def test_prepare_packed_batch_allows_missing_action_when_requested() -> None:

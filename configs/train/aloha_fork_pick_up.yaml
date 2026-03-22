@@ -32,7 +32,7 @@ dt: 0.1
 # --- training ---
 batch_size: 1
 k: 1
-chunk_schedule_mode: k_plus_one
+chunk_schedule_mode: k_chunks
 max_steps: 50000
 auto_stop_check_every: 5000
 auto_stop_min_relative_improvement: 0.05

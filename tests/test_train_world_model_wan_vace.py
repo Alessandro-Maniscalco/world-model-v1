@@ -13,9 +13,7 @@ from world_model.config import TrainScriptConfig, load_train_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.training import ChunkwiseStepMetrics
@@ -91,38 +89,6 @@ def test_train_script_builds_action_encoder_when_requested() -> None:
     action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, model)
 
     assert isinstance(action_encoder, ActionTokenEncoder)
-
-
-def test_train_script_builds_action_control_projector_when_requested() -> None:
-    """Keep the action-derived latent prior projector available for ordered-plan runs."""
-    train_script = _load_train_script_module()
-    prepared = PreparedPackedBatch(
-        z_past_video=torch.randn(2, 16, 2, 8, 8),
-        z_future_video=torch.randn(2, 16, 4, 8, 8),
-        a_plan=torch.randn(2, 4, 6),
-        latent_shape=(16, 8, 8),
-        total_latent_steps=6,
-        context_latent_steps=2,
-        horizon_latent_steps=4,
-    )
-    cfg = TrainScriptConfig(
-        conditioning_mode="action",
-        action_control_prior_scale=1.0,
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-
-    model = train_script.build_model_from_config(cfg, prepared)
-    projector = train_script.build_action_control_projector_from_config(cfg, prepared, model)
-
-    assert isinstance(projector, ActionControlProjector)
 
 
 def test_train_script_builds_action_encoder_with_mlp_when_requested() -> None:
@@ -348,9 +314,9 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--motion-loss-excess-only" in option_strings
     assert "--action-conditioning-window" in option_strings
     assert "--action-order-conditioning" in option_strings
-    assert "--action-control-prior-scale" in option_strings
-    assert "--action-control-prior-mode" in option_strings
-    assert "--action-hidden-state-bias-scale" in option_strings
+    assert "--action-control-prior-scale" not in option_strings
+    assert "--action-control-prior-mode" not in option_strings
+    assert "--action-hidden-state-bias-scale" not in option_strings
     assert "--teacher-forcing-observation-mode" in option_strings
     assert "--teacher-forcing-future-input-mode" in option_strings
     assert "--action-temporal-difference-scale" in option_strings
@@ -809,7 +775,19 @@ def test_train_script_updates_validation_best_without_patience() -> None:
         current_val_loss=0.60,
     )
     assert best == pytest.approx(0.50)
-    assert improvement == pytest.approx(-0.20)
+    assert improvement == pytest.approx(-1.0 / 6.0)
+
+
+def test_train_script_bounds_validation_regressions_in_relative_improvement() -> None:
+    """Keep logged regressions bounded while preserving improvement semantics."""
+    train_script = _load_train_script_module()
+
+    improvement = train_script._relative_block_improvement(
+        previous_mean_loss=0.054439,
+        current_mean_loss=0.236559,
+    )
+
+    assert improvement == pytest.approx(-0.769871364014897)
 
 
 def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch) -> None:
@@ -857,9 +835,6 @@ def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch
     assert num_batches == 2
     assert val_loss == pytest.approx(0.45)
     assert len(captured_kwargs) == 2
-    assert captured_kwargs[0]["action_control_projector_observed_context_mode"] == "none"
-    assert captured_kwargs[0]["action_hidden_state_bias_scale"] == pytest.approx(0.0)
-    assert captured_kwargs[0]["action_control_aux_loss_scale"] == pytest.approx(0.0)
 
 
 def test_train_script_restores_validation_state_from_checkpoint() -> None:
@@ -939,13 +914,6 @@ def test_train_script_logs_validation_metrics_on_validation_rows(monkeypatch, tm
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
 
-    class _FakeActionControlProjector(torch.nn.Module):
-        """Small action-control projector placeholder for patched training-loop tests."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
-
     checkpoint_steps: list[int] = []
 
     def _fake_build_loader(**kwargs):
@@ -968,17 +936,8 @@ def test_train_script_logs_validation_metrics_on_validation_rows(monkeypatch, tm
     )
     monkeypatch.setattr(
         train_script,
-        "build_action_control_projector_from_config",
-        lambda cfg, prepared, model: _FakeActionControlProjector(),
-    )
-    monkeypatch.setattr(
-        train_script,
         "_configure_trainable_parameters",
-        lambda cfg, model, action_encoder, action_control_projector=None: (
-            list(model.parameters())
-            + list(action_encoder.parameters())
-            + ([] if action_control_projector is None else list(action_control_projector.parameters()))
-        ),
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
     )
     monkeypatch.setattr(
         train_script,
@@ -1069,13 +1028,6 @@ def test_train_script_preserves_logs_when_validation_is_disabled(monkeypatch, tm
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
 
-    class _FakeActionControlProjector(torch.nn.Module):
-        """Small action-control projector placeholder for validation-disabled tests."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
-
     monkeypatch.setattr(train_script, "_load_args", lambda: cfg)
     monkeypatch.setattr(train_script, "_set_seed", lambda seed: None)
     monkeypatch.setattr(train_script.WanVAE, "from_pretrained", lambda **_: _FakeEncoder())
@@ -1090,17 +1042,8 @@ def test_train_script_preserves_logs_when_validation_is_disabled(monkeypatch, tm
     )
     monkeypatch.setattr(
         train_script,
-        "build_action_control_projector_from_config",
-        lambda cfg, prepared, model: _FakeActionControlProjector(),
-    )
-    monkeypatch.setattr(
-        train_script,
         "_configure_trainable_parameters",
-        lambda cfg, model, action_encoder, action_control_projector=None: (
-            list(model.parameters())
-            + list(action_encoder.parameters())
-            + ([] if action_control_projector is None else list(action_control_projector.parameters()))
-        ),
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
     )
     monkeypatch.setattr(
         train_script,
@@ -1192,13 +1135,6 @@ def test_train_script_keeps_running_when_validation_patience_is_disabled(
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1))
 
-    class _FakeActionControlProjector(torch.nn.Module):
-        """Small action-control projector placeholder for zero-patience validation tests."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
-
     checkpoint_steps: list[int] = []
 
     def _fake_build_loader(**kwargs):
@@ -1221,17 +1157,8 @@ def test_train_script_keeps_running_when_validation_patience_is_disabled(
     )
     monkeypatch.setattr(
         train_script,
-        "build_action_control_projector_from_config",
-        lambda cfg, prepared, model: _FakeActionControlProjector(),
-    )
-    monkeypatch.setattr(
-        train_script,
         "_configure_trainable_parameters",
-        lambda cfg, model, action_encoder, action_control_projector=None: (
-            list(model.parameters())
-            + list(action_encoder.parameters())
-            + ([] if action_control_projector is None else list(action_control_projector.parameters()))
-        ),
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
     )
     monkeypatch.setattr(
         train_script,

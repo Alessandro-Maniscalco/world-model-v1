@@ -26,10 +26,19 @@ from world_model.optimization.codex_runner import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MEMORY_PATH = REPO_ROOT / "docs" / "complexity_ladder_training.md"
-DEFAULT_PROMPT_PATH = REPO_ROOT / "docs" / "controller_prompt.md"
+DEFAULT_MEMORY_RELATIVE_PATH = Path("docs/complexity_ladder_training.md")
+DEFAULT_PROMPT_RELATIVE_PATH = Path("docs/controller_prompt.md")
+DEFAULT_STATE_RELATIVE_PATH = Path("runs/training_optimizer/controller_state.json")
+DEFAULT_MEMORY_PATH = REPO_ROOT / DEFAULT_MEMORY_RELATIVE_PATH
+DEFAULT_PROMPT_PATH = REPO_ROOT / DEFAULT_PROMPT_RELATIVE_PATH
 DEFAULT_INSTRUCTIONS_PATH = DEFAULT_PROMPT_PATH
-DEFAULT_STATE_PATH = REPO_ROOT / "runs" / "training_optimizer" / "controller_state.json"
+DEFAULT_STATE_PATH = REPO_ROOT / DEFAULT_STATE_RELATIVE_PATH
+LEGACY_TRAINING_OPTIMIZER_MEMORY_RELATIVE_PATH = Path("docs/training_optimizer.md")
+FIXED_ANCHOR_MEMORY_RELATIVE_PATH = Path("docs/fixed_anchor_investigation.md")
+FIXED_ANCHOR_PROMPT_RELATIVE_PATH = Path("docs/controller_prompt_fixed_anchor.md")
+FIXED_ANCHOR_STATE_RELATIVE_PATH = Path(
+    "runs/training_optimizer/fixed_anchor_controller_state.json"
+)
 DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS = 25 * 60
 DEFAULT_LOG_TAIL_CHARS = 4000
 SNAPSHOT_EXCLUDED_PATH_PARTS = frozenset(
@@ -73,6 +82,11 @@ def run_training_optimization_loop(
     memory_path = Path(memory_path)
     prompt_path = Path(prompt_path)
     state_path = Path(state_path)
+    memory_path, prompt_path, state_path, workflow_notes = _resolve_controller_workflow_paths(
+        memory_path=memory_path,
+        prompt_path=prompt_path,
+        state_path=state_path,
+    )
     if not _resolve_repo_relative_path(train_config_path).exists():
         raise FileNotFoundError(
             f"train_config_path does not exist: {_display_path(train_config_path)}"
@@ -80,6 +94,8 @@ def run_training_optimization_loop(
 
     _log_controller_status("Checking Codex ChatGPT login status.")
     ensure_codex_chatgpt_login()
+    for note in workflow_notes:
+        _log_controller_status(note)
     _log_controller_status(
         f"state: {_display_path(_resolve_repo_relative_path(state_path))}"
     )
@@ -827,6 +843,60 @@ def _append_current_invocation_run_summary(
     summaries = state.setdefault("current_invocation_run_summaries", [])
     if isinstance(summaries, list):
         summaries.append(text)
+
+
+def _resolve_controller_workflow_paths(
+    *,
+    memory_path: Path,
+    prompt_path: Path,
+    state_path: Path,
+) -> tuple[Path, Path, Path, list[str]]:
+    """Resolve legacy controller aliases onto the fixed-anchor workflow paths."""
+    resolved_memory = _resolve_repo_relative_path(memory_path)
+    resolved_prompt = _resolve_repo_relative_path(prompt_path)
+    resolved_state = _resolve_repo_relative_path(state_path)
+
+    default_prompt = _resolve_repo_relative_path(DEFAULT_PROMPT_RELATIVE_PATH)
+    default_state = _resolve_repo_relative_path(DEFAULT_STATE_RELATIVE_PATH)
+    legacy_memory = _resolve_repo_relative_path(LEGACY_TRAINING_OPTIMIZER_MEMORY_RELATIVE_PATH)
+    fixed_memory = _resolve_repo_relative_path(FIXED_ANCHOR_MEMORY_RELATIVE_PATH)
+    fixed_prompt = _resolve_repo_relative_path(FIXED_ANCHOR_PROMPT_RELATIVE_PATH)
+    fixed_state = _resolve_repo_relative_path(FIXED_ANCHOR_STATE_RELATIVE_PATH)
+
+    notes: list[str] = []
+
+    if resolved_memory == legacy_memory:
+        resolved_memory = fixed_memory
+        if resolved_prompt == default_prompt:
+            resolved_prompt = fixed_prompt
+        notes.append(
+            "workflow alias: docs/training_optimizer.md selects the fixed-anchor memory "
+            "docs/fixed_anchor_investigation.md"
+        )
+
+    if resolved_memory == fixed_memory and resolved_prompt == default_prompt:
+        resolved_prompt = fixed_prompt
+        notes.append(
+            "workflow alias: docs/fixed_anchor_investigation.md selects "
+            "docs/controller_prompt_fixed_anchor.md"
+        )
+    elif resolved_prompt == fixed_prompt and resolved_memory != fixed_memory:
+        resolved_memory = fixed_memory
+        notes.append(
+            "workflow alias: docs/controller_prompt_fixed_anchor.md selects "
+            "docs/fixed_anchor_investigation.md"
+        )
+
+    if (
+        resolved_memory == fixed_memory or resolved_prompt == fixed_prompt
+    ) and resolved_state == default_state:
+        resolved_state = fixed_state
+        notes.append(
+            "workflow alias: fixed-anchor runs use "
+            "runs/training_optimizer/fixed_anchor_controller_state.json"
+        )
+
+    return resolved_memory, resolved_prompt, resolved_state, notes
 
 
 def _format_resume_command(session_id: Any) -> str:

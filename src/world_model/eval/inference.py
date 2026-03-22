@@ -7,7 +7,11 @@ from typing import Protocol
 import torch
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
-from world_model.chunking import build_chunk_schedule, resolve_num_chunks
+from world_model.chunking import (
+    build_chunk_schedule,
+    normalize_chunk_schedule_mode,
+    resolve_num_chunks,
+)
 from world_model.masking import build_block_causal_mask
 
 
@@ -24,7 +28,7 @@ class VideoVelocityModel(Protocol):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict velocity on a noisy future latent-video chunk."""
@@ -38,9 +42,8 @@ def infer_future_videos_chunkwise(
     future_steps: int,
     cross_attention_tokens: torch.Tensor,
     image_attention_tokens: torch.Tensor | None = None,
-    future_action_control_prior: torch.Tensor | None = None,
     k: int,
-    chunk_schedule_mode: str = "k_plus_one",
+    chunk_schedule_mode: str = "k_chunks",
     integration_steps: int = 20,
     future_latent_residual_mode: str = "none",
     negative_cross_attention_tokens: torch.Tensor | None = None,
@@ -57,7 +60,6 @@ def infer_future_videos_chunkwise(
         future_steps=future_steps,
         cross_attention_tokens=cross_attention_tokens,
         image_attention_tokens=image_attention_tokens,
-        future_action_control_prior=future_action_control_prior,
         negative_cross_attention_tokens=negative_cross_attention_tokens,
         integration_steps=integration_steps,
         chunk_conditioning=chunk_conditioning,
@@ -67,6 +69,7 @@ def infer_future_videos_chunkwise(
         chunk_schedule_mode=chunk_schedule_mode,
         future_latent_residual_mode=future_latent_residual_mode,
     )
+    chunk_schedule_mode = normalize_chunk_schedule_mode(chunk_schedule_mode)
 
     batch_size = z_past_video.shape[0]
     channels = z_past_video.shape[1]
@@ -151,11 +154,9 @@ def infer_future_videos_chunkwise(
             end=end,
             chunk_conditioning=chunk_conditioning,
         )
-        active_control_prior = _select_chunk_conditioning_control_prior(
-            future_action_control_prior,
-            start=start,
-            end=end,
-        )
+        active_residual_base = None
+        if future_latent_residual_mode != "none":
+            active_residual_base = future_residual_base[:, :, start:end, :, :]
 
         scheduler.set_timesteps(integration_steps, device=z_past_video.device)
         timesteps = scheduler.timesteps
@@ -169,7 +170,7 @@ def infer_future_videos_chunkwise(
                 timestep_t=timestep_t,
                 block_causal_attention_mask=mask,
                 observed_mask=observed_mask,
-                future_action_control_prior=active_control_prior,
+                future_latent_residual_base=active_residual_base,
                 control_hidden_states_scale=None,
             )
             if negative_tokens is not None:
@@ -181,7 +182,7 @@ def infer_future_videos_chunkwise(
                     timestep_t=timestep_t,
                     block_causal_attention_mask=mask,
                     observed_mask=observed_mask,
-                    future_action_control_prior=active_control_prior,
+                    future_latent_residual_base=active_residual_base,
                     control_hidden_states_scale=None,
                 )
                 velocity = velocity_uncond + guidance_scale * (velocity - velocity_uncond)
@@ -198,7 +199,6 @@ def _validate_video_infer_inputs(
     future_steps: int,
     cross_attention_tokens: torch.Tensor,
     image_attention_tokens: torch.Tensor | None,
-    future_action_control_prior: torch.Tensor | None,
     negative_cross_attention_tokens: torch.Tensor | None,
     integration_steps: int,
     chunk_conditioning: bool,
@@ -221,11 +221,7 @@ def _validate_video_infer_inputs(
         raise ValueError(f"guidance_scale must be >= 1.0, got {guidance_scale}")
     if not single_chunk_rollout and k < 1:
         raise ValueError(f"k must be >= 1 for chunked inference, got {k}")
-    if chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
-        raise ValueError(
-            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', "
-            f"got {chunk_schedule_mode!r}"
-        )
+    normalize_chunk_schedule_mode(chunk_schedule_mode)
     if future_latent_residual_mode not in {"none", "last_context_frame"}:
         raise ValueError(
             "future_latent_residual_mode must be 'none' or 'last_context_frame', "
@@ -251,18 +247,6 @@ def _validate_video_infer_inputs(
             raise ValueError("image_attention_tokens batch size must match z_past_video")
         if chunk_conditioning and image_attention_tokens.shape[1] != future_steps:
             raise ValueError("chunk-conditioned image_attention_tokens length must match requested future_steps")
-    if future_action_control_prior is not None:
-        if future_action_control_prior.ndim != 5:
-            raise ValueError(
-                "future_action_control_prior must be [B,C,T,H,W], "
-                f"got {tuple(future_action_control_prior.shape)}"
-            )
-        if future_action_control_prior.shape[0] != z_past_video.shape[0]:
-            raise ValueError("future_action_control_prior batch size must match z_past_video")
-        if future_action_control_prior.shape[2] != future_steps:
-            raise ValueError("future_action_control_prior time length must match future_steps")
-        if future_action_control_prior.shape[3:] != z_past_video.shape[3:]:
-            raise ValueError("future_action_control_prior spatial shape must match z_past_video")
 
 
 def _build_rollout_boundaries(
@@ -273,7 +257,7 @@ def _build_rollout_boundaries(
     single_chunk_rollout: bool,
     device: torch.device,
 ) -> tuple[tuple[int, int], ...]:
-    """Build rollout chunk boundaries for either K+1 or single-chunk inference."""
+    """Build rollout chunk boundaries for exact-k or single-chunk inference."""
     if single_chunk_rollout or future_steps < resolve_num_chunks(k=k, chunk_schedule_mode=chunk_schedule_mode):
         return ((0, future_steps),)
     return build_chunk_schedule(
@@ -297,18 +281,6 @@ def _select_chunk_conditioning_tokens(
     if chunk_conditioning:
         return cross_attention_tokens[:, start:end]
     return cross_attention_tokens
-
-
-def _select_chunk_conditioning_control_prior(
-    future_action_control_prior: torch.Tensor | None,
-    *,
-    start: int,
-    end: int,
-) -> torch.Tensor | None:
-    """Select the active future-control prior slice for the denoised rollout chunk."""
-    if future_action_control_prior is None:
-        return None
-    return future_action_control_prior[:, :, start:end, :, :]
 
 
 def _build_future_latent_residual_base(

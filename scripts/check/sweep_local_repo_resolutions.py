@@ -46,6 +46,7 @@ from world_model.data.prepare import prepare_packed_batch, preprocess_video_for_
 from world_model.data.temporal import WAN_FRAME_GROUP_SIZE
 from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
+from world_model.chunking import normalize_chunk_schedule_mode
 from world_model.config import load_train_config
 from world_model.models.wan_vace_factory import _attach_lora_adapters, build_wan_vace_runtime_modules
 from world_model.vendor.wan import WanVACETransformer3DModel
@@ -419,6 +420,11 @@ def _load_checkpoint_runtime_config(checkpoint_path: Path) -> tuple[dict[str, ob
     saved_cfg = extra_state.get("config")
     if not isinstance(saved_cfg, dict):
         raise ValueError("Checkpoint missing saved config metadata.")
+    if "chunk_schedule_mode" in saved_cfg:
+        saved_cfg = dict(saved_cfg)
+        saved_cfg["chunk_schedule_mode"] = normalize_chunk_schedule_mode(
+            saved_cfg.get("chunk_schedule_mode")
+        )
     return checkpoint, SimpleNamespace(**saved_cfg)
 
 
@@ -1043,22 +1049,43 @@ def _checkpoint_autocast_context(*, device: torch.device, runtime_dtype: torch.d
 def _decode_future_latents(
     *,
     vae: WanVAE,
+    past_video_latents: torch.Tensor,
     pred_future_video: torch.Tensor,
     target_future_video: torch.Tensor,
+    context_len: int,
+    future_frame_count: int,
     device: torch.device,
     runtime_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Decode generated and target future latents while avoiding GPU VAE memory spikes."""
+    """Decode future latents with their past context so Wan reconstructs all horizon frames."""
+    if context_len <= 0:
+        raise ValueError(f"context_len must be positive, got {context_len}")
+    if future_frame_count <= 0:
+        raise ValueError(f"future_frame_count must be positive, got {future_frame_count}")
+
+    pred_full_latents = torch.cat([past_video_latents, pred_future_video], dim=2)
+    target_full_latents = torch.cat([past_video_latents, target_future_video], dim=2)
     decode_pred = pred_future_video
     decode_target = target_future_video
     if device.type == "cuda":
         vae.vae.to(device="cpu", dtype=torch.float32)
-        decode_pred = pred_future_video.to("cpu")
-        decode_target = target_future_video.to("cpu")
+        decode_pred = pred_full_latents.to("cpu")
+        decode_target = target_full_latents.to("cpu")
         torch.cuda.empty_cache()
+    else:
+        decode_pred = pred_full_latents
+        decode_target = target_full_latents
     pred_video = vae.decode(decode_pred, output_layout="BTCHW", output_range="zero_to_one")
     target_video = vae.decode(decode_target, output_layout="BTCHW", output_range="zero_to_one")
-    return pred_video, target_video
+    future_start = context_len
+    future_end = context_len + future_frame_count
+    if pred_video.shape[1] < future_end or target_video.shape[1] < future_end:
+        raise ValueError(
+            "Decoded full video is shorter than the requested future slice: "
+            f"pred_frames={int(pred_video.shape[1])}, target_frames={int(target_video.shape[1])}, "
+            f"future_end={future_end}."
+        )
+    return pred_video[:, future_start:future_end], target_video[:, future_start:future_end]
 
 
 @torch.no_grad()
@@ -1101,7 +1128,7 @@ def _run_checkpoint_world_model(
         frame_height=height,
         frame_width=width,
     )
-    model, action_encoder, action_control_projector = build_wan_vace_runtime_modules(
+    model, action_encoder = build_wan_vace_runtime_modules(
         runtime_cfg,
         prepared,
         device=device,
@@ -1110,28 +1137,16 @@ def _run_checkpoint_world_model(
     if device.type == "cuda":
         model = model.to(device=device, dtype=runtime_dtype)
         action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
-        action_control_projector = action_control_projector.to(device=device, dtype=runtime_dtype)
     model.eval()
     action_encoder.eval()
-    action_control_projector.eval()
 
     with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
         cross_attention_tokens = action_encoder(prepared.a_plan)
-        future_action_control_prior = None
-        if (
-            getattr(runtime_cfg, "conditioning_mode", "action") == "action"
-            and float(getattr(runtime_cfg, "action_control_prior_scale", 0.0)) > 0.0
-        ):
-            future_action_control_prior = action_control_projector(
-                prepared.a_plan,
-                latent_height=prepared.z_future_video.shape[3],
-                latent_width=prepared.z_future_video.shape[4],
-                observed_latents=(
-                    prepared.z_past_video
-                    if getattr(runtime_cfg, "action_control_projector_observed_context_mode", "none") != "none"
-                    else None
-                ),
-            )
+        image_attention_tokens = (
+            cross_attention_tokens
+            if getattr(runtime_cfg, "action_backbone_added_kv_mode", "none") == "reuse_action_tokens"
+            else None
+        )
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         runtime_cfg.wan_vace_model_id,
         subfolder="scheduler",
@@ -1143,10 +1158,13 @@ def _run_checkpoint_world_model(
             z_past_video=prepared.z_past_video,
             future_steps=prepared.z_future_video.shape[2],
             cross_attention_tokens=cross_attention_tokens,
-            future_action_control_prior=future_action_control_prior,
+            image_attention_tokens=image_attention_tokens,
             k=k,
-            chunk_schedule_mode=str(getattr(runtime_cfg, "chunk_schedule_mode", "k_plus_one")),
+            chunk_schedule_mode=normalize_chunk_schedule_mode(
+                str(getattr(runtime_cfg, "chunk_schedule_mode", "k_chunks"))
+            ),
             integration_steps=integration_steps,
+            future_latent_residual_mode=str(getattr(runtime_cfg, "future_latent_residual_mode", "none")),
             negative_cross_attention_tokens=None,
             guidance_scale=1.0,
             chunk_conditioning=(
@@ -1159,8 +1177,11 @@ def _run_checkpoint_world_model(
         )
     pred_video, target_video = _decode_future_latents(
         vae=vae,
+        past_video_latents=prepared.z_past_video,
         pred_future_video=pred_future_video,
         target_future_video=prepared.z_future_video,
+        context_len=int(getattr(runtime_cfg, "context_len", DEFAULT_CONTEXT_LEN)),
+        future_frame_count=int(getattr(runtime_cfg, "horizon_len", DEFAULT_HORIZON_LEN)),
         device=device,
         runtime_dtype=runtime_dtype,
     )

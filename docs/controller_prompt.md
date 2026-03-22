@@ -65,12 +65,16 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 ## Validation
 
 - Use short commands only.
+- After every run, validate the newest result before choosing the next action.
+- Trace the run end to end to find the first failing stage, not just the final artifact.
 - Review artifacts in this order:
   - Visual inspection of all videos. Never skip this. `left=target/reference` and `right=prediction`. Begin by reviewing the last `horizon_len` frames.
   - then `*_arm_crop_comparison.mp4` and `*_arm_motion_report.json` if present,
   - then `plausibility_report.json`,
   - then `metrics.jsonl` and logs
   - inspect what you think is useful
+- For video or temporal failures, check: raw frame window, context/horizon packing, chunk schedule, latent-time shapes, decoded frame counts, and exported/comparison video frame counts.
+- Record where the failure first appears and what looks wrong there in plain language.
 - Watch enough of each reviewed clip to describe the
   visible motion pattern in sentences, not just labels or metrics.
 - If the video visibly goes bad, `*_arm_motion_report.json` is not needed. Visible collapse, incoherent motion, or late-horizon failure is enough to reject it even when scalar metrics look acceptable.
@@ -113,6 +117,7 @@ Everything is run on a RTX 3080 with 16GB of VRAM.
 - Re-review `## Next complexity to test` after every validated run and before
   choosing the next action. Rewrite it whenever the latest evidence changes
   which rung should be active next.
+- After every run, record the trace result in the ledger, including the first failing stage and why.
 - In ladder findings, record the specific visible behavior that changed the
   decision, especially when motion starts, how long it stays static, and any
   blur, ghosting, or missed contact in held-out clips.

@@ -132,6 +132,36 @@ def test_write_plausibility_report_writes_json(tmp_path) -> None:
     assert len(report["frames"]) == 2
 
 
+def test_decode_future_latents_uses_past_context_to_keep_full_wan_horizon() -> None:
+    """Decode the full latent window so a one-step Wan future still reconstructs four RGB frames."""
+
+    class _FakeWanVAE:
+        def __init__(self) -> None:
+            self.vae = SimpleNamespace(to=lambda device=None, dtype=None: self.vae)
+
+        def decode(self, latents, output_layout="BTCHW", output_range="zero_to_one"):
+            del output_layout, output_range
+            frame_count = 1 + ((int(latents.shape[2]) - 1) * 4)
+            frame_ids = torch.arange(frame_count, dtype=torch.float32).view(1, frame_count, 1, 1, 1)
+            return frame_ids.expand(latents.shape[0], frame_count, 3, 1, 1)
+
+    pred_video, target_video = script._decode_future_latents(
+        vae=_FakeWanVAE(),
+        past_video_latents=torch.zeros(1, 16, 6, 1, 1),
+        pred_future_video=torch.zeros(1, 16, 1, 1, 1),
+        target_future_video=torch.zeros(1, 16, 1, 1, 1),
+        context_len=21,
+        future_frame_count=4,
+        device=torch.device("cpu"),
+        runtime_dtype=torch.float32,
+    )
+
+    assert pred_video.shape == (1, 4, 3, 1, 1)
+    assert target_video.shape == (1, 4, 3, 1, 1)
+    assert torch.equal(pred_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
+    assert torch.equal(target_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
+
+
 def test_checkpoint_mode_exports_generated_rollout_and_comparison_order(monkeypatch, tmp_path) -> None:
     """Checkpoint sweeps should export the generated rollout and keep it on the comparison right."""
     target_rollout = torch.full((1, 2, 3, 4, 5), 11.0)
@@ -346,3 +376,100 @@ def test_checkpoint_mode_control_scale_override_updates_runtime(monkeypatch, tmp
     assert captured_control_scales == [1.5]
     assert result["conditioning_scale"] == 1.5
     assert "Overrode runtime control scale to 1.500 for this probe." in result["notes"]
+
+
+def test_run_checkpoint_world_model_matches_current_action_infer_logic(monkeypatch) -> None:
+    """Checkpoint sweeps should preserve current action-control, added-K/V, and residual-mode inference."""
+
+    class _FakeActionEncoder(torch.nn.Module):
+        """Return a fixed token tensor for checkpoint-mode action conditioning."""
+
+        def forward(self, a_plan: torch.Tensor) -> torch.Tensor:
+            """Project the action plan to a deterministic token tensor."""
+            del a_plan
+            return torch.full((1, 3, 4), 7.0)
+
+    prepared = SimpleNamespace(
+        a_plan=torch.arange(6, dtype=torch.float32).view(1, 3, 2),
+        z_past_video=torch.full((1, 2, 2, 1, 1), 3.0),
+        z_future_video=torch.full((1, 2, 3, 1, 1), 4.0),
+    )
+    captured_infer_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(script.WanVAE, "from_pretrained", lambda **kwargs: object())
+    monkeypatch.setattr(script, "_infer_checkpoint_action_dim", lambda checkpoint: 2)
+    monkeypatch.setattr(script, "_select_action_tensor", lambda **kwargs: torch.zeros(5, 2))
+    monkeypatch.setattr(script, "prepare_packed_batch", lambda **kwargs: prepared)
+    monkeypatch.setattr(
+        script,
+        "build_wan_vace_runtime_modules",
+        lambda runtime_cfg, prepared_batch, device, checkpoint: (
+            torch.nn.Identity(),
+            _FakeActionEncoder(),
+        ),
+    )
+    monkeypatch.setattr(
+        script.FlowMatchEulerDiscreteScheduler,
+        "from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+
+    def _fake_infer_future_videos_chunkwise(model, **kwargs):
+        """Capture the inference kwargs and return a deterministic latent future."""
+        del model
+        captured_infer_kwargs.update(kwargs)
+        return torch.full((1, 2, 3, 1, 1), 9.0)
+
+    monkeypatch.setattr(script, "infer_future_videos_chunkwise", _fake_infer_future_videos_chunkwise)
+    monkeypatch.setattr(
+        script,
+        "_decode_future_latents",
+        lambda **kwargs: (
+            torch.full((1, 3, 3, 1, 1), 8.0),
+            torch.full((1, 3, 3, 1, 1), 6.0),
+        ),
+    )
+    monkeypatch.setattr(
+        script,
+        "preprocess_video_for_vae",
+        lambda video, frame_height, frame_width: torch.zeros(1, 5, 3, 1, 1),
+    )
+    monkeypatch.setattr(
+        script,
+        "_build_rollout_video",
+        lambda *, target_full_video, pred_future_video, context_len: (
+            torch.full((1, 5, 3, 1, 1), 8.0),
+            torch.full((1, 5, 3, 1, 1), 6.0),
+        ),
+    )
+
+    target_rollout, pred_rollout = script._run_checkpoint_world_model(
+        runtime_cfg=SimpleNamespace(
+            wan_vace_model_id="wan",
+            conditioning_mode="action",
+            context_len=2,
+            horizon_len=3,
+            chunk_schedule_mode="k_chunks",
+            action_conditioning_window="chunk",
+            action_backbone_added_kv_mode="reuse_action_tokens",
+            future_latent_residual_mode="last_context_frame",
+        ),
+        checkpoint={},
+        video=torch.zeros(1, 5, 3, 4, 4),
+        action_seq=torch.zeros(5, 2),
+        video_key="observation.images.cam_high",
+        width=320,
+        height=240,
+        k=1,
+        integration_steps=10,
+        single_chunk_rollout=True,
+        action_source="auto",
+        device=torch.device("cpu"),
+        runtime_dtype=torch.float32,
+        generator=None,
+    )
+
+    assert torch.equal(target_rollout, torch.full((1, 5, 3, 1, 1), 8.0))
+    assert torch.equal(pred_rollout, torch.full((1, 5, 3, 1, 1), 6.0))
+    assert torch.equal(captured_infer_kwargs["image_attention_tokens"], torch.full((1, 3, 4), 7.0))
+    assert captured_infer_kwargs["future_latent_residual_mode"] == "last_context_frame"

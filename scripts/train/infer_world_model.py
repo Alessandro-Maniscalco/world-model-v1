@@ -46,9 +46,7 @@ from world_model.data.schema import PreparedPackedBatch
 from world_model.eval import infer_future_videos_chunkwise
 from world_model.latents import WanVAE
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.models.wan_vace_factory import build_wan_vace_runtime_modules
@@ -200,36 +198,6 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
         help="Optionally mirror action tokens into Wan's added-K/V image-conditioning path.",
     )
     parser.add_argument(
-        "--action-control-prior-scale",
-        type=float,
-        default=defaults.action_control_prior_scale,
-        help="Scale for the action-derived latent control prior added to future VACE filler latents.",
-    )
-    parser.add_argument(
-        "--action-control-prior-mode",
-        choices=("reactive_only", "dual_fill"),
-        default=defaults.action_control_prior_mode,
-        help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
-    )
-    parser.add_argument(
-        "--action-control-projector-init-mode",
-        choices=("zero", "linear_default"),
-        default=defaults.action_control_projector_init_mode,
-        help="Initialization mode for the action-to-latent control projector when no projector weights are available in a checkpoint.",
-    )
-    parser.add_argument(
-        "--action-control-projector-observed-context-mode",
-        choices=("none", "last_frame"),
-        default=defaults.action_control_projector_observed_context_mode,
-        help="Optional observed-latent context pooled into the action-control projector before future broadcast.",
-    )
-    parser.add_argument(
-        "--action-hidden-state-bias-scale",
-        type=float,
-        default=defaults.action_hidden_state_bias_scale,
-        help="Scale for adding the action-derived latent control signal directly to future latent hidden states before the Wan backbone.",
-    )
-    parser.add_argument(
         "--action-temporal-difference-scale",
         type=float,
         default=defaults.action_temporal_difference_scale,
@@ -327,28 +295,10 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
     if cfg.num_vis_frames < 0:
         raise ValueError(f"num_vis_frames must be >= 0, got {cfg.num_vis_frames}")
     normalize_chunk_schedule_mode(cfg.chunk_schedule_mode)
-    if cfg.action_control_prior_scale < 0.0:
-        raise ValueError(
-            f"action_control_prior_scale must be >= 0, got {cfg.action_control_prior_scale}"
-        )
-    if cfg.action_control_prior_mode not in {"reactive_only", "dual_fill"}:
-        raise ValueError(
-            "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
-            f"{cfg.action_control_prior_mode!r}"
-        )
     if cfg.future_control_fill_mode not in {"gray", "last_context_frame"}:
         raise ValueError(
             "future_control_fill_mode must be 'gray' or 'last_context_frame', got "
             f"{cfg.future_control_fill_mode!r}"
-        )
-    if cfg.action_hidden_state_bias_scale < 0.0:
-        raise ValueError(
-            f"action_hidden_state_bias_scale must be >= 0, got {cfg.action_hidden_state_bias_scale}"
-        )
-    if cfg.action_control_projector_observed_context_mode not in {"none", "last_frame"}:
-        raise ValueError(
-            "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
-            f"{cfg.action_control_projector_observed_context_mode!r}"
         )
     if cfg.action_backbone_added_kv_mode not in {"none", "reuse_action_tokens"}:
         raise ValueError(
@@ -406,10 +356,6 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "action_conditioning_window",
         "action_order_conditioning",
         "action_backbone_added_kv_mode",
-        "action_control_prior_scale",
-        "action_control_prior_mode",
-        "action_hidden_state_bias_scale",
-        "action_control_projector_observed_context_mode",
         "action_token_latent_aux_loss_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
@@ -638,7 +584,6 @@ def build_runtime_modules(
 ) -> tuple[
     WanVACEWorldModel,
     ActionTokenEncoder | NullConditioningEncoder,
-    ActionControlProjector | NullActionControlProjector,
 ]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
     return build_wan_vace_runtime_modules(
@@ -984,27 +929,46 @@ def _release_vae_after_prepare(vae: WanVAE, *, device: torch.device) -> None:
 def _decode_future_videos(
     *,
     vae: WanVAE,
+    past_video_latents: torch.Tensor,
     pred_future_video: torch.Tensor,
     target_future_video: torch.Tensor,
+    context_len: int,
+    future_frame_count: int,
     device: torch.device,
     disable_amp: bool,
     runtime_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Decode future latent videos, falling back to CPU to reduce GPU peak memory."""
+    """Decode future latents with their context so Wan reconstructs the full future horizon."""
+    if context_len <= 0:
+        raise ValueError(f"context_len must be positive, got {context_len}")
+    if future_frame_count <= 0:
+        raise ValueError(f"future_frame_count must be positive, got {future_frame_count}")
+
+    pred_full_latents = torch.cat([past_video_latents, pred_future_video], dim=2)
+    target_full_latents = torch.cat([past_video_latents, target_future_video], dim=2)
     decode_device = device
     decode_dtype = runtime_dtype
     if device.type == "cuda":
         vae.vae.to(device="cpu", dtype=torch.float32)
-        pred_future_video = pred_future_video.to("cpu")
-        target_future_video = target_future_video.to("cpu")
+        pred_full_latents = pred_full_latents.to("cpu")
+        target_full_latents = target_full_latents.to("cpu")
         torch.cuda.empty_cache()
         decode_device = torch.device("cpu")
         decode_dtype = torch.float32
 
     with _autocast_context(device=decode_device, disable_amp=disable_amp, dtype=decode_dtype):
-        pred_video = vae.decode(pred_future_video, output_layout="BTCHW", output_range="zero_to_one")
-        target_video = vae.decode(target_future_video, output_layout="BTCHW", output_range="zero_to_one")
-    return pred_video, target_video
+        pred_video = vae.decode(pred_full_latents, output_layout="BTCHW", output_range="zero_to_one")
+        target_video = vae.decode(target_full_latents, output_layout="BTCHW", output_range="zero_to_one")
+
+    future_start = context_len
+    future_end = context_len + future_frame_count
+    if pred_video.shape[1] < future_end or target_video.shape[1] < future_end:
+        raise ValueError(
+            "Decoded full video is shorter than the requested future slice: "
+            f"pred_frames={int(pred_video.shape[1])}, target_frames={int(target_video.shape[1])}, "
+            f"future_end={future_end}."
+        )
+    return pred_video[:, future_start:future_end], target_video[:, future_start:future_end]
 
 
 @torch.no_grad()
@@ -1068,7 +1032,7 @@ def main() -> None:
         )
 
     _release_vae_after_prepare(vae, device=device)
-    model, action_encoder, action_control_projector = build_runtime_modules(
+    model, action_encoder = build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=device,
@@ -1077,12 +1041,10 @@ def main() -> None:
     if device.type == "cuda" and not cfg.disable_amp:
         model = model.to(device=device, dtype=runtime_dtype)
         action_encoder = action_encoder.to(device=device, dtype=runtime_dtype)
-        action_control_projector = action_control_projector.to(device=device, dtype=runtime_dtype)
     scheduler = _load_flow_match_scheduler(cfg)
 
     model.eval()
     action_encoder.eval()
-    action_control_projector.eval()
 
     if cfg.conditioning_mode == "prompt":
         tokenizer, text_encoder = _load_prompt_encoder(cfg)
@@ -1104,7 +1066,6 @@ def main() -> None:
         del text_encoder
         if device.type == "cuda":
             torch.cuda.empty_cache()
-        future_action_control_prior = None
         image_attention_tokens = None
     elif cfg.conditioning_mode == "action":
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
@@ -1114,25 +1075,12 @@ def main() -> None:
                 if cfg.action_backbone_added_kv_mode == "reuse_action_tokens"
                 else None
             )
-            future_action_control_prior = None
-            if cfg.action_control_prior_scale > 0.0 or cfg.action_hidden_state_bias_scale > 0.0:
-                future_action_control_prior = action_control_projector(
-                    prepared.a_plan,
-                    latent_height=prepared.z_future_video.shape[3],
-                    latent_width=prepared.z_future_video.shape[4],
-                    observed_latents=(
-                        prepared.z_past_video
-                        if cfg.action_control_projector_observed_context_mode != "none"
-                        else None
-                    ),
-                )
         negative_cross_attention_tokens = None
     else:
         with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
             cross_attention_tokens = action_encoder(prepared.a_plan)
         image_attention_tokens = None
         negative_cross_attention_tokens = None
-        future_action_control_prior = None
 
     with _autocast_context(device=device, disable_amp=cfg.disable_amp, dtype=runtime_dtype):
         pred_future_video = infer_future_videos_chunkwise(
@@ -1141,7 +1089,6 @@ def main() -> None:
             future_steps=prepared.z_future_video.shape[2],
             cross_attention_tokens=cross_attention_tokens,
             image_attention_tokens=image_attention_tokens,
-            future_action_control_prior=future_action_control_prior,
             k=cfg.k,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             integration_steps=cfg.integration_steps,
@@ -1156,12 +1103,14 @@ def main() -> None:
     del cross_attention_tokens
     del image_attention_tokens
     del negative_cross_attention_tokens
-    del future_action_control_prior
-    _release_sampling_modules(model, action_encoder, action_control_projector, device=device)
+    _release_sampling_modules(model, action_encoder, device=device)
     pred_video, target_video = _decode_future_videos(
         vae=vae,
+        past_video_latents=prepared.z_past_video,
         pred_future_video=pred_future_video,
         target_future_video=prepared.z_future_video,
+        context_len=cfg.context_len,
+        future_frame_count=cfg.horizon_len,
         device=device,
         disable_amp=cfg.disable_amp,
         runtime_dtype=runtime_dtype,

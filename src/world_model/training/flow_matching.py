@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 
 import torch
 
-from world_model.chunking import build_chunk_schedule
+from world_model.chunking import build_chunk_schedule, normalize_chunk_schedule_mode
 from world_model.masking import build_block_causal_mask
 
 
@@ -33,7 +33,7 @@ class ChunkwiseVideoVelocityModel(Protocol):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict velocity for `noisy_future_video`."""
@@ -179,11 +179,10 @@ def chunkwise_teacher_forcing_loss(
     z_future_video: torch.Tensor,
     action_tokens: torch.Tensor,
     action_image_tokens: torch.Tensor | None = None,
-    action_control_prior: torch.Tensor | None = None,
     action_conditioning_window: Literal["chunk", "full"] = "chunk",
     teacher_forcing_observation_mode: TeacherForcingObservationMode = "full_prefix",
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode = "full_suffix",
-    chunk_schedule_mode: str = "k_plus_one",
+    chunk_schedule_mode: str = "k_chunks",
     k: int,
     t_min: float = 0.0,
     t_max: float = 1.0,
@@ -206,7 +205,6 @@ def chunkwise_teacher_forcing_loss(
         z_future_video=z_future_video,
         action_tokens=action_tokens,
         action_image_tokens=action_image_tokens,
-        action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
@@ -235,7 +233,6 @@ def _chunkwise_teacher_forcing_video_loss(
     z_future_video: torch.Tensor | None,
     action_tokens: torch.Tensor | None,
     action_image_tokens: torch.Tensor | None,
-    action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
@@ -261,13 +258,13 @@ def _chunkwise_teacher_forcing_video_loss(
         z_future_video=z_future_video,
         action_tokens=action_tokens,
         action_image_tokens=action_image_tokens,
-        action_control_prior=action_control_prior,
         action_conditioning_window=action_conditioning_window,
         teacher_forcing_observation_mode=teacher_forcing_observation_mode,
         teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
         chunk_schedule_mode=chunk_schedule_mode,
         k=k,
     )
+    chunk_schedule_mode = normalize_chunk_schedule_mode(chunk_schedule_mode)
 
     assert z_past_video is not None
     assert z_future_video is not None
@@ -388,14 +385,13 @@ def _chunkwise_teacher_forcing_video_loss(
             timestep_t=normalized_t_to_scheduler_timestep(t),
             block_causal_attention_mask=attn_mask,
             observed_mask=observed_mask,
-            future_action_control_prior=_select_action_control_prior(
-                action_control_prior=action_control_prior,
+            future_latent_residual_base=_select_teacher_forcing_future_residual_base(
+                future_latent_residual_base=(
+                    future_residual_base if future_latent_residual_mode != "none" else None
+                ),
                 start=start,
                 end=end,
-                total_future_steps=total_future_steps,
-                action_conditioning_window=action_conditioning_window,
                 teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
-                reference_future_input=noisy_future_input,
             ),
             control_hidden_states_scale=None,
         )
@@ -456,7 +452,6 @@ def _validate_chunkwise_video_inputs(
     z_future_video: torch.Tensor | None,
     action_tokens: torch.Tensor | None,
     action_image_tokens: torch.Tensor | None,
-    action_control_prior: torch.Tensor | None,
     action_conditioning_window: Literal["chunk", "full"],
     teacher_forcing_observation_mode: TeacherForcingObservationMode,
     teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
@@ -489,18 +484,6 @@ def _validate_chunkwise_video_inputs(
             raise ValueError("action_image_tokens batch size must match latent-video batch size")
         if action_image_tokens.shape[1] != z_future_video.shape[2]:
             raise ValueError("action_image_tokens time length must match z_future_video latent horizon")
-    if action_control_prior is not None:
-        if action_control_prior.ndim != 5:
-            raise ValueError(
-                "action_control_prior must be [B,C,T,H,W], "
-                f"got {tuple(action_control_prior.shape)}"
-            )
-        if action_control_prior.shape[0] != z_future_video.shape[0]:
-            raise ValueError("action_control_prior batch size must match latent-video batch size")
-        if action_control_prior.shape[2] != z_future_video.shape[2]:
-            raise ValueError("action_control_prior time length must match z_future_video latent horizon")
-        if action_control_prior.shape[3:] != z_future_video.shape[3:]:
-            raise ValueError("action_control_prior spatial shape must match z_future_video")
     if action_conditioning_window not in {"chunk", "full"}:
         raise ValueError(
             "action_conditioning_window must be 'chunk' or 'full', "
@@ -521,11 +504,7 @@ def _validate_chunkwise_video_inputs(
             "teacher_forcing_future_input_mode must be 'full_suffix' or "
             f"'active_chunk', got {teacher_forcing_future_input_mode!r}"
         )
-    if chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
-        raise ValueError(
-            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', "
-            f"got {chunk_schedule_mode!r}"
-        )
+    normalize_chunk_schedule_mode(chunk_schedule_mode)
     if z_future_video.shape[2] <= 0:
         raise ValueError("z_future_video must have positive time dimension")
     if k < 1:
@@ -591,6 +570,21 @@ def _select_teacher_forcing_future_input(
     return noisy_suffix
 
 
+def _select_teacher_forcing_future_residual_base(
+    *,
+    future_latent_residual_base: torch.Tensor | None,
+    start: int,
+    end: int,
+    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
+) -> torch.Tensor | None:
+    """Align the residual baseline to the future window consumed by the model."""
+    if future_latent_residual_base is None:
+        return None
+    if teacher_forcing_future_input_mode == "active_chunk":
+        return future_latent_residual_base[:, :, start:end, :, :]
+    return future_latent_residual_base[:, :, start:, :, :]
+
+
 def _select_teacher_forcing_future_chunk_ids(
     *,
     schedule_chunk_ids: torch.Tensor,
@@ -643,37 +637,6 @@ def _estimate_clean_chunk_from_velocity(
         1,
     )
     return noisy_chunk - (t_broadcast * pred_chunk)
-
-
-def _select_action_control_prior(
-    *,
-    action_control_prior: torch.Tensor | None,
-    start: int,
-    end: int,
-    total_future_steps: int,
-    action_conditioning_window: Literal["chunk", "full"],
-    teacher_forcing_future_input_mode: TeacherForcingFutureInputMode,
-    reference_future_input: torch.Tensor,
-) -> torch.Tensor | None:
-    """Align future control priors to the suffix video window consumed by the model."""
-    if action_control_prior is None:
-        return None
-    if teacher_forcing_future_input_mode == "active_chunk":
-        return action_control_prior[:, :, start:end, :, :]
-
-    suffix_len = total_future_steps - start
-    if action_conditioning_window == "full":
-        return action_control_prior[:, :, start:, :, :]
-
-    aligned_prior = reference_future_input.new_zeros(
-        action_control_prior.shape[0],
-        action_control_prior.shape[1],
-        suffix_len,
-        action_control_prior.shape[3],
-        action_control_prior.shape[4],
-    )
-    aligned_prior[:, :, : end - start, :, :] = action_control_prior[:, :, start:end, :, :]
-    return aligned_prior
 
 
 def _compute_motion_loss_weight(

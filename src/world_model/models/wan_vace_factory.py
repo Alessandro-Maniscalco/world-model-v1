@@ -10,9 +10,7 @@ import torch
 
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
@@ -72,9 +70,6 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
         backbone=backbone,
         control_scale=cfg.control_scale,
         future_control_fill_mode=str(getattr(cfg, "future_control_fill_mode", "gray")),
-        action_control_prior_scale=float(getattr(cfg, "action_control_prior_scale", 0.0)),
-        action_control_prior_mode=str(getattr(cfg, "action_control_prior_mode", "reactive_only")),
-        action_hidden_state_bias_scale=float(getattr(cfg, "action_hidden_state_bias_scale", 0.0)),
         mask_channels=cfg.mask_channels,
         control_black_latents=prepared_batch.control_black_latents,
         control_gray_latents=prepared_batch.control_gray_latents,
@@ -108,24 +103,6 @@ def build_conditioning_encoder_for_model(
     )
 
 
-def build_action_control_projector_for_model(
-    cfg: Any,
-    prepared_batch: PreparedPackedBatch,
-    model: WanVACEWorldModel,
-) -> ActionControlProjector | NullActionControlProjector:
-    """Build the action-to-latent control-prior projector for action-conditioned runs."""
-    if getattr(cfg, "conditioning_mode", "none") != "action":
-        return NullActionControlProjector(latent_channels=int(model.backbone.config.in_channels))
-    return ActionControlProjector(
-        action_dim=int(prepared_batch.a_plan.shape[-1]),
-        latent_channels=int(model.backbone.config.in_channels),
-        init_mode=str(getattr(cfg, "action_control_projector_init_mode", "zero")),
-        observed_context_mode=str(
-            getattr(cfg, "action_control_projector_observed_context_mode", "none")
-        ),
-    )
-
-
 def build_action_token_encoder_for_model(
     prepared_batch: PreparedPackedBatch,
     model: WanVACEWorldModel,
@@ -141,7 +118,6 @@ def apply_wan_vace_checkpoint_overlay(
     *,
     model: WanVACEWorldModel,
     action_encoder: ActionTokenEncoder | NullConditioningEncoder,
-    action_control_projector: ActionControlProjector | NullActionControlProjector,
     checkpoint: dict[str, object],
 ) -> None:
     """Overlay local fine-tune checkpoint weights onto runtime Wan VACE modules."""
@@ -153,10 +129,6 @@ def apply_wan_vace_checkpoint_overlay(
         raise ValueError("Checkpoint missing action_encoder_state_dict")
     model.load_state_dict(model_state)
     _load_action_encoder_state_dict(action_encoder=action_encoder, action_state=action_state)
-    _load_action_control_projector_state_dict(
-        action_control_projector=action_control_projector,
-        projector_state=checkpoint.get("action_control_projector_state_dict"),
-    )
 
 
 def build_wan_vace_runtime_modules(
@@ -168,21 +140,18 @@ def build_wan_vace_runtime_modules(
 ) -> tuple[
     WanVACEWorldModel,
     ActionTokenEncoder | NullConditioningEncoder,
-    ActionControlProjector | NullActionControlProjector,
 ]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
     cfg = _merge_runtime_backbone_config(cfg=cfg, checkpoint=checkpoint)
     model = build_wan_vace_model_from_config(cfg, prepared_batch).to(device)
     action_encoder = build_conditioning_encoder_for_model(cfg, prepared_batch, model).to(device)
-    action_control_projector = build_action_control_projector_for_model(cfg, prepared_batch, model).to(device)
     if checkpoint is not None:
         apply_wan_vace_checkpoint_overlay(
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             checkpoint=checkpoint,
         )
-    return model, action_encoder, action_control_projector
+    return model, action_encoder
 
 
 def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> int:
@@ -253,11 +222,6 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_conditioning_window",
         "action_order_conditioning",
         "action_backbone_added_kv_mode",
-        "action_control_prior_scale",
-        "action_control_prior_mode",
-        "action_control_projector_init_mode",
-        "action_control_projector_observed_context_mode",
-        "action_hidden_state_bias_scale",
         "action_token_latent_aux_loss_scale",
         "action_temporal_difference_scale",
         "action_temporal_mixer_kernel_size",
@@ -375,31 +339,3 @@ def _load_action_encoder_state_dict(
     if disallowed_missing:
         raise RuntimeError(f"Missing required action-encoder checkpoint keys: {sorted(disallowed_missing)}")
     return bool(missing_keys)
-
-
-def _load_action_control_projector_state_dict(
-    *,
-    action_control_projector: ActionControlProjector | NullActionControlProjector,
-    projector_state: object,
-) -> bool:
-    """Load action-control-prior weights while tolerating old checkpoints without them."""
-    if isinstance(action_control_projector, NullActionControlProjector):
-        return False
-    if projector_state is None:
-        return True
-    if not isinstance(projector_state, dict):
-        raise ValueError("Checkpoint action_control_projector_state_dict must be a dict when present")
-
-    incompatible = action_control_projector.load_state_dict(projector_state, strict=False)
-    unexpected_keys = set(incompatible.unexpected_keys)
-    missing_keys = set(incompatible.missing_keys)
-    allowed_missing = action_control_projector.allowed_missing_state_dict_keys()
-    if unexpected_keys:
-        raise RuntimeError(f"Unexpected action-control-projector checkpoint keys: {sorted(unexpected_keys)}")
-    disallowed_missing = missing_keys - allowed_missing
-    if disallowed_missing:
-        raise RuntimeError(
-            "Missing required action-control-projector checkpoint keys: "
-            f"{sorted(disallowed_missing)}"
-        )
-    return True

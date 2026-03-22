@@ -265,7 +265,7 @@ def test_chunkwise_teacher_forcing_loss_chunk_bias_favors_earlier_chunk_errors(m
             timestep_t: torch.Tensor,
             block_causal_attention_mask: torch.Tensor,
             observed_mask: torch.Tensor | None = None,
-            future_action_control_prior: torch.Tensor | None = None,
+            future_latent_residual_base: torch.Tensor | None = None,
             control_hidden_states_scale: torch.Tensor | None = None,
         ) -> torch.Tensor:
             del (
@@ -275,7 +275,7 @@ def test_chunkwise_teacher_forcing_loss_chunk_bias_favors_earlier_chunk_errors(m
                 timestep_t,
                 block_causal_attention_mask,
                 observed_mask,
-                future_action_control_prior,
+                future_latent_residual_base,
                 control_hidden_states_scale,
             )
             return torch.zeros_like(noisy_future_video)
@@ -324,7 +324,7 @@ class _ChunkActionWindowRecorder:
     def __init__(self) -> None:
         """Initialize captured action-window storage."""
         self.action_windows: list[torch.Tensor] = []
-        self.action_control_priors: list[torch.Tensor | None] = []
+        self.future_latent_residual_bases: list[torch.Tensor | None] = []
         self.observed_videos: list[torch.Tensor] = []
         self.noisy_future_videos: list[torch.Tensor] = []
 
@@ -338,7 +338,7 @@ class _ChunkActionWindowRecorder:
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Capture the active action window and emit zero velocities."""
@@ -346,8 +346,8 @@ class _ChunkActionWindowRecorder:
         self.noisy_future_videos.append(noisy_future_video.detach().clone())
         self.action_windows.append(action_tokens.detach().clone())
         self.observed_videos.append(observed_video.detach().clone())
-        self.action_control_priors.append(
-            None if future_action_control_prior is None else future_action_control_prior.detach().clone()
+        self.future_latent_residual_bases.append(
+            None if future_latent_residual_base is None else future_latent_residual_base.detach().clone()
         )
         return torch.zeros_like(noisy_future_video)
 
@@ -362,7 +362,7 @@ def test_chunkwise_teacher_forcing_uses_current_chunk_action_window():
         z_past_video=torch.randn(1, 2, 3, 1, 1),
         z_future_video=torch.randn(1, 2, 5, 1, 1),
         action_tokens=action_tokens,
-        k=2,
+        k=3,
         t_min=0.4,
         t_max=0.4,
     )
@@ -371,6 +371,29 @@ def test_chunkwise_teacher_forcing_uses_current_chunk_action_window():
     assert torch.equal(model.action_windows[0], action_tokens[:, 0:2])
     assert torch.equal(model.action_windows[1], action_tokens[:, 2:4])
     assert torch.equal(model.action_windows[2], action_tokens[:, 4:5])
+
+
+def test_chunkwise_teacher_forcing_aligns_residual_base_to_future_input_window() -> None:
+    """Pass the residual baseline with the same temporal window as the future model input."""
+    model = _ChunkActionWindowRecorder()
+
+    chunkwise_teacher_forcing_loss(
+        model,
+        z_past_video=torch.full((1, 1, 2, 1, 1), 3.0),
+        z_future_video=torch.zeros(1, 1, 5, 1, 1),
+        action_tokens=torch.zeros(1, 5, 1),
+        future_latent_residual_mode="last_context_frame",
+        k=3,
+        t_min=0.4,
+        t_max=0.4,
+    )
+
+    assert [base.shape[2] for base in model.future_latent_residual_bases if base is not None] == [5, 3, 1]
+    assert all(
+        torch.allclose(base, torch.full_like(base, 3.0))
+        for base in model.future_latent_residual_bases
+        if base is not None
+    )
 
 
 def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> None:
@@ -384,7 +407,7 @@ def test_chunkwise_teacher_forcing_can_use_full_action_plan_on_every_chunk() -> 
         z_future_video=torch.randn(1, 2, 5, 1, 1),
         action_tokens=action_tokens,
         action_conditioning_window="full",
-        k=2,
+        k=3,
         t_min=0.4,
         t_max=0.4,
     )
@@ -423,7 +446,7 @@ def test_chunkwise_teacher_forcing_can_match_rollout_with_active_chunk_future_in
         "z_past_video": torch.randn(1, 2, 3, 1, 1),
         "z_future_video": torch.randn(1, 2, 5, 1, 1),
         "action_tokens": action_tokens,
-        "k": 2,
+        "k": 3,
         "t_min": 0.4,
         "t_max": 0.4,
     }
@@ -457,7 +480,7 @@ def test_chunkwise_teacher_forcing_can_hide_future_prefix_from_later_chunks() ->
         z_future_video=z_future_video,
         action_tokens=action_tokens,
         teacher_forcing_observation_mode="full_prefix",
-        k=2,
+        k=3,
         t_min=0.4,
         t_max=0.4,
     )
@@ -467,7 +490,7 @@ def test_chunkwise_teacher_forcing_can_hide_future_prefix_from_later_chunks() ->
         z_future_video=z_future_video,
         action_tokens=action_tokens,
         teacher_forcing_observation_mode="past_only",
-        k=2,
+        k=3,
         t_min=0.4,
         t_max=0.4,
     )
@@ -514,7 +537,7 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
             timestep_t: torch.Tensor,
             block_causal_attention_mask: torch.Tensor,
             observed_mask: torch.Tensor | None = None,
-            future_action_control_prior: torch.Tensor | None = None,
+            future_latent_residual_base: torch.Tensor | None = None,
             control_hidden_states_scale: torch.Tensor | None = None,
         ) -> torch.Tensor:
             """Capture observed prefixes and return a constant unit velocity."""
@@ -524,7 +547,7 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
                 timestep_t,
                 block_causal_attention_mask,
                 observed_mask,
-                future_action_control_prior,
+                future_latent_residual_base,
                 control_hidden_states_scale,
             )
             self.observed_videos.append(observed_video.detach().clone())
@@ -543,7 +566,7 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
         z_future_video=z_future_video,
         action_tokens=action_tokens,
         teacher_forcing_observation_mode="predicted_prefix",
-        k=2,
+        k=3,
         t_min=0.5,
         t_max=0.5,
     )
@@ -558,77 +581,6 @@ def test_chunkwise_teacher_forcing_can_use_predicted_prefix_for_later_chunks(mon
         model.observed_videos[2],
         torch.cat((z_past_video, z_future_video[:, :, :4, :, :] - 0.5), dim=2),
     )
-
-
-def test_chunkwise_teacher_forcing_aligns_action_control_prior_to_suffix_modes() -> None:
-    """Align chunk-mode priors to the active chunk and full-mode priors to the future suffix."""
-    chunk_model = _ChunkActionWindowRecorder()
-    full_model = _ChunkActionWindowRecorder()
-    action_tokens = torch.arange(4, dtype=torch.float32).view(1, 4, 1)
-    action_control_prior = torch.arange(1 * 2 * 4 * 1 * 1, dtype=torch.float32).view(1, 2, 4, 1, 1)
-
-    chunkwise_teacher_forcing_loss(
-        chunk_model,
-        z_past_video=torch.randn(1, 2, 2, 1, 1),
-        z_future_video=torch.randn(1, 2, 4, 1, 1),
-        action_tokens=action_tokens,
-        action_control_prior=action_control_prior,
-        action_conditioning_window="chunk",
-        k=1,
-        t_min=0.4,
-        t_max=0.4,
-    )
-    chunkwise_teacher_forcing_loss(
-        full_model,
-        z_past_video=torch.randn(1, 2, 2, 1, 1),
-        z_future_video=torch.randn(1, 2, 4, 1, 1),
-        action_tokens=action_tokens,
-        action_control_prior=action_control_prior,
-        action_conditioning_window="full",
-        k=1,
-        t_min=0.4,
-        t_max=0.4,
-    )
-
-    assert chunk_model.action_control_priors[0] is not None
-    expected_first_chunk_prior = torch.cat(
-        [
-            action_control_prior[:, :, 0:2],
-            torch.zeros_like(action_control_prior[:, :, 0:2]),
-        ],
-        dim=2,
-    )
-    assert torch.equal(chunk_model.action_control_priors[0], expected_first_chunk_prior)
-    assert chunk_model.action_control_priors[1] is not None
-    assert chunk_model.action_control_priors[1].shape[2] == 2
-    assert torch.equal(chunk_model.action_control_priors[1], action_control_prior[:, :, 2:4])
-    assert torch.equal(full_model.action_control_priors[0], action_control_prior[:, :, 0:4])
-    assert torch.equal(full_model.action_control_priors[1], action_control_prior[:, :, 2:4])
-
-
-def test_chunkwise_teacher_forcing_trims_full_plan_action_control_prior_for_active_chunk_inputs() -> None:
-    """Trim full-plan action priors to the active chunk when rollout-matched inputs are used."""
-    model = _ChunkActionWindowRecorder()
-    action_tokens = torch.arange(4, dtype=torch.float32).view(1, 4, 1)
-    action_control_prior = torch.arange(1 * 2 * 4 * 1 * 1, dtype=torch.float32).view(1, 2, 4, 1, 1)
-
-    chunkwise_teacher_forcing_loss(
-        model,
-        z_past_video=torch.randn(1, 2, 2, 1, 1),
-        z_future_video=torch.randn(1, 2, 4, 1, 1),
-        action_tokens=action_tokens,
-        action_control_prior=action_control_prior,
-        action_conditioning_window="full",
-        teacher_forcing_future_input_mode="active_chunk",
-        k=1,
-        t_min=0.4,
-        t_max=0.4,
-    )
-
-    assert all(window.shape[1] == 4 for window in model.action_windows)
-    assert [video.shape[2] for video in model.noisy_future_videos] == [2, 2]
-    assert torch.equal(model.action_control_priors[0], action_control_prior[:, :, 0:2])
-    assert torch.equal(model.action_control_priors[1], action_control_prior[:, :, 2:4])
 
 
 def test_chunkwise_teacher_forcing_rejects_unknown_observation_mode() -> None:
@@ -674,7 +626,7 @@ class _ZeroVelocityModel:
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
+        future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Ignore inputs and emit zeros with the same shape as the noisy suffix."""
@@ -685,7 +637,7 @@ class _ZeroVelocityModel:
             timestep_t,
             block_causal_attention_mask,
             observed_mask,
-            future_action_control_prior,
+            future_latent_residual_base,
             control_hidden_states_scale,
         )
         return torch.zeros_like(noisy_future_video)

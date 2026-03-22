@@ -11,6 +11,61 @@ import pytest
 import world_model.optimization.controller as controller_module
 
 
+def test_legacy_training_optimizer_memory_alias_selects_fixed_anchor_workflow(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Route the old README command onto the fixed-anchor memory, prompt, and state."""
+    train_config_path = tmp_path / "train.yaml"
+    train_config_path.write_text("repo_id: demo\n", encoding="utf-8")
+    legacy_memory_path = Path("docs/training_optimizer.md")
+    default_prompt_path = Path("docs/controller_prompt.md")
+    default_state_path = Path("runs/training_optimizer/controller_state.json")
+
+    (tmp_path / "docs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "docs" / "training_optimizer.md").write_text("# Legacy Memory\n", encoding="utf-8")
+    (tmp_path / "docs" / "fixed_anchor_investigation.md").write_text(
+        "# Fixed Memory\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs" / "controller_prompt.md").write_text(
+        "# Legacy Prompt\n\n## Validation\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs" / "controller_prompt_fixed_anchor.md").write_text(
+        "# Fixed Prompt\n\n## Validation\n",
+        encoding="utf-8",
+    )
+
+    prompts: list[str] = []
+    monkeypatch.setattr(controller_module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(controller_module, "ensure_codex_chatgpt_login", lambda: None)
+
+    def fake_run_codex_exec(*, prompt: str, **_: object) -> SimpleNamespace:
+        prompts.append(prompt)
+        return SimpleNamespace(
+            payload=_stop_payload("done"),
+            session_id="session-fixed-anchor",
+        )
+
+    monkeypatch.setattr(controller_module, "run_codex_exec", fake_run_codex_exec)
+
+    controller_module.run_training_optimization_loop(
+        train_config_path=train_config_path,
+        memory_path=legacy_memory_path,
+        prompt_path=default_prompt_path,
+        state_path=default_state_path,
+    )
+
+    fixed_state_path = tmp_path / "runs" / "training_optimizer" / "fixed_anchor_controller_state.json"
+    state = controller_module.load_controller_state(fixed_state_path)
+
+    assert "First read and adopt docs/controller_prompt_fixed_anchor.md before doing any work." in prompts[0]
+    assert "Use docs/fixed_anchor_investigation.md as the mutable optimization memory." in prompts[0]
+    assert fixed_state_path.exists() is True
+    assert state["last_stop_reason"] == "done"
+
+
 def test_stopped_state_starts_fresh_session_on_new_invocation(
     monkeypatch,
     tmp_path: Path,
@@ -711,7 +766,7 @@ def test_rollback_requested_restores_preexisting_dirty_repo_state(
 
 def _make_controller_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Create the memory, prompt, and state paths for one controller test."""
-    memory_path = tmp_path / "docs" / "training_optimizer.md"
+    memory_path = tmp_path / "docs" / "complexity_ladder_training.md"
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text("# Memory\n", encoding="utf-8")
     prompt_path = tmp_path / "docs" / "controller_prompt.md"

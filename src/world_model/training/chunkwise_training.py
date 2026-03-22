@@ -26,7 +26,6 @@ class ChunkwiseStepMetrics:
     grad_norm: float
     per_chunk_losses: tuple[float, ...]
     per_chunk_lengths: tuple[int, ...]
-    action_control_aux_loss: float = 0.0
     action_token_latent_aux_loss: float = 0.0
 
     def to_log_dict(self, *, step: int) -> dict[str, Any]:
@@ -35,7 +34,6 @@ class ChunkwiseStepMetrics:
             "step": int(step),
             "loss": float(self.loss),
             "grad_norm": float(self.grad_norm),
-            "action_control_aux_loss": float(self.action_control_aux_loss),
             "action_token_latent_aux_loss": float(self.action_token_latent_aux_loss),
             "per_chunk_losses": [float(x) for x in self.per_chunk_losses],
             "per_chunk_lengths": [int(x) for x in self.per_chunk_lengths],
@@ -46,7 +44,6 @@ def train_chunkwise_batch(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
     z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
@@ -55,12 +52,8 @@ def train_chunkwise_batch(
     action_conditioning_window: str = "chunk",
     teacher_forcing_observation_mode: str = "full_prefix",
     teacher_forcing_future_input_mode: str = "full_suffix",
-    chunk_schedule_mode: str = "k_plus_one",
+    chunk_schedule_mode: str = "k_chunks",
     action_backbone_added_kv_mode: str = "none",
-    action_control_prior_scale: float = 0.0,
-    action_control_projector_observed_context_mode: str = "none",
-    action_hidden_state_bias_scale: float = 0.0,
-    action_control_aux_loss_scale: float = 0.0,
     action_token_latent_aux_loss_scale: float = 0.0,
     t_min: float = 0.0,
     t_max: float = 1.0,
@@ -81,13 +74,9 @@ def train_chunkwise_batch(
     """Run one optimizer step using chunkwise teacher-forced flow matching."""
     model.train()
     action_encoder.train()
-    if action_control_projector is not None:
-        action_control_projector.train()
 
     optimizer.zero_grad(set_to_none=True)
     trainable_params = list(model.parameters()) + list(action_encoder.parameters())
-    if action_control_projector is not None:
-        trainable_params += list(action_control_projector.parameters())
     autocast_context = _build_training_autocast_context(z_past_video=z_past_video, amp_dtype=amp_dtype)
     with autocast_context:
         action_tokens = action_encoder(a_plan)
@@ -96,30 +85,12 @@ def train_chunkwise_batch(
             if str(action_backbone_added_kv_mode) == "reuse_action_tokens"
             else None
         )
-        action_control_prior = None
-        if (
-            action_control_projector is not None
-            and (
-                action_control_prior_scale > 0.0
-                or action_hidden_state_bias_scale > 0.0
-                or action_control_aux_loss_scale > 0.0
-            )
-        ):
-            action_control_prior = action_control_projector(
-                a_plan,
-                latent_height=z_future_video.shape[3],
-                latent_width=z_future_video.shape[4],
-                observed_latents=(
-                    z_past_video if action_control_projector_observed_context_mode != "none" else None
-                ),
-            )
         info = chunkwise_teacher_forcing_loss(
             model,
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
             action_image_tokens=action_image_tokens,
-            action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
@@ -139,18 +110,15 @@ def train_chunkwise_batch(
             generator=generator,
             return_info=True,
         )
-        action_control_aux_loss = _compute_action_control_aux_loss(
-            action_control_prior=action_control_prior,
-            z_future_video=z_future_video,
-        )
         action_token_latent_aux_loss = _compute_action_token_latent_aux_loss(
             action_encoder=action_encoder,
             action_tokens=action_tokens,
+            z_past_video=z_past_video,
             z_future_video=z_future_video,
+            future_latent_residual_mode=future_latent_residual_mode,
         )
         total_loss = (
             info.loss
-            + (action_control_aux_loss_scale * action_control_aux_loss)
             + (action_token_latent_aux_loss_scale * action_token_latent_aux_loss)
         )
 
@@ -181,7 +149,6 @@ def train_chunkwise_batch(
     return ChunkwiseStepMetrics(
         loss=float(total_loss.detach().cpu().item()),
         grad_norm=float(grad_norm),
-        action_control_aux_loss=float(action_control_aux_loss.detach().cpu().item()),
         action_token_latent_aux_loss=float(action_token_latent_aux_loss.detach().cpu().item()),
         per_chunk_losses=info.per_chunk_losses,
         per_chunk_lengths=info.per_chunk_lengths,
@@ -194,7 +161,6 @@ def save_checkpoint(
     step: int,
     model: nn.Module,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
     extra_state: dict[str, Any] | None = None,
 ) -> Path:
@@ -206,9 +172,6 @@ def save_checkpoint(
         "step": int(step),
         "model_state_dict": model.state_dict(),
         "action_encoder_state_dict": action_encoder.state_dict(),
-        "action_control_projector_state_dict": (
-            None if action_control_projector is None else action_control_projector.state_dict()
-        ),
         "optimizer_state_dict": optimizer.state_dict(),
     }
     if extra_state:
@@ -236,32 +199,43 @@ def _compute_grad_norm(parameters: Any) -> float:
     return total_sq ** 0.5
 
 
-def _compute_action_control_aux_loss(
-    *,
-    action_control_prior: torch.Tensor | None,
-    z_future_video: torch.Tensor,
-) -> torch.Tensor:
-    """Match the action-derived latent prior to the clean future latent summary."""
-    if action_control_prior is None:
-        return z_future_video.new_zeros(())
-    target_summary = z_future_video.detach().mean(dim=(3, 4), keepdim=True)
-    predicted_summary = action_control_prior.mean(dim=(3, 4), keepdim=True)
-    return torch.nn.functional.mse_loss(predicted_summary, target_summary)
-
-
 def _compute_action_token_latent_aux_loss(
     *,
     action_encoder: nn.Module,
     action_tokens: torch.Tensor,
+    z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
+    future_latent_residual_mode: str = "none",
 ) -> torch.Tensor:
-    """Match action tokens to per-step clean future latent summaries when available."""
+    """Match action tokens to the active future latent target coordinates when available."""
     predict_summary = getattr(action_encoder, "predict_future_latent_summary", None)
     if predict_summary is None or getattr(action_encoder, "latent_summary_head", None) is None:
         return z_future_video.new_zeros(())
     predicted_summary = predict_summary(action_tokens)
-    target_summary = z_future_video.detach().mean(dim=(3, 4))
+    target_summary = _build_future_latent_aux_target(
+        z_past_video=z_past_video,
+        z_future_video=z_future_video,
+        future_latent_residual_mode=future_latent_residual_mode,
+    ).mean(dim=(3, 4))
     return torch.nn.functional.mse_loss(predicted_summary, target_summary)
+
+
+def _build_future_latent_aux_target(
+    *,
+    z_past_video: torch.Tensor,
+    z_future_video: torch.Tensor,
+    future_latent_residual_mode: str,
+) -> torch.Tensor:
+    """Convert future latent supervision targets into the same coordinates as denoising."""
+    if future_latent_residual_mode == "none":
+        return z_future_video.detach()
+    if future_latent_residual_mode == "last_context_frame":
+        residual_base = z_past_video[:, :, -1:, :, :].expand(-1, -1, z_future_video.shape[2], -1, -1)
+        return (z_future_video - residual_base).detach()
+    raise ValueError(
+        "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
+        f"{future_latent_residual_mode!r}"
+    )
 
 
 def _build_training_autocast_context(

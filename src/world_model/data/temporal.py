@@ -126,7 +126,15 @@ def build_future_action_plan(
     horizon_frames: int,
     horizon_latent_steps: int,
 ) -> torch.Tensor:
-    """Build future latent-step action features from raw or latent-aligned actions."""
+    """Build future latent-step action features from raw or latent-aligned actions.
+
+    When `seq` contains one action per sampled observation frame over the full
+    `[context + horizon]` window, we align the future plan to the *transitions*
+    that produce future observations. In LeRobot-style robot datasets the action
+    stored at frame `t` is the command that drives the transition toward
+    observation `t + 1`, so the first future observation depends on the last
+    context action.
+    """
     validate_wan_temporal_window(context_len=context_frames, horizon_len=horizon_frames)
     if horizon_latent_steps <= 0:
         raise ValueError(f"horizon_latent_steps must be positive, got {horizon_latent_steps}")
@@ -146,7 +154,11 @@ def build_future_action_plan(
     if source_steps == horizon_frames:
         return flatten_action_chunks(seq, num_chunks=horizon_latent_steps)
     if source_steps == total_frames:
-        return flatten_action_chunks(seq[:, context_frames:], num_chunks=horizon_latent_steps)
+        future_transition_actions = seq[:, context_frames - 1 : total_frames - 1]
+        return flatten_action_chunks(
+            future_transition_actions,
+            num_chunks=horizon_latent_steps,
+        )
     if source_steps % horizon_latent_steps == 0:
         return flatten_action_chunks(seq, num_chunks=horizon_latent_steps)
 

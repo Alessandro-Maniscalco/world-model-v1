@@ -69,27 +69,15 @@ Current parameter sources in the default VACE path are:
      `load_pretrained_backbone=true`
 3. Locally initialized and then trained when applicable:
    - the action-token encoder in `wan_vace_conditioning.py`
-   - the action-control projector in `wan_vace_conditioning.py`
    - or the null-conditioning encoder, which has no learned parameters
 4. Imported as local fine-tune overlays when a repo checkpoint is provided:
    - `model_state_dict` for the Wan VACE world-model module
    - `action_encoder_state_dict` for the action-token encoder
-   - `action_control_projector_state_dict` for the latent control-prior path
 
 The current training code supports four backbone policies:
 
-1. `trainable_backbone=full`
-   - optimize the full Wan VACE backbone
-2. `trainable_backbone=vace`
-   - optimize the VACE-side control path plus the output head
-3. `trainable_backbone=head`
-   - optimize only the VACE control patch embedder plus the output head
-4. `trainable_backbone=lora`
-   - attach PEFT LoRA adapters to the Wan backbone and keep the small VACE
-     output-side modules trainable
+- `trainable_backbone=full`, `trainable_backbone=vace`, `trainable_backbone=head`, `trainable_backbone=lora`
 
-The `head` mode is still the laptop-GPU smoke/overfit mode. The current
-full-dataset ALOHA path uses `trainable_backbone=lora`.
 
 Core objective:
 
@@ -97,7 +85,7 @@ $$\pi_\theta(o_{t:t+H} \mid o_{t-l:t}, a_{t:t+H-1})$$
 
 Key decisions:
 
-1. Keep chunkwise teacher forcing and K+1 scheduling as the outer training
+1. Keep chunkwise teacher forcing and exact-k scheduling as the outer training
    structure.
 2. Replace the local DiT wrapper with a vendored Wan VACE backbone plus a local
    world-model adapter.
@@ -191,16 +179,14 @@ Current practical resolution decision for ALOHA fork-pick-up:
 3. the public Wan/VACE pipeline still works at several smaller `4:3` sizes
    (`512x384`, `384x288`, `320x240`, `256x192`, `192x144`). Check these sizes with sweep_base_dit_resolutions.py
 4. `128x96` is below the stable floor and collapses into large color patches
-5. the current recommended first training resolution is `320x240`
-6. the next higher-quality fallback is `384x288`, with `512x384` reserved for
-   later runs if memory allows
+5. Currently `320x240` is used.
 
 ### Outer chunkwise trainer
 
 The trainer still owns:
 
 1. latent-time splitting into context and future windows
-2. K+1 chunk schedule construction
+2. exact-k chunk schedule construction
 3. teacher forcing of earlier future chunks
 4. timestep sampling
 5. noise injection for the active target chunk
@@ -210,29 +196,28 @@ The trainer still owns:
 This logic stays local to the repo rather than being pushed into the vendored
 Wan backbone.
 
-### How K+1 chunking works
+### How exact-k chunking works
 
 The repo defines chunking over future latent timesteps only. The config value
-`k` does not mean "number of chunks"; it means "build `k + 1` contiguous future
-chunks."
+`k` means "build `k` contiguous future chunks."
 
 The schedule builder in `src/world_model/chunking/schedule.py` does exactly
 this:
 
-1. let `num_chunks = k + 1`
+1. let `num_chunks = k`
 2. divide `future_steps` latent timesteps as evenly as possible across those
    chunks
 3. assign any remainder to the earliest chunks
 4. emit contiguous `(start, end)` boundaries plus one `chunk_id` per future
    latent timestep
 
-So if `future_steps = 10` and `k = 2`, the future window is split into `3`
+So if `future_steps = 10` and `k = 3`, the future window is split into `3`
 chunks with sizes `[4, 3, 3]`, boundaries `((0, 4), (4, 7), (7, 10))`, and
 chunk ids `[0, 0, 0, 0, 1, 1, 1, 2, 2, 2]`.
 
-Past/context latent steps are not part of that K+1 split. When the repo needs
+Past/context latent steps are not part of that exact-k split. When the repo needs
 chunk ids for the full `[past, future]` sequence, every past latent step
-receives chunk id `-1`, and only the future suffix uses chunk ids `0..k`.
+receives chunk id `-1`, and only the future suffix uses chunk ids `0..k-1`.
 
 At training stage `j`, the schedule is used as follows:
 
@@ -257,19 +242,15 @@ At inference, the same boundaries are reused but teacher forcing disappears:
 3. the next chunk is then denoised conditioned on context plus previously
    generated chunks
 4. if `single_chunk_rollout=true`, or if the future window is shorter than
-   `k + 1`, inference collapses to one full future chunk instead
+   `k`, inference collapses to one full future chunk instead
 
-Training is stricter than inference here. Training fails fast if latent-time
-compression leaves fewer than `k + 1` future latent steps, because a true K+1
-schedule would be impossible. Inference is allowed to collapse to one chunk for
-short-horizon or upstream-style smoke-test runs.
 
 ### Inner Wan VACE-compatible denoiser
 
 The inner denoiser is a vendored Wan VACE backbone wrapped by a local adapter.
-The vendored code includes the upstream model implementation and its direct
-dependencies so the local project stays structurally aligned with Wan 2.1
-VACE 1.3B while allowing local masking changes.
+The vendored code keeps the upstream Wan/VACE model implementation local to
+this repo so the project stays structurally aligned with Wan 2.1 VACE 1.3B
+while still allowing local masking changes.
 
 The adapter is responsible for:
 
@@ -322,6 +303,9 @@ Stage 1: future action-plan construction in data preparation
 4. that chunk is flattened into one feature vector, so one latent step still
    maps to one action token, but that token can contain `4 * action_dim`
    scalar values
+5. alignment follows transitions rather than observations: for observations
+   `1 2 3 4 5 | 6 7 8 9`, with context `1..5` and future block `6..9`, the
+   action block is `5 6 7 8` because action `5` drives observation `6`
 
 Stage 2: per-token projection into Wan text width
 
@@ -339,25 +323,7 @@ Stage 2: per-token projection into Wan text width
 
 An optional 2-layer MLP variant exists in the encoder implementation when
 `mlp_dim` is set, but the current factory path uses the default shallow
-projection. So the active action encoder is best described as:
-
-1. exact future action chunking at the data level
-2. flattening within each Wan 4-frame future block
-3. independent per-block projection with `LayerNorm + Linear`
-4. optional continuous order features over latent-time progress
-5. optional lightweight temporal residuals inside the local encoder
-
-The ordered-plan path also adds a second local module:
-
-1. `ActionControlProjector` receives the same `a_plan`
-2. it concatenates the continuous order features `[p, 1-p]` to each raw action
-   token
-3. it projects those per-step features into latent channels
-4. the result is broadcast over latent space to produce
-   `[B, C_lat, T_future_latent, H_lat, W_lat]`
-5. `WanVACEWorldModel` adds that tensor, scaled by
-   `action_control_prior_scale`, to the future gray VACE filler latents before
-   building `[inactive; reactive; mask]`
+projection.
 
 This is deliberate for the current world-model stage. It preserves short-range
 control detail from datasets like ALOHA while keeping the Wan-compatible
@@ -433,7 +399,13 @@ The vendored VACE implementation adds several concrete constraints:
 3. there is one `WanVACETransformerBlock` per configured control injection
    point, not one per main backbone layer
 4. the first VACE block applies an input projection before mixing control tokens
-   with the main hidden states
+   with the main hidden states:
+
+   `control_hidden_states = proj_in(control_hidden_states) + hidden_states`
+
+   Here `hidden_states` are the initial patchified main video tokens for the
+   whole clip, while `control_hidden_states` are the patchified VACE control
+   tokens built from known latents, fill latents, and masks.
 5. every VACE block returns a projected control hint plus an updated internal
    control state
 6. the model runs all VACE blocks first, stores their hints, then runs the main
@@ -441,6 +413,20 @@ The vendored VACE implementation adds several concrete constraints:
    `vace_layers`
 7. each injected hint is scaled by a corresponding
    `control_hidden_states_scale` entry at runtime
+
+#### Mathematical view of VACE control injection
+
+Let $u^{(k)}$ be the internal control-stream state and let
+$\hat{c}^{(k)}$ be the projected control hint emitted by VACE block $k$.
+If main block index $\ell$ is one of the configured `vace_layers`, the main
+stream receives a residual hint injection:
+
+$$
+h^{(\ell+1)} \leftarrow h^{(\ell+1)} + \lambda_k \hat{c}^{(k)},
+$$
+
+where $\lambda_k$ is the runtime control scale from
+`control_hidden_states_scale`.
 
 ## Backbone mechanics from vendored Wan code
 
@@ -512,9 +498,13 @@ $$
 
 The main Wan backbone block is ordered as:
 
-1. pre-norm self-attention with RoPE and residual gating
-2. pre-norm cross-attention over `encoder_hidden_states`
-3. pre-norm feed-forward with residual gating
+1. pre-norm self-attention with RoPE and residual gating: first the block
+   decides which video patches are important to each other inside the current
+   latent-video token sequence
+2. pre-norm cross-attention over `encoder_hidden_states`: next each video token
+   decides which conditioning or action tokens it should attend to
+3. pre-norm feed-forward with residual gating: finally each token is updated by
+   a per-token MLP after those attention steps
 
 Architecturally relevant details from the code:
 
@@ -574,30 +564,9 @@ This is the reason the document calls the backbone "DiT-like" rather than a
 plain Transformer: each block is not only attention plus MLP, but
 timestep-conditioned attention plus MLP with gated residual updates.
 
-#### Mathematical view of VACE control injection
-
-Let $u^{(k)}$ be the internal control-stream state and let
-$\hat{c}^{(k)}$ be the projected control hint emitted by VACE block $k$.
-If main block index $\ell$ is one of the configured `vace_layers`, the main
-stream receives a residual hint injection:
-
-$$
-h^{(\ell+1)} \leftarrow h^{(\ell+1)} + \lambda_k \hat{c}^{(k)},
-$$
-
-where $\lambda_k$ is the runtime control scale from
-`control_hidden_states_scale`.
-
 ### What one denoising step actually does
 
-With the cross-attention stream and VACE control stream defined, we can now
-describe one denoising step end to end.
-
-In the smoke checks and prompt-style inference path, the progress bar often
-shows `50` steps. Those are diffusion denoising steps, not video frames and not
-training iterations.
-
-At a high level, one denoising step does the following:
+One denoising step does the following:
 
 1. start from the current noisy latent video
 2. run the Wan VACE transformer on that latent video plus its conditioning
@@ -714,7 +683,7 @@ conditional prediction.
 3. Split latent time into:
    - `z_past_video`
    - `z_future_video`
-4. Build the K+1 chunk schedule over future latent timesteps.
+4. Build the exact-k chunk schedule over future latent timesteps.
 5. For each chunk step:
    - sample timestep `t`
    - noise only the active future chunk
@@ -729,10 +698,10 @@ The trainer minimizes:
 $$
 \mathcal{L}(\theta)
 =
-\mathbb{E}_{z_{\mathrm{past}}, z_{\mathrm{future}}, a, \{t_j\}_{j=0}^{K}}
+\mathbb{E}_{z_{\mathrm{past}}, z_{\mathrm{future}}, a, \{t_j\}_{j=0}^{K-1}}
 \left[
 \frac{
-\sum_{j=0}^{K}
+\sum_{j=0}^{K-1}
 w(t_j)
 \left\|
 u_\theta\!\left(
@@ -747,7 +716,7 @@ M_j
 - v_j
 \right\|_2^2
 }{
-\sum_{j=0}^{K} w(t_j) N_j
+ \sum_{j=0}^{K-1} w(t_j) N_j
 }
 \right].
 $$

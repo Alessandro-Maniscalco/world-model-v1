@@ -11,7 +11,6 @@ action_temporal_difference_scale: feeds action changes over time, not just the r
 action_temporal_mixer_kernel_size and action_temporal_mixer_scale: adds a small temporal mixer over action tokens. This tests whether better local temporal processing of actions helps timing.
 action_conditioning_window=full: gives the model the whole remaining action plan on every denoising step, instead of only the active chunk. This tests whether it is moving late because it cannot “see the whole plan.”
 action_order_conditioning=true: adds positional/order information to action tokens so the model knows which action token is early vs late.
-action_control_prior_scale: injects an action-derived latent prior into the future latent stream. This tests whether stronger action guidance inside the VACE path helps.
 teacher_forcing_observation_mode=past_only: later chunks only see the real past, not the real future prefix. This tests whether teacher forcing is leaking too much help during training.
 teacher_forcing_observation_mode=predicted_prefix: later chunks see the model’s own earlier predictions. This tests whether rollout-style feedback is needed during training.
 teacher_forcing_future_input_mode=active_chunk: only the active chunk is denoised during teacher forcing, matching inference more closely. This tests train/infer mismatch.

@@ -47,16 +47,12 @@ from world_model.data.schema import PreparedPackedBatch
 from world_model.latents import WanVAE
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
-    build_action_control_projector_for_model,
     build_conditioning_encoder_for_model,
     build_wan_vace_model_from_config,
-    _load_action_control_projector_state_dict,
     _load_action_encoder_state_dict,
 )
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.training import (
@@ -66,7 +62,6 @@ from world_model.training import (
     train_chunkwise_batch,
 )
 from world_model.training.chunkwise_training import (
-    _compute_action_control_aux_loss,
     _compute_action_token_latent_aux_loss,
 )
 
@@ -308,42 +303,6 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Optionally mirror action tokens into Wan's added-K/V image-conditioning path.",
     )
     parser.add_argument(
-        "--action-control-prior-scale",
-        type=float,
-        default=defaults.action_control_prior_scale,
-        help="Scale for the action-derived latent control prior added to future VACE filler latents.",
-    )
-    parser.add_argument(
-        "--action-control-prior-mode",
-        choices=("reactive_only", "dual_fill"),
-        default=defaults.action_control_prior_mode,
-        help="Inject the action-derived latent control prior into only the reactive future branch or both future control branches.",
-    )
-    parser.add_argument(
-        "--action-control-projector-init-mode",
-        choices=("zero", "linear_default"),
-        default=defaults.action_control_projector_init_mode,
-        help="Initialization mode for the action-to-latent control projector when a resumed checkpoint has no saved projector weights.",
-    )
-    parser.add_argument(
-        "--action-control-projector-observed-context-mode",
-        choices=("none", "last_frame"),
-        default=defaults.action_control_projector_observed_context_mode,
-        help="Optional observed-latent context pooled into the action-control projector before future broadcast.",
-    )
-    parser.add_argument(
-        "--action-hidden-state-bias-scale",
-        type=float,
-        default=defaults.action_hidden_state_bias_scale,
-        help="Scale for adding the action-derived latent control signal directly to future latent hidden states before the Wan backbone.",
-    )
-    parser.add_argument(
-        "--action-control-aux-loss-scale",
-        type=float,
-        default=defaults.action_control_aux_loss_scale,
-        help="Auxiliary loss scale for matching the action-control projector to the clean future latent summary during training.",
-    )
-    parser.add_argument(
         "--action-token-latent-aux-loss-scale",
         type=float,
         default=defaults.action_token_latent_aux_loss_scale,
@@ -505,35 +464,10 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             f"'active_chunk', got {cfg.teacher_forcing_future_input_mode!r}."
         )
     normalize_chunk_schedule_mode(cfg.chunk_schedule_mode)
-    if cfg.action_control_prior_scale < 0.0:
-        raise ValueError(
-            "action_control_prior_scale must be >= 0, got "
-            f"{cfg.action_control_prior_scale}."
-        )
-    if cfg.action_control_prior_mode not in {"reactive_only", "dual_fill"}:
-        raise ValueError(
-            "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
-            f"{cfg.action_control_prior_mode!r}."
-        )
-    if cfg.action_control_projector_observed_context_mode not in {"none", "last_frame"}:
-        raise ValueError(
-            "action_control_projector_observed_context_mode must be 'none' or 'last_frame', got "
-            f"{cfg.action_control_projector_observed_context_mode!r}."
-        )
     if cfg.action_backbone_added_kv_mode not in {"none", "reuse_action_tokens"}:
         raise ValueError(
             "action_backbone_added_kv_mode must be 'none' or 'reuse_action_tokens', got "
             f"{cfg.action_backbone_added_kv_mode!r}."
-        )
-    if cfg.action_hidden_state_bias_scale < 0.0:
-        raise ValueError(
-            "action_hidden_state_bias_scale must be >= 0, got "
-            f"{cfg.action_hidden_state_bias_scale}."
-        )
-    if cfg.action_control_aux_loss_scale < 0.0:
-        raise ValueError(
-            "action_control_aux_loss_scale must be >= 0, got "
-            f"{cfg.action_control_aux_loss_scale}."
         )
     if cfg.action_token_latent_aux_loss_scale < 0.0:
         raise ValueError(
@@ -556,10 +490,18 @@ def _format_episode_preview(episode_ids: list[int]) -> str:
 
 
 def _relative_block_improvement(*, previous_mean_loss: float, current_mean_loss: float) -> float:
-    """Compute relative mean-loss improvement between consecutive training blocks."""
-    if previous_mean_loss <= 0.0:
-        return 0.0 if current_mean_loss >= previous_mean_loss else float("inf")
-    return (previous_mean_loss - current_mean_loss) / previous_mean_loss
+    """Compute a bounded relative mean-loss change between consecutive training blocks.
+
+    Loss reductions keep the usual `(previous - current) / previous` value so
+    improvement thresholds behave exactly as before. Regressions divide by the
+    larger of the two losses so the reported negative change stays within
+    `[-1, 0)` instead of growing past `-1` when the current loss is much larger
+    than the previous best.
+    """
+    reference_loss = max(previous_mean_loss, current_mean_loss)
+    if reference_loss <= 0.0:
+        return 0.0
+    return (previous_mean_loss - current_mean_loss) / reference_loss
 
 
 def _update_validation_tracking(
@@ -652,7 +594,6 @@ def _resume_training_state(
     checkpoint: dict[str, object],
     model: nn.Module,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
     optimizer: torch.optim.Optimizer,
 ) -> tuple[int, bool]:
     """Restore training modules from checkpoint and report step plus optimizer restore status."""
@@ -677,13 +618,7 @@ def _resume_training_state(
         action_encoder=action_encoder,
         action_state=action_state,
     )
-    loaded_partial_projector_state = False
-    if action_control_projector is not None:
-        loaded_partial_projector_state = _load_action_control_projector_state_dict(
-            action_control_projector=action_control_projector,
-            projector_state=checkpoint.get("action_control_projector_state_dict"),
-        )
-    if loaded_partial_action_state or loaded_partial_projector_state:
+    if loaded_partial_action_state:
         return step, False
     optimizer.load_state_dict(optimizer_state)
     return step, True
@@ -703,7 +638,6 @@ def _configure_trainable_parameters(
     cfg: TrainScriptConfig,
     model: WanVACEWorldModel,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
 ) -> list[nn.Parameter]:
     """Apply the requested trainable-parameter policy and return optimizer params."""
     for parameter in model.parameters():
@@ -729,14 +663,10 @@ def _configure_trainable_parameters(
 
     for parameter in action_encoder.parameters():
         parameter.requires_grad_(True)
-    if action_control_projector is not None:
-        for parameter in action_control_projector.parameters():
-            parameter.requires_grad_(True)
 
     chained_parameters = itertools.chain(
         model.parameters(),
         action_encoder.parameters(),
-        () if action_control_projector is None else action_control_projector.parameters(),
     )
     parameters = [parameter for parameter in chained_parameters if parameter.requires_grad]
     if not parameters:
@@ -758,21 +688,11 @@ def build_action_encoder_from_config(
     return build_conditioning_encoder_for_model(cfg, prepared_batch, model)
 
 
-def build_action_control_projector_from_config(
-    cfg: TrainScriptConfig,
-    prepared_batch: PreparedPackedBatch,
-    model: WanVACEWorldModel,
-) -> ActionControlProjector | NullActionControlProjector:
-    """Build the configured action-to-latent future-control prior projector."""
-    return build_action_control_projector_for_model(cfg, prepared_batch, model)
-
-
 @torch.no_grad()
 def _evaluate_loss(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
     z_past_video: torch.Tensor,
     z_future_video: torch.Tensor,
     a_plan: torch.Tensor,
@@ -782,10 +702,6 @@ def _evaluate_loss(
     teacher_forcing_future_input_mode: str,
     chunk_schedule_mode: str,
     action_backbone_added_kv_mode: str,
-    action_control_prior_scale: float,
-    action_control_projector_observed_context_mode: str,
-    action_hidden_state_bias_scale: float,
-    action_control_aux_loss_scale: float,
     action_token_latent_aux_loss_scale: float,
     t_min: float,
     t_max: float,
@@ -803,8 +719,6 @@ def _evaluate_loss(
     """Compute one eval-mode chunkwise loss for overfit diagnostics."""
     model.eval()
     action_encoder.eval()
-    if action_control_projector is not None:
-        action_control_projector.eval()
 
     with _training_autocast_context(device=device, disable_amp=disable_amp, dtype=runtime_dtype):
         action_tokens = action_encoder(a_plan)
@@ -813,30 +727,12 @@ def _evaluate_loss(
             if action_backbone_added_kv_mode == "reuse_action_tokens"
             else None
         )
-        action_control_prior = None
-        if (
-            action_control_projector is not None
-            and (
-                action_control_prior_scale > 0.0
-                or action_hidden_state_bias_scale > 0.0
-                or action_control_aux_loss_scale > 0.0
-            )
-        ):
-            action_control_prior = action_control_projector(
-                a_plan,
-                latent_height=z_future_video.shape[3],
-                latent_width=z_future_video.shape[4],
-                observed_latents=(
-                    z_past_video if action_control_projector_observed_context_mode != "none" else None
-                ),
-            )
         loss = chunkwise_teacher_forcing_loss(
             model,
             z_past_video=z_past_video,
             z_future_video=z_future_video,
             action_tokens=action_tokens,
             action_image_tokens=action_image_tokens,
-            action_control_prior=action_control_prior,
             action_conditioning_window=action_conditioning_window,
             teacher_forcing_observation_mode=teacher_forcing_observation_mode,
             teacher_forcing_future_input_mode=teacher_forcing_future_input_mode,
@@ -851,15 +747,6 @@ def _evaluate_loss(
             future_latent_residual_mode=future_latent_residual_mode,
             future_loss_early_bias=future_loss_early_bias,
             future_chunk_early_bias=future_chunk_early_bias,
-        )
-        loss = loss + (
-            action_control_aux_loss_scale
-            * _compute_action_control_aux_loss(
-                action_control_prior=action_control_prior,
-                z_past_video=z_past_video,
-                z_future_video=z_future_video,
-                future_latent_residual_mode=future_latent_residual_mode,
-            )
         )
         loss = loss + (
             action_token_latent_aux_loss_scale
@@ -879,7 +766,6 @@ def _evaluate_validation_loss(
     *,
     model: nn.Module,
     action_encoder: nn.Module,
-    action_control_projector: nn.Module | None = None,
     validation_loader,
     encoder: WanVAE,
     cfg: TrainScriptConfig,
@@ -904,7 +790,6 @@ def _evaluate_validation_loss(
         total_loss += _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
@@ -914,10 +799,6 @@ def _evaluate_validation_loss(
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
-            action_control_prior_scale=cfg.action_control_prior_scale,
-            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
-            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
-            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1096,13 +977,11 @@ def main() -> None:
 
     model = build_model_from_config(cfg, prepared).to(device)
     action_encoder = build_action_encoder_from_config(cfg, prepared, model).to(device)
-    action_control_projector = build_action_control_projector_from_config(cfg, prepared, model).to(device)
 
     parameter_groups = _configure_trainable_parameters(
         cfg,
         model,
         action_encoder,
-        action_control_projector,
     )
     trainable_param_count = sum(parameter.numel() for parameter in parameter_groups)
     print(
@@ -1121,7 +1000,6 @@ def main() -> None:
             checkpoint=checkpoint,
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             optimizer=optimizer,
         )
         best_val_loss, val_bad_checks = _load_validation_state_from_checkpoint(checkpoint)
@@ -1153,7 +1031,6 @@ def main() -> None:
         overfit_start_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
@@ -1163,10 +1040,6 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
-            action_control_prior_scale=cfg.action_control_prior_scale,
-            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
-            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
-            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1224,7 +1097,6 @@ def main() -> None:
         metrics = train_chunkwise_batch(
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             optimizer=optimizer,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
@@ -1235,10 +1107,6 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
-            action_control_prior_scale=cfg.action_control_prior_scale,
-            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
-            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
-            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,
@@ -1277,7 +1145,6 @@ def main() -> None:
             val_loss, val_num_batches = _evaluate_validation_loss(
                 model=model,
                 action_encoder=action_encoder,
-                action_control_projector=action_control_projector,
                 validation_loader=validation_loader,
                 encoder=vae,
                 cfg=cfg,
@@ -1327,7 +1194,6 @@ def main() -> None:
                 step=step,
                 model=model,
                 action_encoder=action_encoder,
-                action_control_projector=action_control_projector,
                 optimizer=optimizer,
                 extra_state=_build_checkpoint_extra_state(
                     cfg=cfg,
@@ -1375,7 +1241,6 @@ def main() -> None:
         step=completed_steps,
         model=model,
         action_encoder=action_encoder,
-        action_control_projector=action_control_projector,
         optimizer=optimizer,
         extra_state=_build_checkpoint_extra_state(
             cfg=cfg,
@@ -1389,7 +1254,6 @@ def main() -> None:
         overfit_end_loss = _evaluate_loss(
             model=model,
             action_encoder=action_encoder,
-            action_control_projector=action_control_projector,
             z_past_video=prepared.z_past_video,
             z_future_video=prepared.z_future_video,
             a_plan=prepared.a_plan,
@@ -1399,10 +1263,6 @@ def main() -> None:
             teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
             chunk_schedule_mode=cfg.chunk_schedule_mode,
             action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
-            action_control_prior_scale=cfg.action_control_prior_scale,
-            action_control_projector_observed_context_mode=cfg.action_control_projector_observed_context_mode,
-            action_hidden_state_bias_scale=cfg.action_hidden_state_bias_scale,
-            action_control_aux_loss_scale=cfg.action_control_aux_loss_scale,
             action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
             t_min=cfg.t_min,
             t_max=cfg.t_max,

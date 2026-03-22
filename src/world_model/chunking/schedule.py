@@ -1,7 +1,7 @@
 """Latent-time chunk scheduling helpers for chunkwise future rollout.
 
-Build chunk ids and boundaries over future latent timesteps for selectable
-chunk-count conventions.
+Build chunk ids and boundaries over future latent timesteps using the repo's
+exact-k chunking convention.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Literal
 import torch
 
 
-ChunkScheduleMode = Literal["k_plus_one", "k_chunks"]
+ChunkScheduleMode = Literal["k_chunks"]
 
 
 @dataclass(frozen=True)
@@ -24,30 +24,33 @@ class ChunkSchedule:
     num_chunks: int
 
 
-def resolve_num_chunks(*, k: int, chunk_schedule_mode: ChunkScheduleMode) -> int:
-    """Resolve the effective number of future chunks for one schedule mode."""
-    if chunk_schedule_mode == "k_plus_one":
-        if k < 1:
-            raise ValueError(f"k must be >= 1 for K+1 chunking, got {k}")
-        return k + 1
-    if chunk_schedule_mode == "k_chunks":
-        if k < 1:
-            raise ValueError(f"k must be >= 1 for K chunking, got {k}")
-        return k
+def normalize_chunk_schedule_mode(chunk_schedule_mode: str | None) -> ChunkScheduleMode:
+    """Collapse historical chunk-mode labels onto the exact-k convention."""
+    if chunk_schedule_mode in {None, "", "k_chunks", "k_plus_one"}:
+        return "k_chunks"
     raise ValueError(
-        "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', "
+        "chunk_schedule_mode must be 'k_chunks', "
         f"got {chunk_schedule_mode!r}"
     )
+
+
+def resolve_num_chunks(*, k: int, chunk_schedule_mode: str | None = "k_chunks") -> int:
+    """Resolve the exact number of future chunks for the active schedule mode."""
+    normalize_chunk_schedule_mode(chunk_schedule_mode)
+    if k < 1:
+        raise ValueError(f"k must be >= 1 for chunked scheduling, got {k}")
+    return k
 
 
 def build_chunk_schedule(
     future_steps: int,
     k: int,
     *,
-    chunk_schedule_mode: ChunkScheduleMode = "k_plus_one",
+    chunk_schedule_mode: str | None = "k_chunks",
     device: torch.device | None = None,
 ) -> ChunkSchedule:
     """Create a chunk schedule across `future_steps` latent timesteps."""
+    chunk_schedule_mode = normalize_chunk_schedule_mode(chunk_schedule_mode)
     _validate_schedule_args(
         future_steps=future_steps,
         k=k,
@@ -75,39 +78,18 @@ def build_chunk_schedule(
     )
 
 
-def build_k_plus_one_schedule(
-    future_steps: int,
-    k: int,
-    *,
-    device: torch.device | None = None,
-) -> ChunkSchedule:
-    """Create a K+1 chunk schedule across `future_steps` latent timesteps.
-
-    Args:
-        future_steps: Number of latent timesteps in the future window.
-        k: Baseline chunk count parameter. Total chunks are `k + 1`.
-        device: Optional torch device for returned chunk ids.
-    """
-    return build_chunk_schedule(
-        future_steps=future_steps,
-        k=k,
-        chunk_schedule_mode="k_plus_one",
-        device=device,
-    )
-
-
 def build_full_sequence_chunk_ids(
     past_steps: int,
     future_steps: int,
     k: int,
     *,
-    chunk_schedule_mode: ChunkScheduleMode = "k_plus_one",
+    chunk_schedule_mode: str | None = "k_chunks",
     past_chunk_id: int = -1,
     device: torch.device | None = None,
 ) -> torch.Tensor:
     """Build chunk ids for `[past, future]` latent sequence.
 
-    Past steps are assigned to `past_chunk_id`. Future steps use K+1 schedule.
+    Past steps are assigned to `past_chunk_id`. Future steps use exact-k chunking.
     """
     if past_steps < 0:
         raise ValueError(f"past_steps must be non-negative, got {past_steps}")
@@ -126,9 +108,10 @@ def _validate_schedule_args(
     *,
     future_steps: int,
     k: int,
-    chunk_schedule_mode: ChunkScheduleMode,
+    chunk_schedule_mode: str | None,
 ) -> None:
     """Validate chunk-schedule argument constraints."""
+    chunk_schedule_mode = normalize_chunk_schedule_mode(chunk_schedule_mode)
     if future_steps <= 0:
         raise ValueError(f"future_steps must be positive, got {future_steps}")
     num_chunks = resolve_num_chunks(k=k, chunk_schedule_mode=chunk_schedule_mode)

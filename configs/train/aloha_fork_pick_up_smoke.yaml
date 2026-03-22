@@ -34,7 +34,7 @@ dt: 0.1
 # --- training ---
 batch_size: 1
 k: 1
-chunk_schedule_mode: k_plus_one
+chunk_schedule_mode: k_chunks
 max_steps: 2
 validation_enabled: false
 lr: 0.0001

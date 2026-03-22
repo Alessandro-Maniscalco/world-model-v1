@@ -18,7 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from world_model.chunking import build_k_plus_one_schedule
+from world_model.chunking import build_chunk_schedule
 from world_model.masking import build_block_causal_mask
 
 
@@ -89,7 +89,7 @@ def main() -> None:
 
     block = TinyAttnBlock(d_model=feature_dim, n_heads=8).to(device).eval()
 
-    schedule = build_k_plus_one_schedule(future_steps=n_current + n_future, k=1, device=device)
+    schedule = build_chunk_schedule(future_steps=n_current + n_future, k=2, device=device)
     first_chunk_size = schedule.boundaries[0][1]
     keep_len = n_past + first_chunk_size
 

@@ -10,7 +10,7 @@ dt: 0.1
 batch_size: 1
 subset_size: 1
 k: 1
-chunk_schedule_mode: k_plus_one
+chunk_schedule_mode: k_chunks
 integration_steps: 20
 num_vis_frames: 0
 load_pretrained_backbone: true
@@ -49,7 +49,6 @@ lora_target_modules:
 conditioning_mode: none
 action_conditioning_window: chunk
 action_order_conditioning: false
-action_control_prior_scale: 0.0
 action_token_scale: 1.0
 future_latent_residual_mode: none
 frame_height: 0

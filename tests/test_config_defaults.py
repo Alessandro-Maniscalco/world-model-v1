@@ -22,12 +22,6 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.chunk_schedule_mode == "k_chunks"
     assert cfg.action_order_conditioning is False
     assert cfg.action_backbone_added_kv_mode == "none"
-    assert cfg.action_control_prior_scale == 0.0
-    assert cfg.action_control_prior_mode == "reactive_only"
-    assert cfg.action_control_projector_init_mode == "zero"
-    assert cfg.action_control_projector_observed_context_mode == "none"
-    assert cfg.action_hidden_state_bias_scale == 0.0
-    assert cfg.action_control_aux_loss_scale == 0.0
     assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
     assert cfg.future_latent_residual_mode == "none"
@@ -70,11 +64,6 @@ def test_infer_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.chunk_schedule_mode == "k_chunks"
     assert cfg.action_order_conditioning is False
     assert cfg.action_backbone_added_kv_mode == "none"
-    assert cfg.action_control_prior_scale == 0.0
-    assert cfg.action_control_prior_mode == "reactive_only"
-    assert cfg.action_control_projector_init_mode == "zero"
-    assert cfg.action_control_projector_observed_context_mode == "none"
-    assert cfg.action_hidden_state_bias_scale == 0.0
     assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
     assert cfg.future_latent_residual_mode == "none"

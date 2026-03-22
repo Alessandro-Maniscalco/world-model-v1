@@ -12,9 +12,7 @@ import torch
 from world_model.config import InferScriptConfig, load_infer_config, load_train_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
@@ -51,7 +49,7 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     defaults = load_infer_config()
     assert defaults.load_pretrained_backbone is True
 
-    model, action_encoder, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         InferScriptConfig(
             load_pretrained_backbone=defaults.load_pretrained_backbone,
             wan_vace_model_id=defaults.wan_vace_model_id,
@@ -65,7 +63,6 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, NullConditioningEncoder)
-    assert isinstance(action_control_projector, NullActionControlProjector)
     assert model.control_black_latents is not None
     assert model.control_gray_latents is not None
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer", False)]
@@ -88,7 +85,7 @@ def test_build_runtime_modules_respects_action_input_layernorm_flag() -> None:
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -117,7 +114,7 @@ def test_build_runtime_modules_respects_action_mlp_dim_flag() -> None:
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -148,7 +145,7 @@ def test_build_runtime_modules_respects_action_mlp_residual_flag() -> None:
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -180,7 +177,7 @@ def test_build_runtime_modules_respects_action_temporal_difference_scale() -> No
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -209,7 +206,7 @@ def test_build_runtime_modules_respects_action_token_scale() -> None:
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -237,7 +234,7 @@ def test_build_runtime_modules_builds_action_latent_aux_head_from_cfg() -> None:
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -268,7 +265,7 @@ def test_build_runtime_modules_respects_action_temporal_mixer_settings() -> None
         mask_channels=4,
     )
 
-    _, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -281,13 +278,12 @@ def test_build_runtime_modules_respects_action_temporal_mixer_settings() -> None
     assert action_encoder.temporal_mixer_scale == pytest.approx(0.5)
 
 
-def test_build_runtime_modules_respects_action_order_and_control_prior_flags() -> None:
-    """Build ordered action tokens plus a latent prior projector for action-conditioned runs."""
+def test_build_runtime_modules_respects_action_order_conditioning_flag() -> None:
+    """Propagate ordered action-token conditioning into the runtime encoder."""
     prepared = _make_prepared_batch()
     cfg = InferScriptConfig(
         conditioning_mode="action",
         action_order_conditioning=True,
-        action_control_prior_scale=1.0,
         load_pretrained_backbone=False,
         wan_num_attention_heads=2,
         wan_attention_head_dim=8,
@@ -299,7 +295,7 @@ def test_build_runtime_modules_respects_action_order_and_control_prior_flags() -
         mask_channels=4,
     )
 
-    model, action_encoder, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -309,8 +305,6 @@ def test_build_runtime_modules_respects_action_order_and_control_prior_flags() -
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, ActionTokenEncoder)
     assert action_encoder.order_conditioning is True
-    assert model.action_control_prior_mode == "reactive_only"
-    assert isinstance(action_control_projector, ActionControlProjector)
 
 
 def test_build_runtime_modules_enables_action_added_kv_path() -> None:
@@ -330,7 +324,7 @@ def test_build_runtime_modules_enables_action_added_kv_path() -> None:
         mask_channels=4,
     )
 
-    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, _ = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -340,121 +334,6 @@ def test_build_runtime_modules_enables_action_added_kv_path() -> None:
     assert isinstance(model, WanVACEWorldModel)
     assert model.backbone.config.image_dim == 16
     assert model.backbone.config.added_kv_proj_dim == 16
-
-
-def test_build_runtime_modules_respects_action_control_prior_mode() -> None:
-    """Propagate latent control-prior mode into the runtime world-model wrapper."""
-    prepared = _make_prepared_batch()
-    cfg = InferScriptConfig(
-        conditioning_mode="action",
-        action_control_prior_scale=1.0,
-        action_control_prior_mode="dual_fill",
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-
-    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
-        cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=None,
-    )
-
-    assert isinstance(model, WanVACEWorldModel)
-    assert model.action_control_prior_mode == "dual_fill"
-
-
-def test_build_runtime_modules_respects_action_hidden_state_bias_scale() -> None:
-    """Propagate latent hidden-state bias scale into the runtime world-model wrapper."""
-    prepared = _make_prepared_batch()
-    cfg = InferScriptConfig(
-        conditioning_mode="action",
-        action_hidden_state_bias_scale=0.75,
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-
-    model, _, _ = wan_vace_factory.build_wan_vace_runtime_modules(
-        cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=None,
-    )
-
-    assert isinstance(model, WanVACEWorldModel)
-    assert model.action_hidden_state_bias_scale == pytest.approx(0.75)
-
-
-def test_build_runtime_modules_respects_action_control_projector_init_mode() -> None:
-    """Pass the projector init mode through to the runtime latent-prior projector."""
-    prepared = _make_prepared_batch()
-    cfg = InferScriptConfig(
-        conditioning_mode="action",
-        action_control_prior_scale=1.0,
-        action_control_projector_init_mode="linear_default",
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-
-    _, _, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
-        cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=None,
-    )
-
-    assert isinstance(action_control_projector, ActionControlProjector)
-    assert action_control_projector.init_mode == "linear_default"
-
-
-def test_build_runtime_modules_respects_action_control_projector_observed_context_mode() -> None:
-    """Pass the projector observed-context mode through to the runtime latent projector."""
-    prepared = _make_prepared_batch()
-    cfg = InferScriptConfig(
-        conditioning_mode="action",
-        action_control_prior_scale=1.0,
-        action_control_projector_observed_context_mode="last_frame",
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-
-    _, _, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
-        cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=None,
-    )
-
-    assert isinstance(action_control_projector, ActionControlProjector)
-    assert action_control_projector.observed_context_mode == "last_frame"
 
 
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
@@ -472,7 +351,7 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
         vace_layers=(0, 1),
         mask_channels=4,
     )
-    model, action_encoder, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -481,17 +360,12 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
 
     model_state = {key: torch.full_like(value, 0.25) for key, value in model.state_dict().items()}
     action_state = {key: torch.full_like(value, -0.5) for key, value in action_encoder.state_dict().items()}
-    projector_state = {
-        key: torch.full_like(value, 0.75)
-        for key, value in action_control_projector.state_dict().items()
-    }
     checkpoint = {
         "model_state_dict": model_state,
         "action_encoder_state_dict": action_state,
-        "action_control_projector_state_dict": projector_state,
     }
 
-    loaded_model, loaded_action_encoder, loaded_action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
+    loaded_model, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         cfg,
         prepared,
         device=torch.device("cpu"),
@@ -500,13 +374,8 @@ def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
 
     first_model_key = next(iter(model_state))
     first_action_key = next(iter(action_state))
-    first_projector_key = next(iter(projector_state))
     assert torch.allclose(loaded_model.state_dict()[first_model_key], model_state[first_model_key])
     assert torch.allclose(loaded_action_encoder.state_dict()[first_action_key], action_state[first_action_key])
-    assert torch.allclose(
-        loaded_action_control_projector.state_dict()[first_projector_key],
-        projector_state[first_projector_key],
-    )
 
 
 def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_mixer() -> None:
@@ -530,7 +399,7 @@ def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_m
         action_temporal_mixer_kernel_size=3,
         action_temporal_mixer_scale=0.5,
     )
-    model, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         old_cfg,
         prepared,
         device=torch.device("cpu"),
@@ -541,7 +410,7 @@ def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_m
         "action_encoder_state_dict": action_encoder.state_dict(),
     }
 
-    _, loaded_action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+    _, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
         new_cfg,
         prepared,
         device=torch.device("cpu"),
@@ -551,44 +420,6 @@ def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_m
     assert isinstance(loaded_action_encoder, ActionTokenEncoder)
     assert loaded_action_encoder.temporal_mixer is not None
     assert torch.count_nonzero(loaded_action_encoder.temporal_mixer.weight) == 0
-
-
-def test_build_runtime_modules_allows_older_checkpoint_without_control_projector() -> None:
-    """Treat missing control-prior weights as an allowed old-checkpoint case."""
-    prepared = _make_prepared_batch()
-    old_cfg = InferScriptConfig(
-        conditioning_mode="action",
-        load_pretrained_backbone=False,
-        wan_num_attention_heads=2,
-        wan_attention_head_dim=8,
-        wan_text_dim=16,
-        wan_freq_dim=8,
-        wan_ffn_dim=32,
-        wan_num_layers=2,
-        vace_layers=(0, 1),
-        mask_channels=4,
-    )
-    new_cfg = replace(old_cfg, action_control_prior_scale=1.0)
-    model, action_encoder, _ = wan_vace_factory.build_wan_vace_runtime_modules(
-        old_cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=None,
-    )
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "action_encoder_state_dict": action_encoder.state_dict(),
-    }
-
-    _, _, action_control_projector = wan_vace_factory.build_wan_vace_runtime_modules(
-        new_cfg,
-        prepared,
-        device=torch.device("cpu"),
-        checkpoint=checkpoint,
-    )
-
-    assert isinstance(action_control_projector, ActionControlProjector)
-    assert torch.count_nonzero(action_control_projector.projection.weight) == 0
 
 
 def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypatch) -> None:

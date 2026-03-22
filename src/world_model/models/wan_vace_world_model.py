@@ -42,9 +42,6 @@ class WanVACEWorldModel(nn.Module):
         backbone: nn.Module | None = None,
         control_scale: float = 1.0,
         future_control_fill_mode: str = "gray",
-        action_control_prior_scale: float = 0.0,
-        action_control_prior_mode: str = "reactive_only",
-        action_hidden_state_bias_scale: float = 0.0,
         mask_channels: int = 64,
         control_black_latents: torch.Tensor | None = None,
         control_gray_latents: torch.Tensor | None = None,
@@ -56,17 +53,9 @@ class WanVACEWorldModel(nn.Module):
                 "future_control_fill_mode must be 'gray' or 'last_context_frame', got "
                 f"{future_control_fill_mode!r}"
             )
-        if action_control_prior_mode not in {"reactive_only", "dual_fill"}:
-            raise ValueError(
-                "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
-                f"{action_control_prior_mode!r}"
-            )
         self.backbone = backbone if backbone is not None else WanVACETransformer3DModel()
         self.control_scale = float(control_scale)
         self.future_control_fill_mode = str(future_control_fill_mode)
-        self.action_control_prior_scale = float(action_control_prior_scale)
-        self.action_control_prior_mode = str(action_control_prior_mode)
-        self.action_hidden_state_bias_scale = float(action_hidden_state_bias_scale)
         self.mask_channels = int(mask_channels)
         self.register_buffer("control_black_latents", control_black_latents, persistent=False)
         self.register_buffer("control_gray_latents", control_gray_latents, persistent=False)
@@ -81,7 +70,6 @@ class WanVACEWorldModel(nn.Module):
         timestep_t: torch.Tensor,
         block_causal_attention_mask: torch.Tensor | None,
         observed_mask: torch.Tensor | None = None,
-        future_action_control_prior: torch.Tensor | None = None,
         future_latent_residual_base: torch.Tensor | None = None,
         control_hidden_states_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -158,27 +146,6 @@ class WanVACEWorldModel(nn.Module):
             reactive_fill_latents[:, :, future_start:, :, :] = (
                 reactive_fill_latents[:, :, future_start:, :, :] - future_residual_base
             )
-        if future_action_control_prior is not None:
-            if future_action_control_prior.shape != future_control_video.shape:
-                raise ValueError(
-                    "future_action_control_prior must match noisy future-control shape "
-                    f"{tuple(future_control_video.shape)}, got {tuple(future_action_control_prior.shape)}"
-                )
-            action_control_source = future_action_control_prior.to(
-                device=future_control_video.device,
-                dtype=future_control_video.dtype,
-            )
-            if self.action_hidden_state_bias_scale > 0.0:
-                future_hidden_states = future_hidden_states + (
-                    self.action_hidden_state_bias_scale * action_control_source
-                )
-            action_control_delta = self.action_control_prior_scale * action_control_source
-            future_control_video = future_control_video + action_control_delta
-            if self.action_control_prior_mode == "dual_fill":
-                inactive_fill_latents = inactive_fill_latents.clone()
-                inactive_fill_latents[:, :, future_start:, :, :] = (
-                    inactive_fill_latents[:, :, future_start:, :, :] + action_control_delta
-                )
         full_hidden_states = torch.cat([observed_video, future_hidden_states], dim=2)
         future_control_mask = torch.ones(
             noisy_future_video.shape[0],

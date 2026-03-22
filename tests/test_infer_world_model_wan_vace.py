@@ -12,9 +12,7 @@ import torch
 from world_model.config import InferScriptConfig, load_infer_config
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models.wan_vace_conditioning import (
-    ActionControlProjector,
     ActionTokenEncoder,
-    NullActionControlProjector,
     NullConditioningEncoder,
 )
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
@@ -44,7 +42,7 @@ def test_infer_script_builds_wan_vace_runtime_modules_without_checkpoint() -> No
         mask_channels=4,
     )
 
-    model, action_encoder, action_control_projector = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -53,7 +51,6 @@ def test_infer_script_builds_wan_vace_runtime_modules_without_checkpoint() -> No
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, NullConditioningEncoder)
-    assert isinstance(action_control_projector, NullActionControlProjector)
 
 
 def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
@@ -68,11 +65,11 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--action-conditioning-window" in option_strings
     assert "--chunk-schedule-mode" in option_strings
     assert "--action-order-conditioning" in option_strings
-    assert "--action-control-prior-scale" in option_strings
     assert "--action-token-scale" in option_strings
     assert "--future-latent-residual-mode" in option_strings
-    assert "--action-control-prior-mode" in option_strings
-    assert "--action-hidden-state-bias-scale" in option_strings
+    assert "--action-control-prior-scale" not in option_strings
+    assert "--action-control-prior-mode" not in option_strings
+    assert "--action-hidden-state-bias-scale" not in option_strings
     assert "--hidden-dim" not in option_strings
     assert "--num-layers" not in option_strings
     assert "--num-heads" not in option_strings
@@ -157,7 +154,7 @@ def test_infer_script_builds_action_encoder_when_requested() -> None:
         mask_channels=4,
     )
 
-    model, action_encoder, action_control_projector = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -166,7 +163,6 @@ def test_infer_script_builds_action_encoder_when_requested() -> None:
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, ActionTokenEncoder)
-    assert isinstance(action_control_projector, ActionControlProjector)
 
 
 def test_infer_script_builds_action_encoder_with_mlp_when_requested() -> None:
@@ -196,7 +192,7 @@ def test_infer_script_builds_action_encoder_with_mlp_when_requested() -> None:
         mask_channels=4,
     )
 
-    model, action_encoder, _ = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -237,7 +233,7 @@ def test_infer_script_builds_action_encoder_with_residual_mlp_when_requested() -
         mask_channels=4,
     )
 
-    model, action_encoder, _ = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -279,7 +275,7 @@ def test_infer_script_builds_action_encoder_with_temporal_difference_scale_when_
         mask_channels=4,
     )
 
-    model, action_encoder, _ = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -318,7 +314,7 @@ def test_infer_script_builds_action_encoder_with_token_scale_when_requested() ->
         mask_channels=4,
     )
 
-    model, action_encoder, _ = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -358,7 +354,7 @@ def test_infer_script_builds_action_encoder_with_temporal_mixer_when_requested()
         mask_channels=4,
     )
 
-    model, action_encoder, _ = infer_script.build_runtime_modules(
+    model, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -371,8 +367,8 @@ def test_infer_script_builds_action_encoder_with_temporal_mixer_when_requested()
     assert action_encoder.temporal_mixer_scale == pytest.approx(0.5)
 
 
-def test_infer_script_builds_action_ordered_prior_modules_when_requested() -> None:
-    """Expose both ordered action tokens and a latent prior projector for action inference."""
+def test_infer_script_builds_ordered_action_encoder_when_requested() -> None:
+    """Expose ordered action tokens for action-conditioned inference."""
     infer_script = _load_infer_script_module()
     prepared = PreparedPackedBatch(
         z_past_video=torch.randn(2, 16, 2, 8, 8),
@@ -386,7 +382,6 @@ def test_infer_script_builds_action_ordered_prior_modules_when_requested() -> No
     cfg = InferScriptConfig(
         conditioning_mode="action",
         action_order_conditioning=True,
-        action_control_prior_scale=1.0,
         load_pretrained_backbone=False,
         wan_num_attention_heads=2,
         wan_attention_head_dim=8,
@@ -398,7 +393,7 @@ def test_infer_script_builds_action_ordered_prior_modules_when_requested() -> No
         mask_channels=4,
     )
 
-    _, action_encoder, action_control_projector = infer_script.build_runtime_modules(
+    _, action_encoder = infer_script.build_runtime_modules(
         cfg=cfg,
         prepared=prepared,
         device=torch.device("cpu"),
@@ -407,7 +402,6 @@ def test_infer_script_builds_action_ordered_prior_modules_when_requested() -> No
 
     assert isinstance(action_encoder, ActionTokenEncoder)
     assert action_encoder.order_conditioning is True
-    assert isinstance(action_control_projector, ActionControlProjector)
 
 
 def test_infer_script_restores_lora_runtime_settings_from_checkpoint_defaults() -> None:
@@ -506,7 +500,6 @@ def test_infer_script_restores_ordered_plan_settings_from_checkpoint_defaults() 
                 "conditioning_mode": "action",
                 "action_conditioning_window": "full",
                 "action_order_conditioning": True,
-                "action_control_prior_scale": 1.0,
             }
         }
     }
@@ -516,66 +509,6 @@ def test_infer_script_restores_ordered_plan_settings_from_checkpoint_defaults() 
     assert restored.conditioning_mode == "action"
     assert restored.action_conditioning_window == "full"
     assert restored.action_order_conditioning is True
-    assert restored.action_control_prior_scale == pytest.approx(1.0)
-
-
-def test_infer_script_restores_action_control_prior_mode_from_checkpoint_defaults() -> None:
-    """Reuse saved latent-prior routing mode when the infer config still uses defaults."""
-    infer_script = _load_infer_script_module()
-    cfg = InferScriptConfig()
-    checkpoint = {
-        "extra_state": {
-            "config": {
-                "conditioning_mode": "action",
-                "action_control_prior_scale": 1.0,
-                "action_control_prior_mode": "dual_fill",
-            }
-        }
-    }
-
-    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
-
-    assert restored.conditioning_mode == "action"
-    assert restored.action_control_prior_scale == pytest.approx(1.0)
-    assert restored.action_control_prior_mode == "dual_fill"
-
-
-def test_infer_script_restores_action_hidden_state_bias_scale_from_checkpoint_defaults() -> None:
-    """Reuse saved hidden-state action bias scale when the infer config still uses defaults."""
-    infer_script = _load_infer_script_module()
-    cfg = InferScriptConfig()
-    checkpoint = {
-        "extra_state": {
-            "config": {
-                "conditioning_mode": "action",
-                "action_hidden_state_bias_scale": 0.75,
-            }
-        }
-    }
-
-    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
-
-    assert restored.conditioning_mode == "action"
-    assert restored.action_hidden_state_bias_scale == pytest.approx(0.75)
-
-
-def test_infer_script_restores_action_control_projector_observed_context_mode_from_checkpoint_defaults() -> None:
-    """Reuse saved projector observed-context mode when infer config still uses defaults."""
-    infer_script = _load_infer_script_module()
-    cfg = InferScriptConfig()
-    checkpoint = {
-        "extra_state": {
-            "config": {
-                "conditioning_mode": "action",
-                "action_control_projector_observed_context_mode": "last_frame",
-            }
-        }
-    }
-
-    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
-
-    assert restored.conditioning_mode == "action"
-    assert restored.action_control_projector_observed_context_mode == "last_frame"
 
 
 def test_infer_script_restores_action_backbone_added_kv_mode_from_checkpoint_defaults() -> None:
@@ -812,13 +745,17 @@ def test_infer_script_decodes_on_cpu_after_cuda_sampling() -> None:
         def decode(self, latents, output_layout="BTCHW", output_range="zero_to_one"):
             del output_layout, output_range
             self.decode_inputs.append((latents.device.type, latents.dtype))
-            return latents.float()
+            frame_count = 1 + ((int(latents.shape[2]) - 1) * 4)
+            return torch.zeros(latents.shape[0], frame_count, 3, 8, 8, device=latents.device, dtype=torch.float32)
 
     fake_vae = _FakeWanVAE()
     pred_video, target_video = infer_script._decode_future_videos(
         vae=fake_vae,
+        past_video_latents=torch.randn(1, 16, 3, 8, 8),
         pred_future_video=torch.randn(1, 16, 2, 8, 8),
         target_future_video=torch.randn(1, 16, 2, 8, 8),
+        context_len=9,
+        future_frame_count=8,
         device=torch.device("cuda"),
         disable_amp=False,
         runtime_dtype=torch.bfloat16,
@@ -828,6 +765,38 @@ def test_infer_script_decodes_on_cpu_after_cuda_sampling() -> None:
     assert fake_vae.decode_inputs == [("cpu", torch.float32), ("cpu", torch.float32)]
     assert pred_video.device.type == "cpu"
     assert target_video.device.type == "cpu"
+
+
+def test_infer_script_decodes_future_with_past_context_to_keep_full_horizon() -> None:
+    """Decode the full latent window so a 4-frame Wan horizon does not collapse to one frame."""
+    infer_script = _load_infer_script_module()
+
+    class _FakeWanVAE:
+        def __init__(self) -> None:
+            self.vae = SimpleNamespace(to=lambda device=None, dtype=None: self.vae)
+
+        def decode(self, latents, output_layout="BTCHW", output_range="zero_to_one"):
+            del output_layout, output_range
+            frame_count = 1 + ((int(latents.shape[2]) - 1) * 4)
+            frame_ids = torch.arange(frame_count, dtype=torch.float32).view(1, frame_count, 1, 1, 1)
+            return frame_ids.expand(latents.shape[0], frame_count, 3, 1, 1)
+
+    pred_video, target_video = infer_script._decode_future_videos(
+        vae=_FakeWanVAE(),
+        past_video_latents=torch.zeros(1, 16, 6, 1, 1),
+        pred_future_video=torch.zeros(1, 16, 1, 1, 1),
+        target_future_video=torch.zeros(1, 16, 1, 1, 1),
+        context_len=21,
+        future_frame_count=4,
+        device=torch.device("cpu"),
+        disable_amp=False,
+        runtime_dtype=torch.float32,
+    )
+
+    assert pred_video.shape == (1, 4, 3, 1, 1)
+    assert target_video.shape == (1, 4, 3, 1, 1)
+    assert torch.equal(pred_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
+    assert torch.equal(target_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
 
 
 def test_infer_script_releases_vae_after_prepare_on_cuda() -> None:
