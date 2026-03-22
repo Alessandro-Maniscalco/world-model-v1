@@ -37,20 +37,20 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: continue the one-trajectory overfit branch to the 400-step cap.
+- Rung: curriculum-transfer test from the best ep1 overfit checkpoint into the
+  full dataset.
 - Resume the validated ep1-only `ctx17/h4`, `k=1`, single-chunk,
-  residual+filllastctx, action-conditioned LoRA run with
-  `action_token_scale=0.75` from `step_0000200.pt` to `step 400`, then
-  evaluate the same episode-1 window at `start_frame=60` at `step 300` and
-  `step 400`.
-- Why next: the overdue one-trajectory overfit test already changed the anchor
-  materially. On ep1, the copied context still stays static through frame
-  `16`, but `step 200` now starts moving cleanly at frame `17` and tracks the
-  frame-17-to-20 fork approach much more closely than any prior branch, with
-  far less blue/purple ghosting and a near-correct final contact pose. The
-  active question is now whether longer continuation sharpens that still-slight
-  frame-20 softness or whether the branch saturates/regresses before the
-  400-step cap.
+  residual+filllastctx, action-conditioned LoRA checkpoint
+  `step_0000200.pt` on the full dataset for `200` more steps, then evaluate
+  the same episode-1 window at `start_frame=60` at `step 300` and `step 400`.
+- Why next: the one-trajectory overfit branch is now answered and saturated.
+  On ep1, `step 200` is the clean peak: the copied context still stays static
+  through frame `16`, motion starts at frame `17`, and the frame-17-to-20 fork
+  approach nearly matches the reference. Continuing that same branch to
+  `300/400` brings back blue/white ghosting, thicker arm-crop blur, and worse
+  contact. The new stage question is whether that good ep1 solution can
+  survive limited full-dataset mixing at all, or whether broader training
+  immediately washes it out.
 
 ## Best current result for fixed anchor
 - `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step200_ep1_start60/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step_0000200_comparison.mp4`
@@ -183,6 +183,21 @@ improve that same anchor on the same canonical evaluation window.
   clip plausible while improving arm-motion alignment
   (`profile_correlation≈0.345`, `late_motion_ratio≈1.254`). The scalar labels
   still say `misaligned`, but the visible future-horizon error is much smaller.
+- The same ep1-only overfit branch regresses when continued past `step 200`.
+  `step 300` and `step 400` still keep the copied context static through frame
+  `16` and start moving at frame `17`, but both bring back immediate
+  blue/white haloing on the fork by frame `17`, thicken the arm crop through
+  frames `18-20`, and end with a more overactive, smeared contact than
+  `step 200`. `step 400` is the worst of the three, with the strongest doubled
+  fork silhouette and the widest final-frame blur.
+- The reports confirm the visual regression inside the resumed overfit branch.
+  Relative to overfit `step 200`, `step 300` worsens to
+  `mean_frame_mae≈2.741`, `max_frame_mae≈17.29`,
+  `late_motion_ratio≈1.681`, and `overactive_motion`; `step 400` remains
+  worse than `step 200` at `mean_frame_mae≈1.774`,
+  `max_frame_mae≈11.89`, `late_motion_ratio≈1.825`, and even lower
+  arm-motion `spatial_motion_iou≈0.660`. For this neighborhood, `step 200` is
+  the best stop point.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -213,6 +228,9 @@ improve that same anchor on the same canonical evaluation window.
   substantially better when every training window comes from episode `1`. The
   remaining fixed-anchor gap now looks like optimization or data-mixing, not a
   hard inability to represent the frame-17-to-20 fork approach at all.
+- Inside the ep1-only overfit neighborhood, continuing past `step 200` is not
+  beneficial. `step 300` and `step 400` regress back toward overactive blur,
+  so `step 200` should be treated as the best checkpoint in that branch.
 - When a fresh action-conditioned branch regresses between checkpoints on ep1,
   do not continue it plainly; change the training neighborhood instead. The
   new full-dataset train-time `0.75` scout follows that rule: `step 100` is
