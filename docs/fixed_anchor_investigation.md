@@ -39,17 +39,20 @@ improve that same anchor on the same canonical evaluation window.
 ## Next Diagnostic Step
 - Rung: checkpoint selection inside the first action-conditioned fixed-anchor
   branch, under the operator's `ep1`-only evaluation rule.
-- Evaluate `step_0000200.pt` against `step_0000400.pt` from the new
-  `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx action-conditioned run
-  on episode `1` only.
-- Why next: the final `step_0000400.pt` checkpoint is the current decision
-  baseline on `ep1`, but it still shows the worst held-out ghosting in the
-  reviewed set. The operator explicitly asked whether `step_0000200.pt` is
+- Evaluate `step_0000200.pt` on episode `1` only, then compare it against the
+  validated `step_0000300.pt` current best and the older `step_0000400.pt`
+  baseline from the same `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx
+  action-conditioned run.
+- Why next: the operator explicitly asked whether `step_0000200.pt` is
   materially worse than `step_0000400.pt`; if not, the branch should use the
-  earlier checkpoint because it halves training time.
+  earlier checkpoint because it halves training time. The newly validated
+  `step_0000300.pt` clip is now slightly better than `step_0000400.pt` on the
+  operator's `ep1` decision window, so the next comparison should keep the
+  operator's `200 vs 400` question while also checking against the strongest
+  current checkpoint.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_final_for_eval_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_final_for_eval_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step300_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step_0000300_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -110,11 +113,17 @@ improve that same anchor on the same canonical evaluation window.
   through the full horizon with much less ghosting and a near-correct contact
   approach, though it remains somewhat too energetic late in the horizon
   (`motion_verdict=good`).
+- On the operator's `ep1` decision clip, `step_0000300.pt` is only a modest
+  visible improvement over `step_0000400.pt`, not a clean fix. Motion still
+  starts in frame `17` and runs through frames `18-20`, but the step-300 fork
+  smear is slightly less saturated and less widened in the arm crop, with lower
+  frame-20 error (`max_frame_mae≈12.76` vs `≈15.31`) and slightly better full
+  clip plausibility scalars. It still misses a crisp contact and remains
+  `motion_verdict=misaligned` (`profile_correlation≈0.243`).
 - `metrics.jsonl` shows the action-conditioned branch improves sharply between
-  `step 100` and `step 300`, but the operator-directed checkpoint question is
-  now whether `step_0000200.pt` is already close enough to `step_0000400.pt` on
-  the harder `ep1` anchor to justify the shorter run time. The next validated
-  comparison should answer that directly before any new training.
+  `step 100` and `step 300`, then regresses by `step 400`. The operator-directed
+  checkpoint question is now whether `step_0000200.pt` is already close enough
+  to this small step-300 improvement to justify the shorter run time.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -123,6 +132,9 @@ improve that same anchor on the same canonical evaluation window.
   operator says to pivot.
 - Fresh training runs are allowed, but the hard anchor stays fixed and every
   new run must test one concrete hypothesis.
+- Current operator-directed testing is single-video only: use
+  `episode_index=1`, `start_frame=60` as the decision clip and do not spend
+  time on episodes `0` or `2` unless explicitly requested.
 - When using checkpoint-mode sweep artifacts for this anchor, visually inspect
   the final `horizon_len` frames first and do not rely on full-window scalar
   summaries alone.
