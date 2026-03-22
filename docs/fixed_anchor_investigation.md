@@ -37,21 +37,23 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: one-trajectory overfit test in the best action-conditioned family.
-- Train a fresh `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx,
-  action-conditioned LoRA branch on `episode_index=1` only, using the best
-  current gain setting `action_token_scale=0.75`, then evaluate the same
-  episode-1 window at `start_frame=60` at both `step 100` and `step 200`.
-- Why next: the operator explicitly asked for a single-trajectory overfit test.
-  The latest full-dataset train-time `0.75` scout did not solve ep1: motion
-  still stays static through frame `16`, starts at frame `17`, and misses a
-  clean plate-edge contact by frame `20`; `step 100` is only modestly cleaner
-  while `step 200` regresses into brighter overactive blur. That rules out a
-  plain continuation in this branch and makes the overdue one-trajectory
-  overfit test the highest-value next action.
+- Rung: continue the one-trajectory overfit branch to the 400-step cap.
+- Resume the validated ep1-only `ctx17/h4`, `k=1`, single-chunk,
+  residual+filllastctx, action-conditioned LoRA run with
+  `action_token_scale=0.75` from `step_0000200.pt` to `step 400`, then
+  evaluate the same episode-1 window at `start_frame=60` at `step 300` and
+  `step 400`.
+- Why next: the overdue one-trajectory overfit test already changed the anchor
+  materially. On ep1, the copied context still stays static through frame
+  `16`, but `step 200` now starts moving cleanly at frame `17` and tracks the
+  frame-17-to-20 fork approach much more closely than any prior branch, with
+  far less blue/purple ghosting and a near-correct final contact pose. The
+  active question is now whether longer continuation sharpens that still-slight
+  frame-20 softness or whether the branch saturates/regresses before the
+  400-step cap.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh200_step100_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh200_step_0000100_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step200_ep1_start60/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step_0000200_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -166,6 +168,21 @@ improve that same anchor on the same canonical evaluation window.
   (`profile_correlation≈0.338`, `late_motion_ratio≈1.677`,
   `max_frame_mae≈15.16`) compared with the cleaner `step 100`
   (`≈0.237`, `≈1.414`, `≈11.52`).
+- The operator-directed ep1-only overfit run is the first branch that nearly
+  fits the decision clip. `step 100` still keeps frame `16` static and starts
+  moving at frame `17`, but it remains softer and more washed out than the
+  reference through frames `18-20`. By `step 200`, the same ep1-only branch
+  still stays static through frame `16`, starts moving at frame `17`, and then
+  follows the fork approach with much weaker blur and a narrower arm-crop
+  silhouette than any earlier checkpoint, leaving only a slight frame-20
+  softness instead of the old blown-out missed-contact smear.
+- The supporting reports move in the same direction on the ep1-only overfit
+  run. Relative to the previous best full-dataset `step 100` ep1 artifact,
+  overfit `step 200` lowers full-window `mean_frame_mae` from `≈1.936` to
+  `≈1.353`, lowers `max_frame_mae` from `≈11.52` to `≈8.58`, and keeps the
+  clip plausible while improving arm-motion alignment
+  (`profile_correlation≈0.345`, `late_motion_ratio≈1.254`). The scalar labels
+  still say `misaligned`, but the visible future-horizon error is much smaller.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -192,9 +209,10 @@ improve that same anchor on the same canonical evaluation window.
 - On the operator clip, the best current inference-time action gain is `0.75`:
   it modestly reduces frame-17-to-20 fork/gripper ghosting without pushing the
   motion back toward the frozen no-action failure.
-- Latest operator directive: the next long run should train on episode `1` and
-  evaluate on episode `1` to test whether this architecture can overfit one
-  trajectory.
+- The action-conditioned residual+filllastctx family can fit the operator clip
+  substantially better when every training window comes from episode `1`. The
+  remaining fixed-anchor gap now looks like optimization or data-mixing, not a
+  hard inability to represent the frame-17-to-20 fork approach at all.
 - When a fresh action-conditioned branch regresses between checkpoints on ep1,
   do not continue it plainly; change the training neighborhood instead. The
   new full-dataset train-time `0.75` scout follows that rule: `step 100` is
