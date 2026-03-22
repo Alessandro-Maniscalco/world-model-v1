@@ -37,24 +37,23 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: continue the improving lower-learning-rate curriculum-transfer branch.
+- Rung: continue the same lower-learning-rate mixed-data branch from its new
+  best checkpoint.
 - Resume the validated full-dataset `ctx17/h4`, `k=1`, single-chunk,
   residual+filllastctx, action-conditioned LoRA checkpoint
-  `curriculum_from_ep1overfit200_lr2e5_to400/checkpoints/step_0000400.pt`
+  `curriculum_from_ep1overfit200_lr2e5_to600_from400/checkpoints/step_0000600.pt`
   for `200` more steps at the same low learning rate, then evaluate the same
-  episode-1 window at `start_frame=60` at `step 500` and `step 600`.
-- Why next: the lower-learning-rate transfer answered the update-size question
-  in the useful direction. On ep1, the branch still stays static through frame
-  `16` and starts moving at frame `17`, but by `step 400` the old bright
-  blue/white fork halo has largely disappeared and the frame-17-to-20 fork
-  approach is close to the ep1-only overfit peak again. Because this
-  neighborhood improved sharply from `step 300` to `step 400` while staying
-  plausible, the next stage question is whether continued small updates can
-  fully sharpen the remaining slight contact softness or whether `step 400` is
-  already the best mixed-data stop point.
+  episode-1 window at `start_frame=60` at `step 700` and `step 800`.
+- Why next: this neighborhood did not peak at `step 400`. On ep1, the branch
+  still stays static through frame `16` and starts moving at frame `17`; a
+  noisy `step 500` dip is followed by a cleaner `step 600` recovery with less
+  ghosting and slightly better contact than `step 400`. The remaining stage
+  question is whether this gradual low-LR continuation can fully close the last
+  small sharpness gap to the overfit peak, or whether `step 600` is already
+  the best mixed-data stop point.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to400_step400_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to400_step_0000400_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to600_from400_step600_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to600_from400_step_0000600_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -233,6 +232,21 @@ improve that same anchor on the same canonical evaluation window.
   peak (`mean_frame_mae≈1.738`, `max_frame_mae≈10.79` vs `≈1.353/8.58`), but
   motion-first the branch now preserves the operator-clip behavior far better
   than the same-LR curriculum transfer.
+- Continuing the same low-LR branch beyond `step 400` stays noisy but still
+  nets a slight gain by `step 600`. On ep1, `step 500` keeps the same frame-17
+  onset but regresses into a softer, brighter fork/contact blur than
+  `step 400`. `step 600` then recovers: the copied context still stays static
+  through frame `16`, motion still starts at frame `17`, and frames `17-20`
+  look slightly cleaner and less doubled than `step 400`, though still a touch
+  softer than the ep1-only overfit peak.
+- The low-LR continuation reports match that ordering. `step 500` worsens to
+  `profile_correlation≈0.369`, `late_motion_ratio≈1.674`,
+  `mean_frame_mae≈2.757`, and `max_frame_mae≈18.21`. `step 600` becomes the
+  new best mixed-data checkpoint at `profile_correlation≈0.439`,
+  `late_motion_ratio≈1.452`, `spatial_motion_iou≈0.778`,
+  `mean_frame_mae≈1.583`, `max_frame_mae≈10.13`, and
+  `temporal_delta_ratio≈1.230`. It is still not as crisp as the ep1-only
+  overfit peak, but the gap is now small.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -280,6 +294,10 @@ improve that same anchor on the same canonical evaluation window.
   still bad at `step 300`, but by `step 400` it regains a near-correct
   frame-17-to-20 fork approach with far less ghosting than the same-LR
   curriculum branch, making it the best mixed-data result so far.
+- That same low-LR mixed-data branch still improves at `step 600` after a noisy
+  `step 500` detour, so it has not clearly peaked yet. The best mixed-data
+  checkpoint is now `step 600`, and it is close enough to the overfit peak to
+  justify one more bounded continuation before changing neighborhoods.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
