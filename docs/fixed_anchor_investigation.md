@@ -37,20 +37,20 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: inference-gain tuning on the best action-conditioned checkpoint.
-- Sweep `action_token_scale` below `1.0` on `step_0000200.pt` for episode `1`
-  only, keeping the same `ctx17/h4`, `k=1`, single-chunk,
-  residual+filllastctx checkpoint and evaluation window.
-- Why next: the operator's checkpoint-selection question is now answered.
-  `step_0000200.pt` is not worse than later checkpoints on the decision clip;
-  it is the current best and should be the cheaper baseline going forward.
-  The remaining failure is still future-horizon overactivity and soft contact,
-  so the highest-value bounded follow-up is to test whether a lower
-  action-conditioning gain can reduce the frame-17-to-20 fork/gripper smear
-  without paying for another training run.
+- Rung: structural action-gain scout in the best action-conditioned family.
+- Train a fresh `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx,
+  action-conditioned LoRA branch for `200` steps with
+  `action_token_scale=0.75`, then evaluate only `episode_index=1`,
+  `start_frame=60`.
+- Why next: the inference-time gain sweep answered the local scale question.
+  `0.75` is a modest but real ep1 improvement over scale `1.0`, while `0.50`
+  regresses. That points to over-strong action conditioning as a live
+  hypothesis, and a bounded train-time `0.75` scout is higher value than more
+  nearby inference-only sweeps because it tests whether the cleaner
+  frame-17-to-20 motion can be learned rather than only post-scaled.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step200_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step_0000200_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step200_ep1_start60_tokenscale075/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step_0000200_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -131,6 +131,23 @@ improve that same anchor on the same canonical evaluation window.
   checkpoint question is now resolved: future runs in this family should treat
   `200` steps as the default cap unless a later result clearly beats it on the
   same ep1 clip.
+- Lowering inference-time action gain below `1.0` changes the ep1 clip without
+  changing its timing. At both scales, the copied context stays static through
+  frame `16`, motion still starts at frame `17`, and the fork/gripper keeps
+  moving through frames `18-20`.
+- `action_token_scale=0.75` is the current best ep1 artifact. It keeps the same
+  frame-17 motion onset and still misses a clean plate-edge contact by frame
+  `20`, but the future fork halo is slightly thinner, the arm-crop silhouette
+  is a bit less widened, and the final contact frame is less blown out than the
+  scale-`1.0` baseline. The reports move in the same direction
+  (`profile_correlation≈0.413`, `late_motion_ratio≈1.637`,
+  future-frame MAE `17:8.84`, `18:13.94`, `19:13.27`, `20:12.89`).
+- `action_token_scale=0.50` is a regression on the same ep1 clip. Motion still
+  starts at frame `17` and runs through frame `20`, but the future fork becomes
+  softer and less well aligned, with worse motion scalars than both scale
+  `1.0` and `0.75` (`profile_correlation≈0.350`,
+  `late_motion_ratio≈1.707`, `max_frame_mae≈15.60`). Lowering gain helps only
+  up to a point; halving it does not rescue contact.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -154,6 +171,9 @@ improve that same anchor on the same canonical evaluation window.
   undercommitted, and neither held-out clip rescues this checkpoint family.
 - Human operator override: future checkpoint comparisons in this loop should
   use episode `1` only unless a later operator message changes that rule.
+- On the operator clip, the best current inference-time action gain is `0.75`:
+  it modestly reduces frame-17-to-20 fork/gripper ghosting without pushing the
+  motion back toward the frozen no-action failure.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
