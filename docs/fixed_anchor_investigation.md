@@ -37,20 +37,18 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: switch from mixed-data continuation to a short ep1-only polish from
-  the best mixed-data checkpoint.
-- Resume the validated full-dataset `ctx17/h4`, `k=1`, single-chunk,
-  residual+filllastctx, action-conditioned LoRA checkpoint
-  `curriculum_from_ep1overfit200_lr2e5_to800_from600/checkpoints/step_0000800.pt`
-  and continue for `200` steps on `--episodes 1` at `lr=2e-5`, then evaluate
-  the same episode-1 window at `start_frame=60` at `step 900` and `step 1000`.
-- Why next: both mixed-data continuations past `step 800` are now answered.
-  On ep1, the branch still stays static through frame `16` and starts moving
-  at frame `17`, but neither the plain `2e-5` continuation nor the patched
-  `1e-5` continuation beats `step 800`; both keep softer fork/gripper edges
-  and a wider frame-20 contact blur. The next stage question is whether the
-  remaining error is just last-mile specialization on the operator clip, which
-  points to a bounded ep1-only polish from the current mixed-data peak.
+- Rung: if this loop is resumed later, open a structural data-mixing pivot
+  rather than another continuation from `step 800`.
+- Start from the validated mixed-data `step 800` checkpoint and test a bounded
+  curriculum that preserves some full-dataset exposure while explicitly
+  refreshing episode `1`, instead of another plain mixed-data continuation or
+  another pure ep1-only polish.
+- Why next: the current local neighborhood is now answered. On ep1, every
+  validated branch still stays static through frame `16` and starts moving at
+  frame `17`, but neither the mixed-data continuations past `step 800` nor the
+  short ep1-only polish beats the `step 800` mixed-data peak. The next useful
+  question, if work resumes, is whether a data-mixing change can keep the good
+  mixed-data timing while sharpening the last bit of frame-20 contact.
 
 ## Best current result for fixed anchor
 - `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step800_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step_0000800_comparison.mp4`
@@ -295,6 +293,22 @@ improve that same anchor on the same canonical evaluation window.
   `profile_correlation≈0.395`, `late_motion_ratio≈1.495`,
   `spatial_motion_iou≈0.754`, `mean_frame_mae≈1.510`,
   `max_frame_mae≈9.77`, and `temporal_delta_ratio≈1.228`.
+- A short ep1-only polish from the `step 800` mixed-data checkpoint also fails
+  to produce a new best result. On ep1, `step 900` keeps the same frame-17
+  onset and is close to `step 800`, but the final two future frames still look
+  a little more doubled and less stable by eye. `step 1000` then regresses
+  more clearly, adding stronger blue/white color fringing and a wider final
+  contact blur than `step 800`.
+- The polish reports support that motion-first ordering. Relative to
+  `step 800`, ep1-only polish `step 900` lands at
+  `profile_correlation≈0.360`, `late_motion_ratio≈1.469`,
+  `spatial_motion_iou≈0.759`, `mean_frame_mae≈1.457`,
+  `max_frame_mae≈9.64`, and `temporal_delta_ratio≈1.229`, while
+  ep1-only polish `step 1000` worsens to `profile_correlation≈0.376`,
+  `late_motion_ratio≈1.735`, `spatial_motion_iou≈0.710`,
+  `mean_frame_mae≈1.545`, `max_frame_mae≈10.33`, and
+  `temporal_delta_ratio≈1.303`. Motion-first, `step 800` remains the best
+  fully validated fixed-anchor artifact in this loop.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
