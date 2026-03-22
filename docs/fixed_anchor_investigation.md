@@ -37,22 +37,20 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: change one major lever inside the same mixed-data branch by lowering
-  the continuation learning rate.
+- Rung: switch from mixed-data continuation to a short ep1-only polish from
+  the best mixed-data checkpoint.
 - Resume the validated full-dataset `ctx17/h4`, `k=1`, single-chunk,
   residual+filllastctx, action-conditioned LoRA checkpoint
   `curriculum_from_ep1overfit200_lr2e5_to800_from600/checkpoints/step_0000800.pt`
-  for `200` more steps with a patched optimizer state at `lr=1e-5`, then
-  evaluate the same episode-1 window at `start_frame=60` at `step 900` and
-  `step 1000`.
-- Why next: the latest direct continuation answered the plain-continue
-  question in the negative. On ep1, the branch still stays static through
-  frame `16` and starts moving at frame `17`, but both `step 900` and
-  `step 1000` are visibly blurrier than `step 800`, with softer fork/gripper
-  edges and a wider frame-20 contact. The next stage question is whether
-  `step 800` is near the right solution but is being over-updated at `2e-5`,
-  which points to a lower-learning-rate continuation from that same checkpoint
-  instead of another plain continuation.
+  and continue for `200` steps on `--episodes 1` at `lr=2e-5`, then evaluate
+  the same episode-1 window at `start_frame=60` at `step 900` and `step 1000`.
+- Why next: both mixed-data continuations past `step 800` are now answered.
+  On ep1, the branch still stays static through frame `16` and starts moving
+  at frame `17`, but neither the plain `2e-5` continuation nor the patched
+  `1e-5` continuation beats `step 800`; both keep softer fork/gripper edges
+  and a wider frame-20 contact blur. The next stage question is whether the
+  remaining error is just last-mile specialization on the operator clip, which
+  points to a bounded ep1-only polish from the current mixed-data peak.
 
 ## Best current result for fixed anchor
 - `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step800_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_curriculum_from_ep1overfit200_lr2e5_to800_from600_step_0000800_comparison.mp4`
@@ -282,6 +280,21 @@ improve that same anchor on the same canonical evaluation window.
   `profile_correlation≈0.388`, `late_motion_ratio≈1.568`,
   `spatial_motion_iou≈0.735`, `mean_frame_mae≈1.597`,
   `max_frame_mae≈10.45`, and `temporal_delta_ratio≈1.263`.
+- Lowering the continuation rate to `1e-5` does not change that conclusion.
+  On ep1, the patched-LR branch still keeps frame `16` static and first moves
+  at frame `17`, but `step 900` again regresses into a softer, more washed-out
+  fork/gripper blur than `step 800`, and `step 1000` only partially recovers.
+  By eye, both remain a little blurrier and more doubled at final contact than
+  the `step 800` mixed-data peak.
+- The lower-LR reports match that visual ordering. Relative to `step 800`,
+  lower-LR `step 900` drops to `profile_correlation≈0.370`,
+  `late_motion_ratio≈1.721`, `spatial_motion_iou≈0.713`,
+  `mean_frame_mae≈1.689`, `max_frame_mae≈11.09`, and
+  `temporal_delta_ratio≈1.316`. Lower-LR `step 1000` improves on that dip but
+  still remains slightly worse than `step 800` at
+  `profile_correlation≈0.395`, `late_motion_ratio≈1.495`,
+  `spatial_motion_iou≈0.754`, `mean_frame_mae≈1.510`,
+  `max_frame_mae≈9.77`, and `temporal_delta_ratio≈1.228`.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
