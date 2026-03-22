@@ -37,17 +37,18 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: structural action-gain scout in the best action-conditioned family.
+- Rung: one-trajectory overfit test in the best action-conditioned family.
 - Train a fresh `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx,
-  action-conditioned LoRA branch for `200` steps with
-  `action_token_scale=0.75`, then evaluate only `episode_index=1`,
-  `start_frame=60`.
-- Why next: the inference-time gain sweep answered the local scale question.
-  `0.75` is a modest but real ep1 improvement over scale `1.0`, while `0.50`
-  regresses. That points to over-strong action conditioning as a live
-  hypothesis, and a bounded train-time `0.75` scout is higher value than more
-  nearby inference-only sweeps because it tests whether the cleaner
-  frame-17-to-20 motion can be learned rather than only post-scaled.
+  action-conditioned LoRA branch on `episode_index=1` only, using the best
+  current gain setting `action_token_scale=0.75`, then evaluate the same
+  episode-1 window at `start_frame=60`.
+- Why next: the operator explicitly asked for a single-trajectory overfit test.
+  The latest inference-time gain sweep narrowed the best local setting to
+  `0.75`: motion still starts at frame `17` and misses crisp contact by frame
+  `20`, but the fork halo is slightly thinner than at scale `1.0`, while
+  `0.50` regresses. The highest-value bounded run is now to see whether this
+  architecture can learn a clean ep1 contact sequence when every training
+  window comes from that same trajectory.
 
 ## Best current result for fixed anchor
 - `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step200_ep1_start60_tokenscale075/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step_0000200_comparison.mp4`
@@ -148,6 +149,11 @@ improve that same anchor on the same canonical evaluation window.
   `1.0` and `0.75` (`profile_correlation≈0.350`,
   `late_motion_ratio≈1.707`, `max_frame_mae≈15.60`). Lowering gain helps only
   up to a point; halving it does not rescue contact.
+- The token-scale sweep does not fix the visible failure in inference alone.
+  At both scales the copied context stays static through frame `16`, motion
+  starts at frame `17`, and the model still misses clean plate-edge contact by
+  frame `20`; `0.75` only thins the same fork/gripper blur slightly, while
+  `0.50` softens and misaligns it again.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -174,6 +180,9 @@ improve that same anchor on the same canonical evaluation window.
 - On the operator clip, the best current inference-time action gain is `0.75`:
   it modestly reduces frame-17-to-20 fork/gripper ghosting without pushing the
   motion back toward the frozen no-action failure.
+- Latest operator directive: the next long run should train on episode `1` and
+  evaluate on episode `1` to test whether this architecture can overfit one
+  trajectory.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
