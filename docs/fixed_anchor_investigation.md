@@ -41,17 +41,17 @@ improve that same anchor on the same canonical evaluation window.
 - Train a fresh `ctx17/h4`, `k=1`, single-chunk, residual+filllastctx,
   action-conditioned LoRA branch on `episode_index=1` only, using the best
   current gain setting `action_token_scale=0.75`, then evaluate the same
-  episode-1 window at `start_frame=60`.
+  episode-1 window at `start_frame=60` at both `step 100` and `step 200`.
 - Why next: the operator explicitly asked for a single-trajectory overfit test.
-  The latest inference-time gain sweep narrowed the best local setting to
-  `0.75`: motion still starts at frame `17` and misses crisp contact by frame
-  `20`, but the fork halo is slightly thinner than at scale `1.0`, while
-  `0.50` regresses. The highest-value bounded run is now to see whether this
-  architecture can learn a clean ep1 contact sequence when every training
-  window comes from that same trajectory.
+  The latest full-dataset train-time `0.75` scout did not solve ep1: motion
+  still stays static through frame `16`, starts at frame `17`, and misses a
+  clean plate-edge contact by frame `20`; `step 100` is only modestly cleaner
+  while `step 200` regresses into brighter overactive blur. That rules out a
+  plain continuation in this branch and makes the overdue one-trajectory
+  overfit test the highest-value next action.
 
 ## Best current result for fixed anchor
-- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step200_ep1_start60_tokenscale075/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh400_step_0000200_comparison.mp4`
+- `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh200_step100_ep1_start60/optimizer_aloha_static_fork_pick_up_full_320x240_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_fresh200_step_0000100_comparison.mp4`
 
 ## Stage Findings for current anchor
 - The current checkpoint-mode sweep compares the full `context + future`
@@ -154,6 +154,18 @@ improve that same anchor on the same canonical evaluation window.
   starts at frame `17`, and the model still misses clean plate-edge contact by
   frame `20`; `0.75` only thins the same fork/gripper blur slightly, while
   `0.50` softens and misaligns it again.
+- The fresh full-dataset train-time `action_token_scale=0.75` scout changes
+  the same ep1 clip only modestly. `step 100` keeps the copied context static
+  through frame `16`, starts moving at frame `17`, and reaches through frames
+  `18-20` with a slimmer, less blown-out fork than the earlier inference-only
+  best, but it still misses a crisp plate-edge landing by frame `20`.
+- That improvement does not survive continuation inside the same branch.
+  By `step 200`, the ep1 clip still starts moving at frame `17`, but the fork
+  brightens and thickens again across frames `18-20`, the arm crop looks more
+  widened, and the reports reintroduce `overactive_motion`
+  (`profile_correlation≈0.338`, `late_motion_ratio≈1.677`,
+  `max_frame_mae≈15.16`) compared with the cleaner `step 100`
+  (`≈0.237`, `≈1.414`, `≈11.52`).
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -183,6 +195,10 @@ improve that same anchor on the same canonical evaluation window.
 - Latest operator directive: the next long run should train on episode `1` and
   evaluate on episode `1` to test whether this architecture can overfit one
   trajectory.
+- When a fresh action-conditioned branch regresses between checkpoints on ep1,
+  do not continue it plainly; change the training neighborhood instead. The
+  new full-dataset train-time `0.75` scout follows that rule: `step 100` is
+  the only keepable point and `step 200` is already worse.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
