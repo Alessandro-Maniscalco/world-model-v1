@@ -44,6 +44,7 @@ def test_train_script_builds_wan_vace_world_model_from_config() -> None:
         vace_layers=(0, 1),
         mask_channels=4,
         control_scale=0.75,
+        future_control_fill_mode="last_context_frame",
     )
 
     model = train_script.build_model_from_config(cfg, prepared)
@@ -53,6 +54,7 @@ def test_train_script_builds_wan_vace_world_model_from_config() -> None:
     assert isinstance(action_encoder, NullConditioningEncoder)
     assert model.mask_channels == 4
     assert model.control_scale == 0.75
+    assert model.future_control_fill_mode == "last_context_frame"
     assert model.backbone.config.text_dim == 16
     assert model.backbone.config.in_channels == 16
     assert model.backbone.config.vace_in_channels == 36
@@ -390,10 +392,10 @@ def test_train_script_disables_amp_outside_cuda() -> None:
     assert train_script._select_runtime_dtype(device=torch.device("cuda"), disable_amp=True) == torch.float32
 
 
-def test_train_script_validates_latent_schedule_for_k_plus_one_chunking() -> None:
+def test_train_script_validates_latent_schedule_for_exact_k_chunking() -> None:
     """Explain latent-time chunking failures before the train loop starts."""
     train_script = _load_train_script_module()
-    cfg = TrainScriptConfig(k=1, horizon_len=4)
+    cfg = TrainScriptConfig(k=2, horizon_len=4)
     prepared = PreparedPackedBatch(
         z_past_video=torch.randn(1, 16, 2, 8, 8),
         z_future_video=torch.randn(1, 16, 1, 8, 8),
@@ -409,9 +411,9 @@ def test_train_script_validates_latent_schedule_for_k_plus_one_chunking() -> Non
 
 
 def test_train_script_accepts_valid_latent_schedule() -> None:
-    """Allow training to proceed when latent future steps can cover K+1 chunks."""
+    """Allow training to proceed when latent future steps can cover exactly k chunks."""
     train_script = _load_train_script_module()
-    cfg = TrainScriptConfig(k=1, horizon_len=8)
+    cfg = TrainScriptConfig(k=2, horizon_len=8)
     prepared = PreparedPackedBatch(
         z_past_video=torch.randn(1, 16, 2, 8, 8),
         z_future_video=torch.randn(1, 16, 2, 8, 8),
@@ -428,7 +430,7 @@ def test_train_script_accepts_valid_latent_schedule() -> None:
 def test_train_script_accepts_exact_k_chunk_schedule_for_short_horizon() -> None:
     """Allow k-chunk scheduling when the latent horizon matches k exactly."""
     train_script = _load_train_script_module()
-    cfg = TrainScriptConfig(k=2, chunk_schedule_mode="k_chunks", horizon_len=8)
+    cfg = TrainScriptConfig(k=1, chunk_schedule_mode="k_chunks", horizon_len=8)
     prepared = PreparedPackedBatch(
         z_past_video=torch.randn(1, 16, 2, 8, 8),
         z_future_video=torch.randn(1, 16, 2, 8, 8),

@@ -98,6 +98,140 @@ def test_wan_vace_world_model_uses_black_fill_latents_with_gray_future_template(
     assert torch.equal(backbone.last_control_hidden_states_scale, torch.tensor([0.75], dtype=torch.float32))
 
 
+def test_wan_vace_world_model_can_fill_future_control_with_last_context_frame() -> None:
+    """Use the last observed latent frame as the future masked-control fill when requested."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        future_control_fill_mode="last_context_frame",
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 3, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 3, 1, 1), 0.5),
+    )
+
+    observed_video = torch.tensor(
+        [[[[[2.0]], [[4.0]]], [[[3.0]], [[5.0]]]]],
+        dtype=torch.float32,
+    )
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=observed_video,
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+    )
+
+    expected_control_video = torch.tensor(
+        [[[[[2.0]], [[4.0]], [[4.0]]], [[[3.0]], [[5.0]], [[5.0]]]]],
+        dtype=torch.float32,
+    )
+    expected_control_mask = torch.tensor([[[[[0.0]], [[0.0]], [[1.0]]]]], dtype=torch.float32)
+    expected_control_hidden_states = build_vace_control_tensor(
+        observed_latents=expected_control_video,
+        observed_mask=expected_control_mask,
+        inactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[-1.0]], [[4.0]]], [[[-1.0]], [[-1.0]], [[5.0]]]]],
+            dtype=torch.float32,
+        ),
+        reactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[-1.0]], [[4.0]]], [[[-1.0]], [[-1.0]], [[5.0]]]]],
+            dtype=torch.float32,
+        ),
+        mask_channels=1,
+    )
+
+    assert backbone.last_control_hidden_states is not None
+    assert torch.equal(backbone.last_control_hidden_states, expected_control_hidden_states)
+
+
+def test_wan_vace_world_model_residualizes_future_control_stream_when_requested() -> None:
+    """Shift future VACE control latents into the same residual coordinates as the sampled future chunk."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.ones(1, 2, 1, 1, 1),
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+        future_latent_residual_base=torch.full((1, 2, 1, 1, 1), 2.0),
+    )
+
+    expected_control_video = torch.tensor(
+        [[[[[1.0]], [[-1.5]]], [[[1.0]], [[-1.5]]]]],
+        dtype=torch.float32,
+    )
+    expected_control_mask = torch.tensor([[[[[0.0]], [[1.0]]]]], dtype=torch.float32)
+    expected_control_hidden_states = build_vace_control_tensor(
+        observed_latents=expected_control_video,
+        observed_mask=expected_control_mask,
+        inactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[-3.0]]], [[[-1.0]], [[-3.0]]]]],
+            dtype=torch.float32,
+        ),
+        reactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[-3.0]]], [[[-1.0]], [[-3.0]]]]],
+            dtype=torch.float32,
+        ),
+        mask_channels=1,
+    )
+
+    assert backbone.last_control_hidden_states is not None
+    assert torch.equal(backbone.last_control_hidden_states, expected_control_hidden_states)
+
+
+def test_wan_vace_world_model_zeroes_last_context_fill_under_residual_targets() -> None:
+    """Turn last-context future fills into a zero-change prior after residualization."""
+    backbone = _RecordingBackbone()
+    model = WanVACEWorldModel(
+        backbone=backbone,
+        control_scale=1.0,
+        future_control_fill_mode="last_context_frame",
+        mask_channels=1,
+        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
+    )
+
+    model(
+        noisy_future_video=torch.zeros(1, 2, 1, 1, 1),
+        observed_video=torch.tensor([[[[[2.0]]], [[[3.0]]]]], dtype=torch.float32),
+        action_tokens=torch.randn(1, 1, 4),
+        timestep_t=torch.tensor([0.5], dtype=torch.float32),
+        block_causal_attention_mask=None,
+        future_latent_residual_base=torch.tensor([[[[[2.0]]], [[[3.0]]]]], dtype=torch.float32),
+    )
+
+    expected_control_video = torch.tensor(
+        [[[[[2.0]], [[0.0]]], [[[3.0]], [[0.0]]]]],
+        dtype=torch.float32,
+    )
+    expected_control_mask = torch.tensor([[[[[0.0]], [[1.0]]]]], dtype=torch.float32)
+    expected_control_hidden_states = build_vace_control_tensor(
+        observed_latents=expected_control_video,
+        observed_mask=expected_control_mask,
+        inactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[0.0]]], [[[-1.0]], [[0.0]]]]],
+            dtype=torch.float32,
+        ),
+        reactive_fill_latents=torch.tensor(
+            [[[[[-1.0]], [[0.0]]], [[[-1.0]], [[0.0]]]]],
+            dtype=torch.float32,
+        ),
+        mask_channels=1,
+    )
+
+    assert backbone.last_control_hidden_states is not None
+    assert torch.equal(backbone.last_control_hidden_states, expected_control_hidden_states)
+
+
 def test_wan_vace_world_model_allows_missing_block_causal_attention_mask() -> None:
     """Skip patch-token mask expansion when the caller wants full attention."""
     backbone = _RecordingBackbone()

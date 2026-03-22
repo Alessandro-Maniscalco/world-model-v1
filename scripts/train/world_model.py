@@ -11,7 +11,7 @@ from contextlib import nullcontext
 import itertools
 import random
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import sys
 
@@ -34,6 +34,7 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     # Drop incorrectly loaded module objects so package import can succeed.
     sys.modules.pop("world_model", None)
 
+from world_model.chunking import normalize_chunk_schedule_mode
 from world_model.config import TrainScriptConfig, apply_namespace_overrides, load_train_config
 from world_model.data import (
     build_lerobot_dataloader,
@@ -99,9 +100,9 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--k", type=int, default=defaults.k, help="Chunk-count parameter for latent-time scheduling")
     parser.add_argument(
         "--chunk-schedule-mode",
-        choices=("k_plus_one", "k_chunks"),
+        choices=("k_chunks",),
         default=defaults.chunk_schedule_mode,
-        help="Interpret k as K+1 total chunks or exactly K total chunks.",
+        help="Interpret k as exactly K total chunks.",
     )
     parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
     parser.add_argument("--auto-stop-check-every", type=int, default=defaults.auto_stop_check_every)
@@ -239,6 +240,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--wan-num-layers", type=int, default=defaults.wan_num_layers)
     parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
     parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
+    parser.add_argument(
+        "--future-control-fill-mode",
+        choices=("gray", "last_context_frame"),
+        default=defaults.future_control_fill_mode,
+        help="Fill masked future VACE control slots with gray templates or the last observed latent frame.",
+    )
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
     parser.add_argument("--trainable-backbone", choices=("full", "vace", "head", "lora"), default=defaults.trainable_backbone)
     parser.add_argument("--lora-rank", type=int, default=defaults.lora_rank)
@@ -386,7 +393,11 @@ def _load_args() -> TrainScriptConfig:
     defaults = load_train_config(config_args.config)
     parser = _build_parser(defaults)
     args = parser.parse_args()
-    return apply_namespace_overrides(defaults, args)
+    cfg = apply_namespace_overrides(defaults, args)
+    return replace(
+        cfg,
+        chunk_schedule_mode=normalize_chunk_schedule_mode(cfg.chunk_schedule_mode),
+    )
 
 
 def _set_seed(seed: int) -> None:
@@ -415,13 +426,14 @@ def _training_autocast_context(*, device: torch.device, disable_amp: bool, dtype
 
 def _validate_chunk_schedule(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> None:
     """Fail fast when latent-time chunking cannot satisfy the configured schedule."""
-    min_future_steps = cfg.k + 1 if cfg.chunk_schedule_mode == "k_plus_one" else cfg.k
+    chunk_schedule_mode = normalize_chunk_schedule_mode(cfg.chunk_schedule_mode)
+    min_future_steps = cfg.k
     future_steps = prepared_batch.horizon_latent_steps
     if future_steps < min_future_steps:
         raise ValueError(
             "Invalid latent-time schedule: "
             f"raw horizon_len={cfg.horizon_len} compressed to horizon_latent_steps={future_steps}, "
-            f"but k={cfg.k} with chunk_schedule_mode={cfg.chunk_schedule_mode!r} "
+            f"but k={cfg.k} with chunk_schedule_mode={chunk_schedule_mode!r} "
             f"requires at least {min_future_steps} latent future steps. "
             "Increase horizon_len or reduce k."
         )
@@ -473,6 +485,11 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "future_latent_residual_mode must be 'none' or 'last_context_frame', got "
             f"{cfg.future_latent_residual_mode!r}."
         )
+    if cfg.future_control_fill_mode not in {"gray", "last_context_frame"}:
+        raise ValueError(
+            "future_control_fill_mode must be 'gray' or 'last_context_frame', got "
+            f"{cfg.future_control_fill_mode!r}."
+        )
     if cfg.teacher_forcing_observation_mode not in {
         "full_prefix",
         "past_only",
@@ -487,11 +504,7 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
             "teacher_forcing_future_input_mode must be 'full_suffix' or "
             f"'active_chunk', got {cfg.teacher_forcing_future_input_mode!r}."
         )
-    if cfg.chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
-        raise ValueError(
-            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', got "
-            f"{cfg.chunk_schedule_mode!r}."
-        )
+    normalize_chunk_schedule_mode(cfg.chunk_schedule_mode)
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(
             "action_control_prior_scale must be >= 0, got "
@@ -843,7 +856,9 @@ def _evaluate_loss(
             action_control_aux_loss_scale
             * _compute_action_control_aux_loss(
                 action_control_prior=action_control_prior,
+                z_past_video=z_past_video,
                 z_future_video=z_future_video,
+                future_latent_residual_mode=future_latent_residual_mode,
             )
         )
         loss = loss + (
@@ -851,7 +866,9 @@ def _evaluate_loss(
             * _compute_action_token_latent_aux_loss(
                 action_encoder=action_encoder,
                 action_tokens=action_tokens,
+                z_past_video=z_past_video,
                 z_future_video=z_future_video,
+                future_latent_residual_mode=future_latent_residual_mode,
             )
         )
     return float(loss.detach().cpu().item())

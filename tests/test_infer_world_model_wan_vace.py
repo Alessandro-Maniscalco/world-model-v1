@@ -614,6 +614,23 @@ def test_infer_script_restores_future_latent_residual_mode_from_checkpoint_defau
     assert restored.future_latent_residual_mode == "last_context_frame"
 
 
+def test_infer_script_restores_future_control_fill_mode_from_checkpoint_defaults() -> None:
+    """Reuse saved future-control fill mode when the infer config still uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "future_control_fill_mode": "last_context_frame",
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.future_control_fill_mode == "last_context_frame"
+
+
 def test_infer_script_allows_zero_num_vis_frames_to_mean_show_all() -> None:
     """Treat `num_vis_frames=0` as a request to render every available frame."""
     infer_script = _load_infer_script_module()
@@ -757,6 +774,22 @@ def test_infer_script_local_video_none_mode_ignores_checkpoint_action_dim(monkey
     assert resolved is prepared
     assert source_video.shape == (1, 17, 3, 8, 8)
     assert captured["action"].shape == (1, 1)
+
+
+def test_infer_script_infers_action_dim_without_input_layernorm() -> None:
+    """Recover the true action width from no-LayerNorm checkpoints."""
+    infer_script = _load_infer_script_module()
+
+    action_dim = infer_script._infer_action_dim_from_checkpoint(
+        {
+            "action_encoder_state_dict": {
+                "net.0.weight": torch.randn(32, 14),
+                "net.0.bias": torch.randn(32),
+            }
+        }
+    )
+
+    assert action_dim == 14
 
 
 def test_infer_script_decodes_on_cpu_after_cuda_sampling() -> None:

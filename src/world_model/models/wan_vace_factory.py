@@ -71,6 +71,7 @@ def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBat
     return WanVACEWorldModel(
         backbone=backbone,
         control_scale=cfg.control_scale,
+        future_control_fill_mode=str(getattr(cfg, "future_control_fill_mode", "gray")),
         action_control_prior_scale=float(getattr(cfg, "action_control_prior_scale", 0.0)),
         action_control_prior_mode=str(getattr(cfg, "action_control_prior_mode", "reactive_only")),
         action_hidden_state_bias_scale=float(getattr(cfg, "action_hidden_state_bias_scale", 0.0)),
@@ -239,6 +240,7 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "trainable_backbone",
         "conditioning_mode",
         "control_scale",
+        "future_control_fill_mode",
         "mask_channels",
         "vace_layers",
         "lora_rank",

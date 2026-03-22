@@ -28,7 +28,7 @@ class TrainScriptConfig:
     dt: float = 0.1
     batch_size: int = 2
     k: int = 1
-    chunk_schedule_mode: str = "k_plus_one"
+    chunk_schedule_mode: str = "k_chunks"
     max_steps: int = 2000
     auto_stop_check_every: int = 0
     auto_stop_min_relative_improvement: float = 0.0
@@ -66,6 +66,7 @@ class TrainScriptConfig:
     wan_num_layers: int = 40
     vace_layers: tuple[int, ...] = (0, 5, 10, 15, 20, 25, 30, 35)
     control_scale: float = 1.0
+    future_control_fill_mode: str = "gray"
     mask_channels: int = 64
     trainable_backbone: str = "full"
     lora_rank: int = 8
@@ -127,7 +128,7 @@ class InferScriptConfig:
     batch_size: int = 1
     subset_size: int = 1
     k: int = 1
-    chunk_schedule_mode: str = "k_plus_one"
+    chunk_schedule_mode: str = "k_chunks"
     integration_steps: int = 20
     num_vis_frames: int = 0
     load_pretrained_backbone: bool = True
@@ -141,6 +142,7 @@ class InferScriptConfig:
     wan_num_layers: int = 40
     vace_layers: tuple[int, ...] = (0, 5, 10, 15, 20, 25, 30, 35)
     control_scale: float = 1.0
+    future_control_fill_mode: str = "gray"
     mask_channels: int = 64
     trainable_backbone: str = "full"
     lora_rank: int = 8

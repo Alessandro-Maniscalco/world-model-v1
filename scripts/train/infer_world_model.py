@@ -39,6 +39,7 @@ if loaded_world_model is not None and not hasattr(loaded_world_model, "__path__"
     # Drop incorrectly loaded module objects so package import can succeed.
     sys.modules.pop("world_model", None)
 
+from world_model.chunking import normalize_chunk_schedule_mode
 from world_model.config import InferScriptConfig, apply_namespace_overrides, load_infer_config
 from world_model.data import build_lerobot_dataloader, prepare_packed_batch, preprocess_video_for_vae
 from world_model.data.schema import PreparedPackedBatch
@@ -91,9 +92,9 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--k", type=int, default=defaults.k)
     parser.add_argument(
         "--chunk-schedule-mode",
-        choices=("k_plus_one", "k_chunks"),
+        choices=("k_chunks",),
         default=defaults.chunk_schedule_mode,
-        help="Interpret k as K+1 total chunks or exactly K total chunks during rollout.",
+        help="Interpret k as exactly K total chunks during rollout.",
     )
     parser.add_argument("--integration-steps", type=int, default=defaults.integration_steps)
     parser.add_argument(
@@ -118,6 +119,12 @@ def _build_parser(defaults: InferScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--wan-num-layers", type=int, default=defaults.wan_num_layers)
     parser.add_argument("--vace-layers", type=int, nargs="+", default=list(defaults.vace_layers))
     parser.add_argument("--control-scale", type=float, default=defaults.control_scale)
+    parser.add_argument(
+        "--future-control-fill-mode",
+        choices=("gray", "last_context_frame"),
+        default=defaults.future_control_fill_mode,
+        help="Fill masked future VACE control slots with gray templates or the last observed latent frame.",
+    )
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
     parser.add_argument("--trainable-backbone", choices=("full", "vace", "head", "lora"), default=defaults.trainable_backbone)
     parser.add_argument("--lora-rank", type=int, default=defaults.lora_rank)
@@ -308,18 +315,18 @@ def _load_args() -> InferScriptConfig:
     defaults = load_infer_config(config_args.config)
     parser = _build_parser(defaults)
     args = parser.parse_args()
-    return apply_namespace_overrides(defaults, args)
+    cfg = apply_namespace_overrides(defaults, args)
+    return replace(
+        cfg,
+        chunk_schedule_mode=normalize_chunk_schedule_mode(cfg.chunk_schedule_mode),
+    )
 
 
 def _validate_infer_config(cfg: InferScriptConfig) -> None:
     """Reject inference configurations that cannot produce meaningful outputs."""
     if cfg.num_vis_frames < 0:
         raise ValueError(f"num_vis_frames must be >= 0, got {cfg.num_vis_frames}")
-    if cfg.chunk_schedule_mode not in {"k_plus_one", "k_chunks"}:
-        raise ValueError(
-            "chunk_schedule_mode must be 'k_plus_one' or 'k_chunks', got "
-            f"{cfg.chunk_schedule_mode!r}"
-        )
+    normalize_chunk_schedule_mode(cfg.chunk_schedule_mode)
     if cfg.action_control_prior_scale < 0.0:
         raise ValueError(
             f"action_control_prior_scale must be >= 0, got {cfg.action_control_prior_scale}"
@@ -328,6 +335,11 @@ def _validate_infer_config(cfg: InferScriptConfig) -> None:
         raise ValueError(
             "action_control_prior_mode must be 'reactive_only' or 'dual_fill', got "
             f"{cfg.action_control_prior_mode!r}"
+        )
+    if cfg.future_control_fill_mode not in {"gray", "last_context_frame"}:
+        raise ValueError(
+            "future_control_fill_mode must be 'gray' or 'last_context_frame', got "
+            f"{cfg.future_control_fill_mode!r}"
         )
     if cfg.action_hidden_state_bias_scale < 0.0:
         raise ValueError(
@@ -381,6 +393,7 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         "trainable_backbone",
         "conditioning_mode",
         "control_scale",
+        "future_control_fill_mode",
         "mask_channels",
         "vace_layers",
         "lora_rank",
@@ -412,6 +425,8 @@ def _restore_runtime_config_from_checkpoint(cfg: InferScriptConfig, ckpt: dict[s
         value = saved_cfg[key]
         if key in {"vace_layers", "lora_target_modules"}:
             value = tuple(value)
+        if key == "chunk_schedule_mode":
+            value = normalize_chunk_schedule_mode(value)
         updates[key] = value
     if not updates:
         return cfg
@@ -459,9 +474,9 @@ def _infer_action_dim_from_checkpoint(ckpt: dict[str, object]) -> int:
     for key in ("net.0.weight", "net.1.weight"):
         value = state_dict.get(key)
         if torch.is_tensor(value):
-            if key == "net.0.weight":
+            if value.ndim == 1:
                 return int(value.shape[0])
-            return int(value.shape[1])
+            return int(value.shape[-1])
 
     raise ValueError("Unable to infer action_dim from checkpoint action_encoder_state_dict")
 
