@@ -41,6 +41,7 @@ class TrainScriptConfig:
     validation_min_relative_improvement: float = 0.01
     lr: float = 1e-4
     weight_decay: float = 1e-4
+    optimizer_name: str = "adamw"
     grad_clip_norm: float = 1.0
     weight_mode: str = "uniform"
     motion_loss_alpha: float = 0.0

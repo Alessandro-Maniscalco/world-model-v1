@@ -157,6 +157,12 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     )
     parser.add_argument("--lr", type=float, default=defaults.lr)
     parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay)
+    parser.add_argument(
+        "--optimizer-name",
+        choices=("adamw", "adafactor"),
+        default=defaults.optimizer_name,
+        help="Optimizer used for the selected trainable parameters.",
+    )
     parser.add_argument("--grad-clip-norm", type=float, default=defaults.grad_clip_norm)
     parser.add_argument("--weight-mode", choices=["uniform", "snr", "clipped_snr"], default=defaults.weight_mode)
     parser.add_argument(
@@ -674,6 +680,29 @@ def _configure_trainable_parameters(
     return parameters
 
 
+def _build_optimizer(
+    cfg: TrainScriptConfig,
+    parameter_groups: list[nn.Parameter],
+) -> torch.optim.Optimizer:
+    """Build the configured optimizer for the selected trainable parameters."""
+    if cfg.optimizer_name == "adamw":
+        return torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if cfg.optimizer_name == "adafactor":
+        try:
+            from transformers import Adafactor
+        except ImportError as exc:
+            raise ImportError("transformers is required for optimizer_name=adafactor") from exc
+        return Adafactor(
+            parameter_groups,
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+            relative_step=False,
+            scale_parameter=False,
+            warmup_init=False,
+        )
+    raise ValueError(f"Unsupported optimizer_name: {cfg.optimizer_name}")
+
+
 def build_model_from_config(cfg: TrainScriptConfig, prepared_batch: PreparedPackedBatch) -> WanVACEWorldModel:
     """Build the Wan VACE world-model adapter for training."""
     return build_wan_vace_model_from_config(cfg, prepared_batch)
@@ -1008,7 +1037,7 @@ def main() -> None:
         f"Trainable backbone mode: {cfg.trainable_backbone} ({trainable_param_count} params)",
         flush=True,
     )
-    optimizer = torch.optim.AdamW(parameter_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    optimizer = _build_optimizer(cfg, parameter_groups)
 
     resumed_step = 0
     restored_optimizer_state = True

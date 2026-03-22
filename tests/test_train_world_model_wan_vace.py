@@ -312,6 +312,7 @@ def test_train_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--motion-loss-alpha" in option_strings
     assert "--motion-loss-max-weight" in option_strings
     assert "--motion-loss-excess-only" in option_strings
+    assert "--optimizer-name" in option_strings
     assert "--action-conditioning-window" in option_strings
     assert "--action-order-conditioning" in option_strings
     assert "--action-control-prior-scale" not in option_strings
@@ -373,6 +374,28 @@ def test_train_script_moves_train_modules_to_runtime_dtype() -> None:
 
     assert next(moved_model.parameters()).dtype == torch.bfloat16
     assert next(moved_action_encoder.parameters()).dtype == torch.bfloat16
+
+
+def test_train_script_builds_adafactor_when_requested() -> None:
+    """Allow the smoke path to swap in the lower-state Adafactor optimizer."""
+    train_script = _load_train_script_module()
+    parameter = torch.nn.Parameter(torch.zeros(1))
+
+    optimizer = train_script._build_optimizer(
+        TrainScriptConfig(
+            optimizer_name="adafactor",
+            lr=3e-4,
+            weight_decay=0.01,
+        ),
+        [parameter],
+    )
+
+    assert optimizer.__class__.__name__ == "Adafactor"
+    assert optimizer.defaults["lr"] == pytest.approx(3e-4)
+    assert optimizer.defaults["weight_decay"] == pytest.approx(0.01)
+    assert optimizer.defaults["relative_step"] is False
+    assert optimizer.defaults["scale_parameter"] is False
+    assert optimizer.defaults["warmup_init"] is False
 
 
 def test_train_script_validates_latent_schedule_for_exact_k_chunking() -> None:
