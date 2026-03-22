@@ -37,20 +37,23 @@ improve that same anchor on the same canonical evaluation window.
   `runs/training_optimizer/fixed_anchor_teacher_forced_clean_estimates/ctx17_h4_step400_ep0_start60/steps1_idx0_t1000/comparison_grid.png`
 
 ## Next Diagnostic Step
-- Rung: curriculum-transfer test from the best ep1 overfit checkpoint into the
-  full dataset.
+- Rung: lower-learning-rate curriculum-transfer test from the best ep1 overfit
+  checkpoint into the full dataset.
 - Resume the validated ep1-only `ctx17/h4`, `k=1`, single-chunk,
   residual+filllastctx, action-conditioned LoRA checkpoint
-  `step_0000200.pt` on the full dataset for `200` more steps, then evaluate
-  the same episode-1 window at `start_frame=60` at `step 300` and `step 400`.
-- Why next: the one-trajectory overfit branch is now answered and saturated.
-  On ep1, `step 200` is the clean peak: the copied context still stays static
-  through frame `16`, motion starts at frame `17`, and the frame-17-to-20 fork
-  approach nearly matches the reference. Continuing that same branch to
-  `300/400` brings back blue/white ghosting, thicker arm-crop blur, and worse
-  contact. The new stage question is whether that good ep1 solution can
-  survive limited full-dataset mixing at all, or whether broader training
-  immediately washes it out.
+  `step_0000200.pt` on the full dataset for `200` more steps at a lower
+  learning rate, then evaluate the same episode-1 window at `start_frame=60`
+  at `step 300` and `step 400`.
+- Why next: the same-LR curriculum transfer already answered the first mixing
+  question in the negative. On ep1, `step 200` is still the clean peak: the
+  copied context stays static through frame `16`, motion starts at frame `17`,
+  and frames `17-20` track the fork approach with only slight frame-20
+  softness. Resuming that checkpoint on the full dataset at the original
+  `1e-4` learning rate immediately washes it out by `step 300/400`, bringing
+  back bright blue/white ghosting, wider arm-crop silhouettes, and a more
+  overactive missed contact. The next stage question is whether that good ep1
+  solution is being overwritten by update size rather than by unavoidable
+  dataset mixing.
 
 ## Best current result for fixed anchor
 - `runs/training_optimizer/inspection/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step200_ep1_start60/optimizer_aloha_static_fork_pick_up_ep1only_ctx17_h4_lora32_action_tokenscale075_gradckpt_residual_lastctx_filllastctx_singlechunk_overfit200_step_0000200_comparison.mp4`
@@ -198,6 +201,24 @@ improve that same anchor on the same canonical evaluation window.
   `max_frame_mae≈11.89`, `late_motion_ratio≈1.825`, and even lower
   arm-motion `spatial_motion_iou≈0.660`. For this neighborhood, `step 200` is
   the best stop point.
+- The first full-dataset curriculum transfer from overfit `step 200` does not
+  preserve that clean ep1 fit. On the operator clip, both resumed checkpoints
+  still keep the copied context static through frame `16` and first visible
+  motion still starts at frame `17`, so timing does not collapse; the failure
+  is visual quality within the future horizon. `step 300` immediately brings
+  back a bright blue/white fork halo in frame `17` and thick smeared contact
+  through frames `18-20`. `step 400` is somewhat less blown out than `step 300`
+  in the full frame, but it still ends with a wider, blurrier fork/contact
+  shape than the ep1-only `step 200` peak.
+- The supporting reports match the motion-first ranking on that curriculum
+  transfer. Relative to ep1-only `step 200`, curriculum `step 300` falls to
+  `profile_correlation≈0.296`, `late_motion_ratio≈2.234`,
+  `spatial_motion_iou≈0.675`, `mean_frame_mae≈2.778`, and
+  `max_frame_mae≈18.38`; curriculum `step 400` remains worse than the ep1-only
+  peak at `profile_correlation≈0.295`, `late_motion_ratio≈1.895`,
+  `spatial_motion_iou≈0.682`, `mean_frame_mae≈1.753`, and
+  `max_frame_mae≈10.86`. Broader training at the original learning rate washes
+  out the good ep1 solution instead of refining it.
 
 ## Stable Findings
 - Use `scripts/check/sweep_local_repo_resolutions.py` for checkpoint evaluation,
@@ -235,6 +256,11 @@ improve that same anchor on the same canonical evaluation window.
   do not continue it plainly; change the training neighborhood instead. The
   new full-dataset train-time `0.75` scout follows that rule: `step 100` is
   the only keepable point and `step 200` is already worse.
+- A naive full-dataset warm start from the clean ep1-only `step 200` checkpoint
+  does not preserve the good operator-clip solution. On ep1 the clip still
+  stays static through frame `16` and starts moving at frame `17`, but the
+  same-LR curriculum transfer quickly reintroduces fork/gripper ghosting and a
+  blurrier frame-20 contact than the ep1-only peak.
 
 ## Kept Code Changes
 Still-relevant code-changing commits that remain available as structural
