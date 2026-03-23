@@ -868,7 +868,7 @@ def _run_local_pipeline(
     prompt: str,
     progress_label: str | None = None,
 ) -> np.ndarray:
-    """Run the canonical Wan VACE pipeline path with a shared no-conditioning prompt."""
+    """Run the canonical Wan VACE pipeline path with the configured base-mode prompt."""
 
     if num_frames % pipe.vae_scale_factor_temporal != 1:
         num_frames = num_frames // pipe.vae_scale_factor_temporal * pipe.vae_scale_factor_temporal + 1
@@ -1397,10 +1397,10 @@ def _run_one_checkpoint_resolution(
                 num_frames=DEFAULT_BASE_TOTAL_FRAMES,
                 num_inference_steps=effective_inference_steps,
                 generator=generator,
-                guidance_scale=1.0,
+                guidance_scale=float(getattr(runtime_cfg, "guidance_scale", 1.0)),
                 max_sequence_length=int(runtime_cfg.max_sequence_length),
                 conditioning_scale=float(getattr(runtime_cfg, "control_scale", 1.0)),
-                prompt="",
+                prompt=str(getattr(runtime_cfg, "prompt", "")),
                 progress_label=f"{label} steps",
             )
             pred_rollout = torch.from_numpy(np.ascontiguousarray(frames)).permute(0, 3, 1, 2).unsqueeze(0).float()

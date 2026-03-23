@@ -80,6 +80,96 @@ def test_base_mode_keeps_resolution_named_outputs() -> None:
     assert summary_path == Path("runs/sweep_local/summary.json")
 
 
+def test_base_mode_forwards_prompt_and_guidance_to_local_pipeline(monkeypatch, tmp_path) -> None:
+    """Base-mode sweeps should pass the caller prompt and guidance into local pipeline inference."""
+    captured_local_kwargs: dict[str, object] = {}
+    target_rollout = torch.full((1, 9, 3, 4, 5), 11.0)
+
+    monkeypatch.setattr(
+        script,
+        "_load_base_runtime_config",
+        lambda path: SimpleNamespace(
+            control_scale=1.0,
+            max_sequence_length=128,
+            prompt="default prompt",
+            guidance_scale=1.0,
+        ),
+    )
+    monkeypatch.setattr(script, "_resolve_device", lambda device_name: torch.device("cpu"))
+    monkeypatch.setattr(script, "_select_runtime_dtype", lambda device: torch.float32)
+    monkeypatch.setattr(
+        script,
+        "_load_checkpoint_clip",
+        lambda **kwargs: (torch.zeros(1, 9, 3, 240, 320), torch.zeros(9, 1)),
+    )
+    monkeypatch.setattr(
+        script,
+        "preprocess_video_for_vae",
+        lambda video, frame_height, frame_width: target_rollout,
+    )
+    monkeypatch.setattr(
+        script,
+        "_build_dense_prefix_condition_lists",
+        lambda **kwargs: (["video"], ["mask"]),
+    )
+    monkeypatch.setattr(script, "_load_local_pipeline", lambda **kwargs: object())
+
+    def _fake_run_local_pipeline(**kwargs):
+        """Capture the effective prompt-conditioning args passed into base-mode inference."""
+        captured_local_kwargs.update(kwargs)
+        return torch.full((9, 4, 5, 3), 22.0, dtype=torch.float32).numpy()
+
+    monkeypatch.setattr(script, "_run_local_pipeline", _fake_run_local_pipeline)
+    monkeypatch.setattr(script, "_tensor_video_to_frames", lambda video_btchw: [0.0])
+    monkeypatch.setattr(script, "_build_side_by_side_video", lambda **kwargs: torch.zeros(1, 9, 3, 4, 5))
+    monkeypatch.setattr(script, "_export_video", lambda **kwargs: None)
+    monkeypatch.setattr(script, "_write_plausibility_report", lambda **kwargs: {"plausible": True})
+    monkeypatch.setattr(
+        script,
+        "_write_arm_motion_report",
+        lambda **kwargs: {"summary": {"motion_verdict": "good"}},
+    )
+
+    result = script._run_one_checkpoint_resolution(
+        mode="base",
+        config_path=Path("configs/train/world_model.yaml"),
+        checkpoint_path=Path("unused.pt"),
+        width=320,
+        height=240,
+        output_path=tmp_path / "generated.mp4",
+        comparison_path=tmp_path / "comparison.mp4",
+        plausibility_output_path=tmp_path / "plausibility_report.json",
+        motion_output_path=tmp_path / "arm_motion_report.json",
+        repo_id="repo",
+        episode_index=1,
+        start_frame=60,
+        video_key="observation.images.cam_high",
+        context_len=9,
+        horizon_len=8,
+        k=1,
+        integration_steps=50,
+        fps=10,
+        seed=0,
+        single_chunk_rollout=True,
+        device_name="cpu",
+        action_source="auto",
+        action_scale=1.0,
+        action_token_scale=1.0,
+        control_scale=None,
+        prompt="robot arm picks up a fork from a table",
+        negative_prompt="",
+        guidance_scale=3.5,
+        max_sequence_length=256,
+    )
+
+    assert captured_local_kwargs["prompt"] == "robot arm picks up a fork from a table"
+    assert captured_local_kwargs["guidance_scale"] == 3.5
+    assert captured_local_kwargs["max_sequence_length"] == 256
+    assert captured_local_kwargs["conditioning_scale"] == 1.0
+    assert result["plausibility"] == {"plausible": True}
+    assert result["motion"] == {"summary": {"motion_verdict": "good"}}
+
+
 def test_single_resolution_plausibility_path_uses_shared_name() -> None:
     """Single-resolution sweeps should emit the controller-expected plausibility filename."""
     plausibility_path = script._resolve_plausibility_output_path(
