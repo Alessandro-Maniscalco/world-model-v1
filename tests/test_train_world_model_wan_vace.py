@@ -833,19 +833,7 @@ def test_train_script_updates_validation_best_without_patience() -> None:
         current_val_loss=0.60,
     )
     assert best == pytest.approx(0.50)
-    assert improvement == pytest.approx(-1.0 / 6.0)
-
-
-def test_train_script_bounds_validation_regressions_in_relative_improvement() -> None:
-    """Keep logged regressions bounded while preserving improvement semantics."""
-    train_script = _load_train_script_module()
-
-    improvement = train_script._relative_block_improvement(
-        previous_mean_loss=0.054439,
-        current_mean_loss=0.236559,
-    )
-
-    assert improvement == pytest.approx(-0.769871364014897)
+    assert improvement == pytest.approx(-0.20)
 
 
 def test_train_script_evaluates_validation_loss_with_fixed_batch_cap(monkeypatch) -> None:
@@ -1356,6 +1344,45 @@ def test_train_script_keeps_vace_blocks_frozen_in_head_mode() -> None:
     assert model.backbone.vace_patch_embedding.weight.requires_grad is True
     assert model.backbone.proj_out.weight.requires_grad is True
     assert next(model.backbone.vace_blocks[0].parameters()).requires_grad is False
+
+
+def test_train_script_can_freeze_backbone_and_train_only_action_encoder() -> None:
+    """Allow action-only adaptation runs from a frozen visual checkpoint."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    cfg = TrainScriptConfig(
+        trainable_backbone="none",
+        conditioning_mode="action",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    model = train_script.build_model_from_config(cfg, prepared)
+    action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, model)
+    parameters = train_script._configure_trainable_parameters(cfg, model, action_encoder)
+    trainable_names = {
+        name for name, parameter in itertools.chain(model.named_parameters(), action_encoder.named_parameters()) if parameter.requires_grad
+    }
+
+    assert parameters
+    assert all(not parameter.requires_grad for parameter in model.parameters())
+    assert any(parameter.requires_grad for parameter in action_encoder.parameters())
+    assert not any(name.startswith("backbone.") for name in trainable_names)
 
 
 def test_train_script_enables_lora_parameters_without_unfreezing_full_backbone() -> None:

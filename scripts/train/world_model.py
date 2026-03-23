@@ -248,7 +248,11 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         help="Fill masked future VACE control slots with gray templates or the last observed latent frame.",
     )
     parser.add_argument("--mask-channels", type=int, default=defaults.mask_channels)
-    parser.add_argument("--trainable-backbone", choices=("full", "vace", "head", "lora"), default=defaults.trainable_backbone)
+    parser.add_argument(
+        "--trainable-backbone",
+        choices=("none", "full", "vace", "head", "lora"),
+        default=defaults.trainable_backbone,
+    )
     parser.add_argument("--lora-rank", type=int, default=defaults.lora_rank)
     parser.add_argument("--lora-alpha", type=int, default=defaults.lora_alpha)
     parser.add_argument("--lora-dropout", type=float, default=defaults.lora_dropout)
@@ -496,18 +500,10 @@ def _format_episode_preview(episode_ids: list[int]) -> str:
 
 
 def _relative_block_improvement(*, previous_mean_loss: float, current_mean_loss: float) -> float:
-    """Compute a bounded relative mean-loss change between consecutive training blocks.
-
-    Loss reductions keep the usual `(previous - current) / previous` value so
-    improvement thresholds behave exactly as before. Regressions divide by the
-    larger of the two losses so the reported negative change stays within
-    `[-1, 0)` instead of growing past `-1` when the current loss is much larger
-    than the previous best.
-    """
-    reference_loss = max(previous_mean_loss, current_mean_loss)
-    if reference_loss <= 0.0:
-        return 0.0
-    return (previous_mean_loss - current_mean_loss) / reference_loss
+    """Compute relative mean-loss improvement between consecutive training blocks."""
+    if previous_mean_loss <= 0.0:
+        return 0.0 if current_mean_loss >= previous_mean_loss else float("inf")
+    return (previous_mean_loss - current_mean_loss) / previous_mean_loss
 
 
 def _update_validation_tracking(
@@ -620,14 +616,37 @@ def _resume_training_state(
         raise ValueError(f"Checkpoint step must be >= 0, got {step}")
 
     model.load_state_dict(model_state)
-    loaded_partial_action_state = _load_action_encoder_state_dict(
-        action_encoder=action_encoder,
-        action_state=action_state,
-    )
+    if _resume_uses_fresh_action_encoder(checkpoint=checkpoint, action_encoder=action_encoder, action_state=action_state):
+        loaded_partial_action_state = True
+    else:
+        loaded_partial_action_state = _load_action_encoder_state_dict(
+            action_encoder=action_encoder,
+            action_state=action_state,
+        )
     if loaded_partial_action_state:
         return step, False
     optimizer.load_state_dict(optimizer_state)
     return step, True
+
+
+def _resume_uses_fresh_action_encoder(
+    *,
+    checkpoint: dict[str, object],
+    action_encoder: nn.Module,
+    action_state: dict[str, object],
+) -> bool:
+    """Detect when a resume should keep a newly initialized action encoder."""
+    if isinstance(action_encoder, NullConditioningEncoder):
+        return False
+    if action_state:
+        return False
+    extra_state = checkpoint.get("extra_state")
+    if not isinstance(extra_state, dict):
+        return False
+    saved_config = extra_state.get("config")
+    if not isinstance(saved_config, dict):
+        return False
+    return str(saved_config.get("conditioning_mode", "none")) == "none"
 
 
 def _optimizer_state_to_device(optimizer: torch.optim.Optimizer, *, device: torch.device) -> None:
