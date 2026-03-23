@@ -105,6 +105,26 @@ def split_train_validation_episode_ids(
     return train, validation
 
 
+def _select_subset_indices(*, dataset_size: int, subset_size: int, shuffle: bool) -> list[int]:
+    """Choose deterministic subset indices, spreading shuffled training subsets across the dataset."""
+    if dataset_size < 0:
+        raise ValueError(f"dataset_size must be non-negative, got {dataset_size}")
+    if subset_size < 0:
+        raise ValueError(f"subset_size must be non-negative, got {subset_size}")
+    if subset_size == 0 or dataset_size == 0:
+        return []
+
+    capped_subset = min(subset_size, dataset_size)
+    if capped_subset == dataset_size or not shuffle or capped_subset == 1:
+        return list(range(capped_subset))
+
+    max_index = dataset_size - 1
+    return [
+        (offset * max_index) // (capped_subset - 1)
+        for offset in range(capped_subset)
+    ]
+
+
 def build_lerobot_dataloader(
     *,
     repo_id: str,
@@ -144,7 +164,14 @@ def build_lerobot_dataloader(
 
     dataset = LeRobotDataset(repo_id, **dataset_kwargs)
     if subset_size > 0:
-        dataset = Subset(dataset, range(subset_size))
+        dataset = Subset(
+            dataset,
+            _select_subset_indices(
+                dataset_size=len(dataset),
+                subset_size=subset_size,
+                shuffle=shuffle,
+            ),
+        )
 
     return DataLoader(
         dataset,

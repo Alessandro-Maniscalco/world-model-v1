@@ -76,6 +76,7 @@ def test_build_lerobot_dataloader_uses_expected_dataset_arguments(monkeypatch) -
         num_workers=0,
         drop_last=True,
     )
+    assert list(loader.dataset.indices) == [0, 1, 2, 3]  # type: ignore[union-attr]
     first = next(iter(loader))
     assert first["x"].shape == (2, 1)
     assert len(first["meta"]) == 2
@@ -84,6 +85,51 @@ def test_build_lerobot_dataloader_uses_expected_dataset_arguments(monkeypatch) -
     assert calls["episodes"] == [0, 3]
     assert "observation.images.image" in calls["delta_timestamps"]  # type: ignore[operator]
     assert "action" in calls["delta_timestamps"]  # type: ignore[operator]
+
+
+def test_build_lerobot_dataloader_spreads_shuffled_training_subsets(monkeypatch) -> None:
+    """Spread shuffled training subsets across the dataset instead of taking a contiguous head slice."""
+    class _FakeDataset:
+        def __init__(
+            self,
+            repo_id: str,
+            delta_timestamps: dict[str, list[float]],
+            video_backend: str,
+            episodes: list[int] | None = None,
+            download_videos: bool = True,
+        ) -> None:
+            del repo_id, delta_timestamps, video_backend, episodes, download_videos
+            self._samples = [{"x": torch.tensor([i], dtype=torch.float32)} for i in range(6)]
+
+        def __len__(self) -> int:
+            return len(self._samples)
+
+        def __getitem__(self, idx: int) -> dict[str, object]:
+            return self._samples[idx]
+
+    lerobot_pkg = types.ModuleType("lerobot")
+    datasets_pkg = types.ModuleType("lerobot.datasets")
+    dataset_mod = types.ModuleType("lerobot.datasets.lerobot_dataset")
+    dataset_mod.LeRobotDataset = _FakeDataset  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "lerobot", lerobot_pkg)
+    monkeypatch.setitem(sys.modules, "lerobot.datasets", datasets_pkg)
+    monkeypatch.setitem(sys.modules, "lerobot.datasets.lerobot_dataset", dataset_mod)
+
+    loader = build_lerobot_dataloader(
+        repo_id="repo/x",
+        video_key="observation.images.image",
+        context_len=5,
+        horizon_len=4,
+        dt=0.1,
+        batch_size=2,
+        subset_size=4,
+        shuffle=True,
+        num_workers=0,
+        drop_last=True,
+    )
+
+    assert list(loader.dataset.indices) == [0, 1, 3, 5]  # type: ignore[union-attr]
 
 
 def test_resolve_lerobot_episode_ids_reads_sorted_metadata(monkeypatch) -> None:
