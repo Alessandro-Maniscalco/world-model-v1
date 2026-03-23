@@ -527,6 +527,24 @@ def test_train_script_can_resume_training_state(tmp_path: Path) -> None:
     )
 
 
+def test_train_script_resume_overrides_optimizer_hyperparameters() -> None:
+    """Let resumed runs anneal optimizer hyperparameters without discarding optimizer state."""
+    train_script = _load_train_script_module()
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, weight_decay=0.01)
+
+    train_script._apply_optimizer_hyperparameter_overrides(
+        optimizer,
+        lr=5e-5,
+        weight_decay=0.123,
+    )
+
+    assert optimizer.defaults["lr"] == pytest.approx(5e-5)
+    assert optimizer.defaults["weight_decay"] == pytest.approx(0.123)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.123)
+
+
 def test_train_script_can_resume_old_action_checkpoint_without_temporal_mixer_optimizer_state(tmp_path: Path) -> None:
     """Allow older checkpoints to seed a new temporal mixer while keeping a fresh optimizer."""
     train_script = _load_train_script_module()

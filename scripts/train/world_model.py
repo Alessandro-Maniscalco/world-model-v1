@@ -640,6 +640,22 @@ def _optimizer_state_to_device(optimizer: torch.optim.Optimizer, *, device: torc
                 state[key] = value.to(device=device)
 
 
+def _apply_optimizer_hyperparameter_overrides(
+    optimizer: torch.optim.Optimizer,
+    *,
+    lr: float,
+    weight_decay: float,
+) -> None:
+    """Reapply configured optimizer hyperparameters after loading checkpoint state."""
+    optimizer.defaults["lr"] = lr
+    if "weight_decay" in optimizer.defaults:
+        optimizer.defaults["weight_decay"] = weight_decay
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+        if "weight_decay" in group:
+            group["weight_decay"] = weight_decay
+
+
 def _configure_trainable_parameters(
     cfg: TrainScriptConfig,
     model: WanVACEWorldModel,
@@ -1053,6 +1069,12 @@ def main() -> None:
         )
         best_val_loss, val_bad_checks = _load_validation_state_from_checkpoint(checkpoint)
         _optimizer_state_to_device(optimizer, device=device)
+        if restored_optimizer_state:
+            _apply_optimizer_hyperparameter_overrides(
+                optimizer,
+                lr=cfg.lr,
+                weight_decay=cfg.weight_decay,
+            )
         if device.type == "cuda":
             torch.cuda.empty_cache()
         print(f"Resumed training state from step={resumed_step:06d}", flush=True)
@@ -1060,6 +1082,12 @@ def main() -> None:
             print(
                 "Resume note: checkpoint predates one or more optional conditioning modules, "
                 "so optimizer state was not restored.",
+                flush=True,
+            )
+        else:
+            print(
+                f"Resume optimizer overrides: lr={cfg.lr:.6g} "
+                f"weight_decay={cfg.weight_decay:.6g}",
                 flush=True,
             )
         if best_val_loss is not None:
