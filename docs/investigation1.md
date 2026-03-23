@@ -14,6 +14,9 @@ same slice. Only then should action-conditioned training continue.
 - Run Python and pytest inside `.venv`.
 - Review only `episode_index=1`, `start_frame=60` unless the operator changes
   it.
+- Do not treat semantic prompt conditioning as a target solution. The operator
+  wants a prompt-free base DiT that already continues the video before
+  action-conditioned training begins.
 - Keep the same geometry unless there is a strong reason to change it:
   `224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`.
 - Start every new architecture branch from the same untouched pretrained
@@ -134,12 +137,12 @@ same slice. Only then should action-conditioned training continue.
   `f9-f16` collapse into the same blue OOD wash, and the arm crop loses the
   fork at the same boundary. The generated MP4 is bitwise identical to the
   original baseline export (`overall MAE=0.0`, `late-frame MAE=0.0`).
-- The first checkpoint-path prompt-token rerun also failed to change the
-  output, but it was not a valid prompt-conditioning test. Checkpoint mode was
-  still ignoring CLI prompt/guidance overrides after loading checkpoint
-  metadata, and the inline probe patched `_load_base_runtime_config` instead of
-  `_load_checkpoint_runtime_config`, so the resulting video stayed bitwise
-  identical to the same blue none-conditioned floor.
+- After `0456e04` fixed checkpoint-mode runtime overrides, the corrected
+  checkpoint-path prompt+dual-anchor rerun still changed nothing. It again
+  copies `f0-f8`, then collapses into the same blue future wash at `f9-f16`;
+  the arm crop loses the fork at the same boundary, and the generated MP4 is
+  again bitwise identical to the original zero-step none baseline
+  (`overall MAE=0.0`, `late-frame MAE=0.0`).
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -170,19 +173,20 @@ same slice. Only then should action-conditioned training continue.
 - Keep the dual-anchor none-checkpoint transfer as a failed local neighbor. It
   changed nothing at all, so inference-only control/residual anchoring is not
   enough to rescue the literal zero-token none path.
-- Treat the first checkpoint-path prompt-token rerun as invalid evidence. It
-  was a runtime-plumbing no-op, not a real prompt-conditioned checkpoint test.
-- The next bounded major lever is to rerun the checkpoint-mode token-path
-  diagnostic on the same untouched `step_0000000.pt`, using the new CLI runtime
-  overrides to force `conditioning_mode=prompt`,
-  `future_control_fill_mode=last_context_frame`, and
-  `future_latent_residual_mode=last_context_frame` while forwarding the actual
-  task prompt and CFG. Distinct hypothesis: if the same checkpoint becomes
-  stable once it gets prompt cross-attention instead of
-  `NullConditioningEncoder` zeros, then the unresolved Stage 0 blocker is the
-  zero-token conditioning family rather than the checkpoint weights or
-  future-control contract. If checkpoint+prompt still collapses, the checkpoint
-  overlay itself is reopening the failure.
+- Retire checkpoint-path prompt reruns as a target branch. Even the corrected
+  prompt+dual-anchor checkpoint probe stayed bitwise identical to the blue
+  none-conditioned floor, and the operator does not want prompt conditioning
+  in the intended training path.
+- The next bounded major lever is prompt-free and checkpoint-local: rerun the
+  best trained none-conditioned checkpoint
+  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`
+  on the fixed operator slice with the same dual-anchor inference contract.
+  Distinct hypothesis: if the already-plausible non-prompt checkpoint improves
+  further under dual anchors, then the right base DiT path is to keep training
+  this prompt-free branch and only add action conditioning later as an exact
+  or near-no-op. If `step_0000350` is unchanged or worse under dual anchors,
+  then inference-contract tweaks are exhausted and the next move should shift
+  to prompt-free training/design changes on the none-conditioned branch.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
