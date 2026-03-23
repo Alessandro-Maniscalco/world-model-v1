@@ -95,6 +95,12 @@ same slice. Only then should action-conditioned training continue.
   same bright orb/halo failure with no recognizable fork approach or contact.
   The prompted output is only slightly different from the no-prompt native
   output, so prompt text alone did not earn a keep decision on this slice.
+- The true-CFG prompt-aware native `9/5` control is the best base-path result
+  so far. `f0-f5` stay coherent and near-copied; `f6-f8` keep the plate and
+  fork geometry recognizable with only a warm plate bloom and a thin
+  turquoise/rainbow smear near the right edge. The arm crop stays structurally
+  coherent through `f8`, but the rollout is still undercommitted and never
+  makes contact.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -103,16 +109,18 @@ same slice. Only then should action-conditioned training continue.
   `do_classifier_free_guidance=False`, so CFG was never actually enabled.
 
 ## Current Decision
-- Do not spend another long run on plain no-prompt or prompt-only base sweeps.
-  The no-prompt family is already exhausted, and the first prompted run never
-  exercised true CFG despite `guidance_scale=5.0`.
-- Commit `3497d07` now enables real CFG inside `_run_local_pipeline` and is
-  pytest-validated on top of the earlier prompt-forwarding fix.
-- The next bounded major lever is one true CFG-enabled prompted native `9/5`
-  control on the same operator slice. If that rerun still goes visibly bad at
-  `f5-f8`, treat the pure pretrained-base family as structurally wrong for
-  Stage 0 and pivot to a code-level none-conditioned redesign rather than more
-  base-path sweeps.
+- Keep the no-prompt pretrained-base family marked exhausted. The `17/9`
+  confetti path and native `9/5` orb/halo path are still bad local neighbors.
+- Keep the true-CFG prompted native `9/5` run as the current safety reference
+  for pretrained behavior on this slice. Real CFG meaningfully improves the
+  base path, but the result is still mostly static and misses contact.
+- The next bounded major lever is to move from the canonical diffusers base
+  path to the repo world-model inference path without a checkpoint, using
+  prompt conditioning on the same operator slice. If prompt-conditioned repo
+  inference also stays coherent and non-blue, then the null-token
+  `conditioning_mode=none` path is the specific failure family. If repo prompt
+  inference regresses into blur, ghosting, or collapse, focus the redesign on
+  the repo inference/chunking path itself before more training.
 
 ## Kept Code Changes
 - `aa230a1`: base-mode local sweeps now forward the configured prompt and
