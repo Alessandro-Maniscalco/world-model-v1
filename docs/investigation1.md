@@ -114,6 +114,12 @@ same slice. Only then should action-conditioned training continue.
   fork effectively gone and no contact. It is slightly less washed out than
   the plain `repo_prompt` run, but the first bad frame and the missed-contact
   outcome do not improve.
+- Replacing the gray future control template with the last context frame is the
+  best repo-prompt result so far, but it is still not safe. The run stays
+  coherent through `f10`: `f9-f10` keep the plate and arm structure
+  recognizable, and the arm crop still shows the gripper/fork region instead of
+  immediate purple wash. But `f11-f16` turn into blue-white ghosting and bloom,
+  the fork never reaches contact, and the late horizon is still implausible.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -133,13 +139,19 @@ same slice. Only then should action-conditioned training continue.
 - Keep the residualized `repo_prompt` rerun as a non-improving local neighbor.
   It changes the late-frame texture but does not move the first bad frame off
   `f9`, so absolute future-latent residualization alone is not enough.
+- Keep the `future_control_fill_mode=last_context_frame` repo-prompt rerun as
+  the best repo-path local neighbor so far. It delays the visible collapse from
+  `f9` to about `f11`, but the late horizon still ghosts blue/white and misses
+  contact.
 - The next bounded major lever is a prompt-conditioned `repo_prompt` rerun
-  with `future_control_fill_mode=last_context_frame` on the same slice while
-  leaving future latent residualization off. Distinct hypothesis: if the gray
-  future control template is the destabilizer, swapping it to the last context
-  frame should preserve arm/fork geometry through `f9-f16`. If it still breaks
-  at `f9`, pivot to a deeper redesign of the repo future-sampling/control
-  contract rather than more scalar sweeps.
+  that combines both last-context anchors:
+  `future_control_fill_mode=last_context_frame` and
+  `future_latent_residual_mode=last_context_frame`. Distinct hypothesis: if the
+  repo path needs both the control stream and the sampled future latents tied
+  to the last observed frame, the combined anchor should keep arm/fork geometry
+  coherent deeper into `f11-f16`. If that still fails, mark the current
+  repo-prompt neighborhood exhausted and pivot to a deeper redesign of the repo
+  future-sampling/control contract rather than more bounded sweeps.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
