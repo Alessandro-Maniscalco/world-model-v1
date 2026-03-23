@@ -127,6 +127,13 @@ same slice. Only then should action-conditioned training continue.
   soft blur, and the arm crop keeps the tool geometry visible through `f16`.
   But the rollout is still undercommitted: the fork barely advances, never
   reaches contact, and never picks up.
+- The same dual-anchor contract does not transfer to the literal zero-step
+  `conditioning_mode=none` checkpoint path. The dual-anchor rerun on
+  `untouched_base_none_subset8_step0_baseline_224x128/checkpoints/step_0000000.pt`
+  is visually identical to the original blue floor: `f0-f8` copy context,
+  `f9-f16` collapse into the same blue OOD wash, and the arm crop loses the
+  fork at the same boundary. The generated MP4 is bitwise identical to the
+  original baseline export (`overall MAE=0.0`, `late-frame MAE=0.0`).
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -154,16 +161,17 @@ same slice. Only then should action-conditioned training continue.
   result so far. It is plausible through `f16` and proves the repo path can be
   stabilized, but it is still prompt-conditioned and misses contact, so it does
   not satisfy Stage 0 yet.
-- The next bounded major lever is a transfer test on the actual zero-step
-  `conditioning_mode=none` checkpoint path: rerun the untouched-base
-  `step_0000000.pt` baseline with both
-  `future_control_fill_mode=last_context_frame` and
-  `future_latent_residual_mode=last_context_frame`. Distinct hypothesis: if the
-  same dual-anchor contract keeps the none-conditioned checkpoint non-blue and
-  coherent through `f9-f16`, then the Stage 0 blocker was the inference/control
-  contract rather than the checkpoint weights themselves. If the none path still
-  collapses, the prompt-conditioned stabilization does not transfer and the
-  conditioning family remains the unresolved blocker.
+- Keep the dual-anchor none-checkpoint transfer as a failed local neighbor. It
+- changed nothing at all, so inference-only control/residual anchoring is not
+- enough to rescue the literal zero-token none path.
+- The next bounded major lever is a checkpoint-mode token-path diagnostic on
+  the same untouched `step_0000000.pt`: reuse the dual anchors, but replace the
+  literal zero-token none-conditioning path with prompt tokens on the checkpoint
+  path. Distinct hypothesis: if the same checkpoint becomes stable once it gets
+  prompt cross-attention instead of `NullConditioningEncoder` zeros, then the
+  unresolved Stage 0 blocker is the zero-token conditioning family rather than
+  the checkpoint weights or future-control contract. If checkpoint+prompt still
+  collapses, the checkpoint overlay itself is reopening the failure.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
