@@ -619,6 +619,90 @@ def test_train_script_can_resume_old_action_checkpoint_without_temporal_mixer_op
     assert torch.count_nonzero(resumed_action_encoder.temporal_mixer.weight) == 0
 
 
+def test_train_script_can_resume_full_checkpoint_into_action_lora_backbone(tmp_path: Path) -> None:
+    """Allow action-conditioned LoRA tuning to start from a full-backbone checkpoint."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    source_cfg = TrainScriptConfig(
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    resumed_cfg = TrainScriptConfig(
+        trainable_backbone="lora",
+        conditioning_mode="action",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+        lora_rank=4,
+        lora_alpha=8,
+        lora_target_modules=("to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out"),
+    )
+
+    source_model = train_script.build_model_from_config(source_cfg, prepared)
+    source_action_encoder = train_script.build_action_encoder_from_config(source_cfg, prepared, source_model)
+    source_parameters = train_script._configure_trainable_parameters(source_cfg, source_model, source_action_encoder)
+    source_optimizer = torch.optim.AdamW(source_parameters, lr=1e-3)
+    for parameter in source_model.parameters():
+        parameter.data.fill_(0.25)
+
+    checkpoint_path = tmp_path / "resume_full_to_lora.pt"
+    torch.save(
+        {
+            "step": 123,
+            "model_state_dict": source_model.state_dict(),
+            "action_encoder_state_dict": source_action_encoder.state_dict(),
+            "optimizer_state_dict": source_optimizer.state_dict(),
+            "extra_state": {
+                "config": {
+                    "conditioning_mode": "none",
+                    "trainable_backbone": "full",
+                }
+            },
+        },
+        checkpoint_path,
+    )
+
+    resumed_model = train_script.build_model_from_config(resumed_cfg, prepared)
+    resumed_action_encoder = train_script.build_action_encoder_from_config(resumed_cfg, prepared, resumed_model)
+    resumed_parameters = train_script._configure_trainable_parameters(resumed_cfg, resumed_model, resumed_action_encoder)
+    resumed_optimizer = torch.optim.AdamW(resumed_parameters, lr=1e-3)
+
+    checkpoint = train_script._load_training_checkpoint(checkpoint_path)
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=resumed_model,
+        action_encoder=resumed_action_encoder,
+        optimizer=resumed_optimizer,
+    )
+
+    shared_key = next(key for key in source_model.state_dict() if key in resumed_model.state_dict())
+    assert resumed_step == 123
+    assert restored_optimizer_state is False
+    assert any("lora_" in key for key in resumed_model.state_dict())
+    assert torch.allclose(resumed_model.state_dict()[shared_key], source_model.state_dict()[shared_key])
+
+
 def test_train_script_rejects_missing_resume_checkpoint(tmp_path: Path) -> None:
     """Fail clearly when --resume-from points to a nonexistent file."""
     train_script = _load_train_script_module()

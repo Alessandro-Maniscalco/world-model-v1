@@ -615,7 +615,7 @@ def _resume_training_state(
     if step < 0:
         raise ValueError(f"Checkpoint step must be >= 0, got {step}")
 
-    model.load_state_dict(model_state)
+    _load_resume_model_state_dict(model=model, model_state=model_state)
     if _resume_uses_fresh_action_encoder(checkpoint=checkpoint, action_encoder=action_encoder, action_state=action_state):
         loaded_partial_action_state = True
     else:
@@ -627,6 +627,34 @@ def _resume_training_state(
         return step, False
     optimizer.load_state_dict(optimizer_state)
     return step, True
+
+
+def _load_resume_model_state_dict(*, model: nn.Module, model_state: dict[str, object]) -> None:
+    """Load checkpoint model weights while tolerating LoRA-only topology deltas."""
+    target_keys = set(model.state_dict().keys())
+    remapped_state: dict[str, object] = {}
+    for key, value in model_state.items():
+        target_key = key
+        if target_key not in target_keys and ".base_layer." in key:
+            collapsed_key = key.replace(".base_layer.", ".", 1)
+            if collapsed_key in target_keys:
+                target_key = collapsed_key
+        elif target_key not in target_keys:
+            prefix, separator, suffix = key.rpartition(".")
+            if separator:
+                expanded_key = f"{prefix}.base_layer.{suffix}"
+                if expanded_key in target_keys:
+                    target_key = expanded_key
+        remapped_state[target_key] = value
+
+    incompatible = model.load_state_dict(remapped_state, strict=False)
+    missing = [key for key in incompatible.missing_keys if "lora_" not in key]
+    unexpected = [key for key in incompatible.unexpected_keys if "lora_" not in key]
+    if missing or unexpected:
+        raise ValueError(
+            "Checkpoint model overlay mismatch: "
+            f"missing={missing[:10]} unexpected={unexpected[:10]}"
+        )
 
 
 def _resume_uses_fresh_action_encoder(
