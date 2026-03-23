@@ -79,7 +79,7 @@ _ARM_MOTION_MODULE = None
 def _parse_args() -> argparse.Namespace:
     """Parse CLI overrides for the local-resolution sweep."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("base", "checkpoint"), default=DEFAULT_MODE)
+    parser.add_argument("--mode", choices=("base", "checkpoint", "repo_prompt"), default=DEFAULT_MODE)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -233,6 +233,16 @@ def _resolve_output_artifacts(
         output_root / f"{label}_comparison.mp4",
         output_root / "summary.json",
     )
+
+
+def _uses_chunk_conditioning(runtime_cfg: SimpleNamespace) -> bool:
+    """Mirror repo inference rules for prompt, action, and null-token conditioning."""
+    conditioning_mode = str(getattr(runtime_cfg, "conditioning_mode", "none"))
+    if conditioning_mode == "prompt":
+        return False
+    if conditioning_mode == "action":
+        return str(getattr(runtime_cfg, "action_conditioning_window", "chunk")) == "chunk"
+    return True
 
 
 def _resolve_plausibility_output_path(*, output_path: Path, resolution_count: int) -> Path:
@@ -1109,7 +1119,7 @@ def _decode_future_latents(
 def _run_checkpoint_world_model(
     *,
     runtime_cfg: SimpleNamespace,
-    checkpoint: dict[str, object],
+    checkpoint: dict[str, object] | None,
     video: torch.Tensor,
     action_seq: torch.Tensor,
     video_key: str,
@@ -1125,12 +1135,16 @@ def _run_checkpoint_world_model(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run checkpoint-mode inference with the repo world-model path used during training eval."""
     vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
-    expected_action_dim = _infer_checkpoint_action_dim(checkpoint)
-    action_tensor = _select_action_tensor(
-        action_seq=action_seq,
-        action_source=action_source,
-        expected_action_dim=expected_action_dim,
-    )
+    conditioning_mode = str(getattr(runtime_cfg, "conditioning_mode", "action"))
+    if checkpoint is None and conditioning_mode in {"none", "prompt"}:
+        action_tensor = action_seq
+    else:
+        expected_action_dim = _infer_checkpoint_action_dim(checkpoint)
+        action_tensor = _select_action_tensor(
+            action_seq=action_seq,
+            action_source=action_source,
+            expected_action_dim=expected_action_dim,
+        )
     batch = {
         video_key: video,
         "action": action_tensor,
@@ -1157,13 +1171,36 @@ def _run_checkpoint_world_model(
     model.eval()
     action_encoder.eval()
 
-    with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
-        cross_attention_tokens = action_encoder(prepared.a_plan)
-        image_attention_tokens = (
-            cross_attention_tokens
-            if getattr(runtime_cfg, "action_backbone_added_kv_mode", "none") == "reuse_action_tokens"
-            else None
-        )
+    if conditioning_mode == "prompt":
+        tokenizer, text_encoder = _load_prompt_encoder(runtime_cfg)
+        backbone_dtype = next(model.backbone.parameters()).dtype
+        prompt_encoder_device = torch.device("cpu")
+        with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
+            cross_attention_tokens, negative_cross_attention_tokens = _build_prompt_conditioning_tokens(
+                prompt=str(getattr(runtime_cfg, "prompt", "")),
+                negative_prompt=str(getattr(runtime_cfg, "negative_prompt", "")),
+                batch_size=prepared.z_past_video.shape[0],
+                tokenizer=tokenizer,
+                text_encoder=text_encoder,
+                encoder_device=prompt_encoder_device,
+                output_device=device,
+                dtype=backbone_dtype,
+                guidance_scale=float(getattr(runtime_cfg, "guidance_scale", 1.0)),
+                max_sequence_length=int(getattr(runtime_cfg, "max_sequence_length", DEFAULT_MAX_SEQUENCE_LENGTH)),
+            )
+        del text_encoder
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        image_attention_tokens = None
+    else:
+        with _checkpoint_autocast_context(device=device, runtime_dtype=runtime_dtype):
+            cross_attention_tokens = action_encoder(prepared.a_plan)
+            image_attention_tokens = (
+                cross_attention_tokens
+                if getattr(runtime_cfg, "action_backbone_added_kv_mode", "none") == "reuse_action_tokens"
+                else None
+            )
+        negative_cross_attention_tokens = None
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         runtime_cfg.wan_vace_model_id,
         subfolder="scheduler",
@@ -1182,12 +1219,9 @@ def _run_checkpoint_world_model(
             ),
             integration_steps=integration_steps,
             future_latent_residual_mode=str(getattr(runtime_cfg, "future_latent_residual_mode", "none")),
-            negative_cross_attention_tokens=None,
-            guidance_scale=1.0,
-            chunk_conditioning=(
-                getattr(runtime_cfg, "conditioning_mode", "action") != "action"
-                or getattr(runtime_cfg, "action_conditioning_window", "chunk") == "chunk"
-            ),
+            negative_cross_attention_tokens=negative_cross_attention_tokens,
+            guidance_scale=float(getattr(runtime_cfg, "guidance_scale", 1.0)),
+            chunk_conditioning=_uses_chunk_conditioning(runtime_cfg),
             single_chunk_rollout=single_chunk_rollout,
             scheduler=scheduler,
             generator=generator,
@@ -1344,6 +1378,17 @@ def _run_one_checkpoint_resolution(
                 runtime_notes.append(
                     "Checkpoint filename marks this artifact as wrong_architecture; treat failures as expected."
                 )
+        elif mode == "repo_prompt":
+            checkpoint = None
+            runtime_cfg = _load_base_runtime_config(config_path)
+            runtime_cfg.conditioning_mode = "prompt"
+            runtime_cfg.prompt = prompt
+            runtime_cfg.negative_prompt = negative_prompt
+            runtime_cfg.guidance_scale = guidance_scale
+            runtime_cfg.max_sequence_length = max_sequence_length
+            runtime_cfg.single_chunk_rollout = True
+            runtime_cfg.context_len = context_len
+            runtime_cfg.horizon_len = horizon_len
         else:
             runtime_cfg = _load_base_runtime_config(config_path)
             runtime_cfg.prompt = prompt
@@ -1357,6 +1402,11 @@ def _run_one_checkpoint_resolution(
         if mode == "base":
             runtime_notes.append(
                 "Base mode uses the canonical Wan VACE pipeline with dense-prefix mask conditioning."
+            )
+        elif mode == "repo_prompt":
+            runtime_notes.append(
+                "Repo prompt mode uses the repo chunkwise world-model inference path with prompt tokens "
+                "and no checkpoint overlay."
             )
         else:
             runtime_notes.append(
@@ -1378,7 +1428,7 @@ def _run_one_checkpoint_resolution(
         result_metadata["action_token_scale"] = float(getattr(runtime_cfg, "action_token_scale", 1.0))
         total_frames = (
             context_len + horizon_len
-            if mode == "checkpoint"
+            if mode in {"checkpoint", "repo_prompt"}
             else DEFAULT_BASE_TOTAL_FRAMES
         )
         torch.manual_seed(seed)
