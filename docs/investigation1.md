@@ -120,6 +120,13 @@ same slice. Only then should action-conditioned training continue.
   recognizable, and the arm crop still shows the gripper/fork region instead of
   immediate purple wash. But `f11-f16` turn into blue-white ghosting and bloom,
   the fork never reaches contact, and the late horizon is still implausible.
+- Combining both last-context anchors is the first repo-path prompt result that
+  stays plausible through the full `f9-f16` horizon. The clip remains static
+  through `f8`, then `f9-f16` stay non-blue and structurally coherent: the
+  plate, arm, and fork remain recognizable with only mild dark-blue tinting and
+  soft blur, and the arm crop keeps the tool geometry visible through `f16`.
+  But the rollout is still undercommitted: the fork barely advances, never
+  reaches contact, and never picks up.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -143,15 +150,20 @@ same slice. Only then should action-conditioned training continue.
   the best repo-path local neighbor so far. It delays the visible collapse from
   `f9` to about `f11`, but the late horizon still ghosts blue/white and misses
   contact.
-- The next bounded major lever is a prompt-conditioned `repo_prompt` rerun
-  that combines both last-context anchors:
+- Keep the combined-anchor prompt repo run as the best repo future-sampling
+  result so far. It is plausible through `f16` and proves the repo path can be
+  stabilized, but it is still prompt-conditioned and misses contact, so it does
+  not satisfy Stage 0 yet.
+- The next bounded major lever is a transfer test on the actual zero-step
+  `conditioning_mode=none` checkpoint path: rerun the untouched-base
+  `step_0000000.pt` baseline with both
   `future_control_fill_mode=last_context_frame` and
   `future_latent_residual_mode=last_context_frame`. Distinct hypothesis: if the
-  repo path needs both the control stream and the sampled future latents tied
-  to the last observed frame, the combined anchor should keep arm/fork geometry
-  coherent deeper into `f11-f16`. If that still fails, mark the current
-  repo-prompt neighborhood exhausted and pivot to a deeper redesign of the repo
-  future-sampling/control contract rather than more bounded sweeps.
+  same dual-anchor contract keeps the none-conditioned checkpoint non-blue and
+  coherent through `f9-f16`, then the Stage 0 blocker was the inference/control
+  contract rather than the checkpoint weights themselves. If the none path still
+  collapses, the prompt-conditioned stabilization does not transfer and the
+  conditioning family remains the unresolved blocker.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
