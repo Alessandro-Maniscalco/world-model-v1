@@ -134,6 +134,12 @@ same slice. Only then should action-conditioned training continue.
   `f9-f16` collapse into the same blue OOD wash, and the arm crop loses the
   fork at the same boundary. The generated MP4 is bitwise identical to the
   original baseline export (`overall MAE=0.0`, `late-frame MAE=0.0`).
+- The first checkpoint-path prompt-token rerun also failed to change the
+  output, but it was not a valid prompt-conditioning test. Checkpoint mode was
+  still ignoring CLI prompt/guidance overrides after loading checkpoint
+  metadata, and the inline probe patched `_load_base_runtime_config` instead of
+  `_load_checkpoint_runtime_config`, so the resulting video stayed bitwise
+  identical to the same blue none-conditioned floor.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -162,16 +168,21 @@ same slice. Only then should action-conditioned training continue.
   stabilized, but it is still prompt-conditioned and misses contact, so it does
   not satisfy Stage 0 yet.
 - Keep the dual-anchor none-checkpoint transfer as a failed local neighbor. It
-- changed nothing at all, so inference-only control/residual anchoring is not
-- enough to rescue the literal zero-token none path.
-- The next bounded major lever is a checkpoint-mode token-path diagnostic on
-  the same untouched `step_0000000.pt`: reuse the dual anchors, but replace the
-  literal zero-token none-conditioning path with prompt tokens on the checkpoint
-  path. Distinct hypothesis: if the same checkpoint becomes stable once it gets
-  prompt cross-attention instead of `NullConditioningEncoder` zeros, then the
-  unresolved Stage 0 blocker is the zero-token conditioning family rather than
-  the checkpoint weights or future-control contract. If checkpoint+prompt still
-  collapses, the checkpoint overlay itself is reopening the failure.
+  changed nothing at all, so inference-only control/residual anchoring is not
+  enough to rescue the literal zero-token none path.
+- Treat the first checkpoint-path prompt-token rerun as invalid evidence. It
+  was a runtime-plumbing no-op, not a real prompt-conditioned checkpoint test.
+- The next bounded major lever is to rerun the checkpoint-mode token-path
+  diagnostic on the same untouched `step_0000000.pt`, using the new CLI runtime
+  overrides to force `conditioning_mode=prompt`,
+  `future_control_fill_mode=last_context_frame`, and
+  `future_latent_residual_mode=last_context_frame` while forwarding the actual
+  task prompt and CFG. Distinct hypothesis: if the same checkpoint becomes
+  stable once it gets prompt cross-attention instead of
+  `NullConditioningEncoder` zeros, then the unresolved Stage 0 blocker is the
+  zero-token conditioning family rather than the checkpoint weights or
+  future-control contract. If checkpoint+prompt still collapses, the checkpoint
+  overlay itself is reopening the failure.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
@@ -185,3 +196,7 @@ same slice. Only then should action-conditioned training continue.
 - `3e80f6c`: local sweeps now support checkpoint-free `repo_prompt` inference,
   including prompt CFG on the repo world-model path and pytest coverage for
   the new mode.
+- `0456e04`: local sweeps now apply prompt/guidance and explicit runtime
+  overrides after loading checkpoint metadata, including checkpoint-mode
+  overrides for conditioning mode and both future-anchor settings plus focused
+  pytest coverage.
