@@ -282,6 +282,116 @@ def test_repo_prompt_mode_forwards_prompt_to_repo_world_model(monkeypatch, tmp_p
     assert result["motion"] == {"summary": {"motion_verdict": "good"}}
 
 
+def test_checkpoint_mode_forwards_prompt_and_runtime_overrides(monkeypatch, tmp_path) -> None:
+    """Checkpoint sweeps should apply prompt and runtime overrides after loading checkpoint metadata."""
+    captured_runtime_cfg: list[SimpleNamespace] = []
+
+    monkeypatch.setattr(
+        script,
+        "_load_checkpoint_runtime_config",
+        lambda path: (
+            {},
+            SimpleNamespace(
+                frame_width=320,
+                frame_height=240,
+                trainable_backbone="full",
+                conditioning_mode="none",
+                future_control_fill_mode="gray",
+                future_latent_residual_mode="none",
+                context_len=9,
+                horizon_len=8,
+                control_scale=1.0,
+                action_token_scale=1.0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(script, "_resolve_device", lambda device_name: torch.device("cpu"))
+    monkeypatch.setattr(script, "_select_runtime_dtype", lambda device: torch.float32)
+    monkeypatch.setattr(
+        script,
+        "_load_checkpoint_clip",
+        lambda **kwargs: (torch.zeros(1, 17, 3, 240, 320), torch.zeros(1, 17, 2)),
+    )
+
+    def _fake_run_checkpoint_world_model(*, runtime_cfg, checkpoint, **kwargs):
+        """Capture the effective checkpoint runtime config after CLI overrides."""
+        del checkpoint, kwargs
+        captured_runtime_cfg.append(runtime_cfg)
+        target = torch.zeros(1, 17, 3, 4, 5)
+        pred = torch.ones(1, 17, 3, 4, 5)
+        return target, pred
+
+    monkeypatch.setattr(script, "_run_checkpoint_world_model", _fake_run_checkpoint_world_model)
+    monkeypatch.setattr(script, "_tensor_video_to_frames", lambda video_btchw: [0.0])
+    monkeypatch.setattr(script, "_build_side_by_side_video", lambda **kwargs: torch.zeros(1, 17, 3, 4, 5))
+    monkeypatch.setattr(script, "_export_video", lambda **kwargs: None)
+    monkeypatch.setattr(script, "_write_plausibility_report", lambda **kwargs: {"plausible": True})
+    monkeypatch.setattr(
+        script,
+        "_write_arm_motion_report",
+        lambda **kwargs: {"summary": {"motion_verdict": "good"}},
+    )
+
+    result = script._run_one_checkpoint_resolution(
+        mode="checkpoint",
+        config_path=Path("configs/train/world_model.yaml"),
+        checkpoint_path=Path("runs/example/checkpoints/step_0000100.pt"),
+        width=320,
+        height=240,
+        output_path=tmp_path / "generated.mp4",
+        comparison_path=tmp_path / "comparison.mp4",
+        plausibility_output_path=tmp_path / "plausibility_report.json",
+        motion_output_path=tmp_path / "arm_motion_report.json",
+        repo_id="repo",
+        episode_index=1,
+        start_frame=60,
+        video_key="observation.images.cam_high",
+        context_len=9,
+        horizon_len=8,
+        k=1,
+        integration_steps=50,
+        fps=10,
+        seed=0,
+        single_chunk_rollout=True,
+        device_name="cpu",
+        action_source="auto",
+        action_scale=1.0,
+        action_token_scale=1.25,
+        control_scale=1.5,
+        prompt="robot arm picks up a fork from a table",
+        negative_prompt="distorted colors",
+        guidance_scale=5.0,
+        max_sequence_length=256,
+        conditioning_mode_override="prompt",
+        future_control_fill_mode_override="last_context_frame",
+        future_latent_residual_mode_override="last_context_frame",
+    )
+
+    assert len(captured_runtime_cfg) == 1
+    runtime_cfg = captured_runtime_cfg[0]
+    assert runtime_cfg.conditioning_mode == "prompt"
+    assert runtime_cfg.prompt == "robot arm picks up a fork from a table"
+    assert runtime_cfg.negative_prompt == "distorted colors"
+    assert runtime_cfg.guidance_scale == 5.0
+    assert runtime_cfg.max_sequence_length == 256
+    assert runtime_cfg.single_chunk_rollout is True
+    assert runtime_cfg.context_len == 9
+    assert runtime_cfg.horizon_len == 8
+    assert runtime_cfg.control_scale == 1.5
+    assert runtime_cfg.action_token_scale == 1.25
+    assert runtime_cfg.future_control_fill_mode == "last_context_frame"
+    assert runtime_cfg.future_latent_residual_mode == "last_context_frame"
+    assert result["checkpoint_conditioning_mode"] == "none"
+    assert result["runtime_conditioning_mode"] == "prompt"
+    assert result["runtime_future_control_fill_mode"] == "last_context_frame"
+    assert result["runtime_future_latent_residual_mode"] == "last_context_frame"
+    assert "Overrode runtime conditioning mode from 'none' to 'prompt' for this probe." in result["notes"]
+    assert "Overrode runtime future_control_fill_mode from 'gray' to 'last_context_frame' for this probe." in result["notes"]
+    assert "Overrode runtime future_latent_residual_mode from 'none' to 'last_context_frame' for this probe." in result["notes"]
+    assert result["plausibility"] == {"plausible": True}
+    assert result["motion"] == {"summary": {"motion_verdict": "good"}}
+
+
 def test_run_local_pipeline_enables_cfg_when_guidance_scale_above_one() -> None:
     """Local base inference should request and apply CFG prompt embeddings when enabled."""
 

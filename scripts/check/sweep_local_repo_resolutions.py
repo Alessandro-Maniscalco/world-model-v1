@@ -173,6 +173,24 @@ def _parse_args() -> argparse.Namespace:
             "base-mode or checkpoint-mode inference."
         ),
     )
+    parser.add_argument(
+        "--conditioning-mode-override",
+        choices=("none", "prompt", "action"),
+        default=None,
+        help="Optional runtime conditioning-mode override applied after loading the base config or checkpoint.",
+    )
+    parser.add_argument(
+        "--future-control-fill-mode-override",
+        choices=("gray", "last_context_frame"),
+        default=None,
+        help="Optional runtime future-control fill override applied after loading the base config or checkpoint.",
+    )
+    parser.add_argument(
+        "--future-latent-residual-mode-override",
+        choices=("none", "last_context_frame"),
+        default=None,
+        help="Optional runtime future-latent residual override applied after loading the base config or checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -456,6 +474,65 @@ def _load_base_runtime_config(config_path: Path) -> SimpleNamespace:
         max_sequence_length=DEFAULT_MAX_SEQUENCE_LENGTH,
         single_chunk_rollout=True,
     )
+
+
+def _apply_runtime_overrides(
+    runtime_cfg: SimpleNamespace,
+    *,
+    mode: str,
+    context_len: int,
+    horizon_len: int,
+    single_chunk_rollout: bool,
+    action_token_scale: float,
+    control_scale: float | None,
+    prompt: str,
+    negative_prompt: str,
+    guidance_scale: float,
+    max_sequence_length: int,
+    conditioning_mode_override: str | None,
+    future_control_fill_mode_override: str | None,
+    future_latent_residual_mode_override: str | None,
+) -> list[str]:
+    """Apply CLI/runtime overrides after loading base or checkpoint configuration."""
+    notes: list[str] = []
+    runtime_cfg.prompt = prompt
+    runtime_cfg.negative_prompt = negative_prompt
+    runtime_cfg.guidance_scale = float(guidance_scale)
+    runtime_cfg.max_sequence_length = int(max_sequence_length)
+    runtime_cfg.single_chunk_rollout = True if mode in {"base", "repo_prompt"} else bool(single_chunk_rollout)
+    if mode in {"checkpoint", "repo_prompt"}:
+        runtime_cfg.context_len = int(context_len)
+        runtime_cfg.horizon_len = int(horizon_len)
+    runtime_cfg.action_token_scale = float(action_token_scale)
+    if control_scale is not None:
+        runtime_cfg.control_scale = float(control_scale)
+        notes.append(f"Overrode runtime control scale to {float(control_scale):.3f} for this probe.")
+
+    if conditioning_mode_override is not None:
+        previous = str(getattr(runtime_cfg, "conditioning_mode", "unknown"))
+        runtime_cfg.conditioning_mode = conditioning_mode_override
+        if conditioning_mode_override != previous:
+            notes.append(
+                "Overrode runtime conditioning mode "
+                f"from {previous!r} to {conditioning_mode_override!r} for this probe."
+            )
+    if future_control_fill_mode_override is not None:
+        previous = str(getattr(runtime_cfg, "future_control_fill_mode", "unknown"))
+        runtime_cfg.future_control_fill_mode = future_control_fill_mode_override
+        if future_control_fill_mode_override != previous:
+            notes.append(
+                "Overrode runtime future_control_fill_mode "
+                f"from {previous!r} to {future_control_fill_mode_override!r} for this probe."
+            )
+    if future_latent_residual_mode_override is not None:
+        previous = str(getattr(runtime_cfg, "future_latent_residual_mode", "unknown"))
+        runtime_cfg.future_latent_residual_mode = future_latent_residual_mode_override
+        if future_latent_residual_mode_override != previous:
+            notes.append(
+                "Overrode runtime future_latent_residual_mode "
+                f"from {previous!r} to {future_latent_residual_mode_override!r} for this probe."
+            )
+    return notes
 
 
 def _infer_checkpoint_action_dim(checkpoint: dict[str, object]) -> int | None:
@@ -1347,6 +1424,9 @@ def _run_one_checkpoint_resolution(
     negative_prompt: str,
     guidance_scale: float,
     max_sequence_length: int,
+    conditioning_mode_override: str | None = None,
+    future_control_fill_mode_override: str | None = None,
+    future_latent_residual_mode_override: str | None = None,
 ) -> dict[str, object]:
     """Run one local world-model generation at a specific resolution."""
     label = f"{width}x{height}"
@@ -1382,23 +1462,26 @@ def _run_one_checkpoint_resolution(
             checkpoint = None
             runtime_cfg = _load_base_runtime_config(config_path)
             runtime_cfg.conditioning_mode = "prompt"
-            runtime_cfg.prompt = prompt
-            runtime_cfg.negative_prompt = negative_prompt
-            runtime_cfg.guidance_scale = guidance_scale
-            runtime_cfg.max_sequence_length = max_sequence_length
-            runtime_cfg.single_chunk_rollout = True
-            runtime_cfg.context_len = context_len
-            runtime_cfg.horizon_len = horizon_len
         else:
             runtime_cfg = _load_base_runtime_config(config_path)
-            runtime_cfg.prompt = prompt
-            runtime_cfg.negative_prompt = negative_prompt
-            runtime_cfg.guidance_scale = guidance_scale
-            runtime_cfg.max_sequence_length = max_sequence_length
-            runtime_cfg.single_chunk_rollout = True
-        runtime_cfg.action_token_scale = float(action_token_scale)
-        if control_scale is not None:
-            runtime_cfg.control_scale = float(control_scale)
+        runtime_notes.extend(
+            _apply_runtime_overrides(
+                runtime_cfg,
+                mode=mode,
+                context_len=context_len,
+                horizon_len=horizon_len,
+                single_chunk_rollout=single_chunk_rollout,
+                action_token_scale=action_token_scale,
+                control_scale=control_scale,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                guidance_scale=guidance_scale,
+                max_sequence_length=max_sequence_length,
+                conditioning_mode_override=conditioning_mode_override,
+                future_control_fill_mode_override=future_control_fill_mode_override,
+                future_latent_residual_mode_override=future_latent_residual_mode_override,
+            )
+        )
         if mode == "base":
             runtime_notes.append(
                 "Base mode uses the canonical Wan VACE pipeline with dense-prefix mask conditioning."
@@ -1418,14 +1501,17 @@ def _run_one_checkpoint_resolution(
                 runtime_notes.append(
                     f"Scaled projected action tokens by {action_token_scale:.3f} for this probe."
                 )
-        if control_scale is not None:
-            runtime_notes.append(
-                f"Overrode runtime control scale to {float(control_scale):.3f} for this probe."
-            )
         device = _resolve_device(device_name=device_name)
         runtime_dtype = _select_runtime_dtype(device=device)
         result_metadata["conditioning_scale"] = float(getattr(runtime_cfg, "control_scale", 1.0))
         result_metadata["action_token_scale"] = float(getattr(runtime_cfg, "action_token_scale", 1.0))
+        result_metadata["runtime_conditioning_mode"] = str(getattr(runtime_cfg, "conditioning_mode", "unknown"))
+        result_metadata["runtime_future_control_fill_mode"] = str(
+            getattr(runtime_cfg, "future_control_fill_mode", "unknown")
+        )
+        result_metadata["runtime_future_latent_residual_mode"] = str(
+            getattr(runtime_cfg, "future_latent_residual_mode", "unknown")
+        )
         total_frames = (
             context_len + horizon_len
             if mode in {"checkpoint", "repo_prompt"}
@@ -1626,6 +1712,9 @@ def main() -> None:
             negative_prompt=args.negative_prompt,
             guidance_scale=args.guidance_scale,
             max_sequence_length=args.max_sequence_length,
+            conditioning_mode_override=args.conditioning_mode_override,
+            future_control_fill_mode_override=args.future_control_fill_mode_override,
+            future_latent_residual_mode_override=args.future_latent_residual_mode_override,
         )
         results.append(result)
         if result["status"] == "ok":
