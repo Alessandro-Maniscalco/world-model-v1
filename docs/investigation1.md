@@ -121,6 +121,10 @@ same slice. Only then should action-conditioned training continue.
   `conditioning_mode=none` path is the specific failure family. If repo prompt
   inference regresses into blur, ghosting, or collapse, focus the redesign on
   the repo inference/chunking path itself before more training.
+- Commit `3e80f6c` now adds a checkpoint-free `repo_prompt` mode to
+  `scripts/check/sweep_local_repo_resolutions.py`, so the next run can stay on
+  the fixed operator slice and produce the same MP4 comparison artifacts while
+  using the repo world-model inference path with prompt CFG.
 
 ## Kept Code Changes
 - `aa230a1`: base-mode local sweeps now forward the configured prompt and
@@ -129,3 +133,6 @@ same slice. Only then should action-conditioned training continue.
 - `3497d07`: base-mode local sweeps now honor classifier-free guidance when
   `guidance_scale > 1.0`, including a direct `_run_local_pipeline` regression
   test.
+- `3e80f6c`: local sweeps now support checkpoint-free `repo_prompt` inference,
+  including prompt CFG on the repo world-model path and pytest coverage for
+  the new mode.
