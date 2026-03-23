@@ -101,6 +101,12 @@ same slice. Only then should action-conditioned training continue.
   turquoise/rainbow smear near the right edge. The arm crop stays structurally
   coherent through `f8`, but the rollout is still undercommitted and never
   makes contact.
+- The checkpoint-free `repo_prompt` bridge fails when the repo future-sampling
+  path takes over. `f0-f8` copy the context exactly, but the first generated
+  frame `f9` already shifts into a washed blue/purple desk view with the
+  arm/fork fading out; `f10-f16` keep that purple wash with the plate still
+  centered but no coherent tool trajectory or contact. The arm crop shows the
+  same `f9` boundary failure and then loses the fork into a purple haze.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -114,17 +120,18 @@ same slice. Only then should action-conditioned training continue.
 - Keep the true-CFG prompted native `9/5` run as the current safety reference
   for pretrained behavior on this slice. Real CFG meaningfully improves the
   base path, but the result is still mostly static and misses contact.
-- The next bounded major lever is to move from the canonical diffusers base
-  path to the repo world-model inference path without a checkpoint, using
-  prompt conditioning on the same operator slice. If prompt-conditioned repo
-  inference also stays coherent and non-blue, then the null-token
-  `conditioning_mode=none` path is the specific failure family. If repo prompt
-  inference regresses into blur, ghosting, or collapse, focus the redesign on
-  the repo inference/chunking path itself before more training.
-- Commit `3e80f6c` now adds a checkpoint-free `repo_prompt` mode to
-  `scripts/check/sweep_local_repo_resolutions.py`, so the next run can stay on
-  the fixed operator slice and produce the same MP4 comparison artifacts while
-  using the repo world-model inference path with prompt CFG.
+- Keep the new `repo_prompt` result as evidence that prompt CFG alone is not
+  enough once the repo future-sampling path is used. The first bad frame is
+  `f9`, exactly where generated future latents begin.
+- The next bounded major lever is a prompt-conditioned `repo_prompt` rerun
+  with `future_latent_residual_mode=last_context_frame` on the same slice.
+  Distinct hypothesis: if residualizing future latents around the last context
+  frame keeps the arm/fork visible through `f9-f16`, then absolute future
+  latent drift is the main cause of the repo-path collapse. If it still washes
+  purple at `f9`, pivot to a deeper code-level redesign of repo
+  future-sampling/clamping rather than more scalar sweeps.
+- Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
+  stay on the fixed operator slice with the same MP4 comparison artifacts.
 
 ## Kept Code Changes
 - `aa230a1`: base-mode local sweeps now forward the configured prompt and
