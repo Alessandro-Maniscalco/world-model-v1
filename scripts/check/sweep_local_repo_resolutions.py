@@ -866,9 +866,10 @@ def _run_local_pipeline(
     max_sequence_length: int,
     conditioning_scale: float,
     prompt: str,
+    negative_prompt: str,
     progress_label: str | None = None,
 ) -> np.ndarray:
-    """Run the canonical Wan VACE pipeline path with the configured base-mode prompt."""
+    """Run the canonical Wan VACE pipeline path with prompt and optional CFG guidance."""
 
     if num_frames % pipe.vae_scale_factor_temporal != 1:
         num_frames = num_frames // pipe.vae_scale_factor_temporal * pipe.vae_scale_factor_temporal + 1
@@ -883,7 +884,7 @@ def _run_local_pipeline(
     batch_size = 1
     vae_dtype = pipe.vae.dtype
     transformer_dtype = pipe.transformer.dtype
-    do_cfg = False
+    do_cfg = guidance_scale > 1.0
 
     conditioning_scale_tensor = torch.tensor(
         [conditioning_scale] * len(pipe.transformer.config.vace_layers),
@@ -893,7 +894,7 @@ def _run_local_pipeline(
 
     encoded_prompt_embeds, encoded_negative_prompt_embeds = pipe.encode_prompt(
         prompt=prompt,
-        negative_prompt=None,
+        negative_prompt=negative_prompt if do_cfg else None,
         do_classifier_free_guidance=do_cfg,
         num_videos_per_prompt=1,
         prompt_embeds=None,
@@ -902,6 +903,11 @@ def _run_local_pipeline(
         device=device,
     )
     encoded_prompt_embeds = encoded_prompt_embeds.to(device=device, dtype=transformer_dtype)
+    if encoded_negative_prompt_embeds is not None:
+        encoded_negative_prompt_embeds = encoded_negative_prompt_embeds.to(
+            device=device,
+            dtype=transformer_dtype,
+        )
 
     pipe.scheduler.set_timesteps(num_inference_steps, device=device)
     timesteps = pipe.scheduler.timesteps
@@ -958,6 +964,17 @@ def _run_local_pipeline(
                 attention_kwargs=None,
                 return_dict=False,
             )[0]
+            if encoded_negative_prompt_embeds is not None:
+                noise_pred_uncond = pipe.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep_batch,
+                    encoder_hidden_states=encoded_negative_prompt_embeds,
+                    control_hidden_states=conditioning_latents,
+                    control_hidden_states_scale=conditioning_scale_tensor,
+                    attention_kwargs=None,
+                    return_dict=False,
+                )[0]
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred - noise_pred_uncond)
 
             latents = pipe.scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
             progress_bar.update()
@@ -1401,6 +1418,7 @@ def _run_one_checkpoint_resolution(
                 max_sequence_length=int(runtime_cfg.max_sequence_length),
                 conditioning_scale=float(getattr(runtime_cfg, "control_scale", 1.0)),
                 prompt=str(getattr(runtime_cfg, "prompt", "")),
+                negative_prompt=str(getattr(runtime_cfg, "negative_prompt", "")),
                 progress_label=f"{label} steps",
             )
             pred_rollout = torch.from_numpy(np.ascontiguousarray(frames)).permute(0, 3, 1, 2).unsqueeze(0).float()

@@ -163,11 +163,173 @@ def test_base_mode_forwards_prompt_and_guidance_to_local_pipeline(monkeypatch, t
     )
 
     assert captured_local_kwargs["prompt"] == "robot arm picks up a fork from a table"
+    assert captured_local_kwargs["negative_prompt"] == ""
     assert captured_local_kwargs["guidance_scale"] == 3.5
     assert captured_local_kwargs["max_sequence_length"] == 256
     assert captured_local_kwargs["conditioning_scale"] == 1.0
     assert result["plausibility"] == {"plausible": True}
     assert result["motion"] == {"summary": {"motion_verdict": "good"}}
+
+
+def test_run_local_pipeline_enables_cfg_when_guidance_scale_above_one() -> None:
+    """Local base inference should request and apply CFG prompt embeddings when enabled."""
+
+    class _FakeProgressBar:
+        """Minimal progress-bar stub for local-pipeline tests."""
+
+        def __init__(self) -> None:
+            self.description = None
+            self.updates = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def set_description(self, description: str) -> None:
+            self.description = description
+
+        def update(self, count: int = 1) -> None:
+            self.updates += count
+
+    class _FakeScheduler:
+        """Minimal scheduler stub that exposes one denoising step."""
+
+        def __init__(self) -> None:
+            self.timesteps = torch.tensor([1.0], dtype=torch.float32)
+
+        def set_timesteps(self, num_inference_steps: int, device: torch.device) -> None:
+            del num_inference_steps, device
+
+        def step(self, noise_pred: torch.Tensor, timestep: torch.Tensor, latents: torch.Tensor, return_dict: bool):
+            del timestep, return_dict
+            return (latents - noise_pred,)
+
+    class _FakeTransformer:
+        """Transformer stub that distinguishes conditioned and unconditioned branches."""
+
+        def __init__(self) -> None:
+            self.dtype = torch.float32
+            self.config = SimpleNamespace(vace_layers=[0], in_channels=2)
+            self.encoder_hidden_states_calls: list[torch.Tensor] = []
+
+        def __call__(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            timestep: torch.Tensor,
+            encoder_hidden_states: torch.Tensor,
+            control_hidden_states: torch.Tensor,
+            control_hidden_states_scale: torch.Tensor,
+            attention_kwargs,
+            return_dict: bool,
+        ):
+            del timestep, control_hidden_states, control_hidden_states_scale, attention_kwargs, return_dict
+            self.encoder_hidden_states_calls.append(encoder_hidden_states.clone())
+            fill = float(encoder_hidden_states.mean().item())
+            return (torch.full_like(hidden_states, fill),)
+
+    class _FakeVAE:
+        """VAE stub that decodes latents into a tiny RGB video."""
+
+        def __init__(self) -> None:
+            self.dtype = torch.float32
+            self.config = SimpleNamespace(latents_mean=[0.0, 0.0], latents_std=[1.0, 1.0], z_dim=2)
+
+        def decode(self, latents: torch.Tensor, return_dict: bool):
+            del return_dict
+            batch, _, frames, height, width = latents.shape
+            return (torch.zeros((batch, 3, frames, height, width), dtype=torch.float32),)
+
+    class _FakeVideoProcessor:
+        """Video postprocessor stub that returns BTCHW tensors as numpy arrays."""
+
+        def postprocess_video(self, video: torch.Tensor, output_type: str):
+            assert output_type == "np"
+            return video.permute(0, 2, 3, 4, 1).cpu().numpy()
+
+    class _FakePipe:
+        """Pipeline stub exposing only the local-pipeline methods used by the smoke test."""
+
+        def __init__(self) -> None:
+            self.vae_scale_factor_temporal = 4
+            self._execution_device = torch.device("cpu")
+            self.transformer = _FakeTransformer()
+            self.vae = _FakeVAE()
+            self.scheduler = _FakeScheduler()
+            self.video_processor = _FakeVideoProcessor()
+            self.encode_prompt_call: dict[str, object] | None = None
+
+        def encode_prompt(self, **kwargs):
+            self.encode_prompt_call = kwargs
+            prompt_embeds = torch.ones((1, 4, 3), dtype=torch.float32)
+            negative_prompt_embeds = torch.zeros((1, 4, 3), dtype=torch.float32)
+            return prompt_embeds, negative_prompt_embeds
+
+        def preprocess_conditions(self, *args):
+            del args
+            return (
+                torch.zeros((1, 3, 9, 2, 2), dtype=torch.float32),
+                torch.zeros((1, 1, 9, 2, 2), dtype=torch.float32),
+                [[]],
+            )
+
+        def prepare_video_latents(self, *args):
+            del args
+            return torch.zeros((1, 2, 9, 2, 2), dtype=torch.float32)
+
+        def prepare_masks(self, *args):
+            del args
+            return torch.zeros((1, 1, 9, 2, 2), dtype=torch.float32)
+
+        def prepare_latents(
+            self,
+            batch_size: int,
+            in_channels: int,
+            height: int,
+            width: int,
+            num_frames: int,
+            dtype: torch.dtype,
+            device: torch.device,
+            generator,
+            latents,
+        ) -> torch.Tensor:
+            del batch_size, height, width, generator, latents
+            return torch.zeros((1, in_channels, num_frames, 2, 2), dtype=dtype, device=device)
+
+        def progress_bar(self, total: int) -> _FakeProgressBar:
+            del total
+            return _FakeProgressBar()
+
+        def maybe_free_model_hooks(self) -> None:
+            return None
+
+    fake_pipe = _FakePipe()
+    output = script._run_local_pipeline(
+        pipe=fake_pipe,
+        video_frames=["video"],
+        mask_frames=["mask"],
+        height=32,
+        width=32,
+        num_frames=9,
+        num_inference_steps=1,
+        generator=None,
+        guidance_scale=5.0,
+        max_sequence_length=128,
+        conditioning_scale=1.0,
+        prompt="pick up the fork",
+        negative_prompt="distorted colors",
+        progress_label="debug",
+    )
+
+    assert fake_pipe.encode_prompt_call is not None
+    assert fake_pipe.encode_prompt_call["do_classifier_free_guidance"] is True
+    assert fake_pipe.encode_prompt_call["negative_prompt"] == "distorted colors"
+    assert len(fake_pipe.transformer.encoder_hidden_states_calls) == 2
+    assert torch.allclose(fake_pipe.transformer.encoder_hidden_states_calls[0], torch.ones((1, 4, 3)))
+    assert torch.allclose(fake_pipe.transformer.encoder_hidden_states_calls[1], torch.zeros((1, 4, 3)))
+    assert output.shape == (9, 2, 2, 3)
 
 
 def test_single_resolution_plausibility_path_uses_shared_name() -> None:
