@@ -90,24 +90,34 @@ same slice. Only then should action-conditioned training continue.
   catastrophic but still not a safe zero-step base on this slice. `f0-f4`
   stay near the reference, but `f5-f8` turn into a bright white orb with
   green/purple halos around the plate/fork region and no clean contact path.
+- The first prompt-aware native `9/5` control does not visibly rescue that
+  failure. `f0-f4` still stay near-copied, and `f5-f8` still smear into the
+  same bright orb/halo failure with no recognizable fork approach or contact.
+  The prompted output is only slightly different from the no-prompt native
+  output, so prompt text alone did not earn a keep decision on this slice.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
+- That prompted result was only a partial guidance test: the local base sweep
+  was forwarding `guidance_scale`, but `_run_local_pipeline` still hardcoded
+  `do_classifier_free_guidance=False`, so CFG was never actually enabled.
 
 ## Current Decision
-- Do not spend another long run on plain no-prompt pretrained-base sweeps.
-  That local neighborhood is exhausted after the `17/9` confetti failure and
-  the softer but still implausible native `9/5` orb/halo failure.
-- The next bounded major lever is prompt-aware base-mode validation on the same
-  operator slice. The local sweep tool was dropping the caller prompt and
-  always using `prompt=""`; commit `aa230a1` now forwards the configured base
-  prompt into the actual base-mode inference path and is pytest-validated.
-- Use that fixed prompt-aware path for one operator-slice control before any
-  deeper redesign. If a task-relevant prompt still fails visibly, treat the
-  pure pretrained-base family as structurally wrong for Stage 0 and pivot to a
-  code-level none-conditioned redesign rather than more base-path sweeps.
+- Do not spend another long run on plain no-prompt or prompt-only base sweeps.
+  The no-prompt family is already exhausted, and the first prompted run never
+  exercised true CFG despite `guidance_scale=5.0`.
+- Commit `3497d07` now enables real CFG inside `_run_local_pipeline` and is
+  pytest-validated on top of the earlier prompt-forwarding fix.
+- The next bounded major lever is one true CFG-enabled prompted native `9/5`
+  control on the same operator slice. If that rerun still goes visibly bad at
+  `f5-f8`, treat the pure pretrained-base family as structurally wrong for
+  Stage 0 and pivot to a code-level none-conditioned redesign rather than more
+  base-path sweeps.
 
 ## Kept Code Changes
 - `aa230a1`: base-mode local sweeps now forward the configured prompt and
   guidance settings into `_run_local_pipeline`, with focused pytest coverage in
   `tests/test_sweep_local_repo_resolutions.py`.
+- `3497d07`: base-mode local sweeps now honor classifier-free guidance when
+  `guidance_scale > 1.0`, including a direct `_run_local_pipeline` regression
+  test.
