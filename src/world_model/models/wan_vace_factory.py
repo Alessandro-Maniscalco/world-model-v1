@@ -186,7 +186,7 @@ def _checkpoint_uses_fresh_action_encoder(
     """Keep a fresh zero-init action encoder when probing action mode from a none checkpoint."""
     if isinstance(action_encoder, NullConditioningEncoder):
         return False
-    if action_state:
+    if action_state and not _action_state_is_none_conditioning_token(action_state):
         return False
     extra_state = checkpoint.get("extra_state")
     if not isinstance(extra_state, dict):
@@ -195,6 +195,16 @@ def _checkpoint_uses_fresh_action_encoder(
     if not isinstance(saved_cfg, dict):
         return False
     return str(saved_cfg.get("conditioning_mode", "none")) == "none"
+
+
+def _action_state_is_none_conditioning_token(action_state: dict[str, torch.Tensor]) -> bool:
+    """Detect null-conditioning checkpoints that only save the reusable base token."""
+    if not action_state:
+        return True
+    if set(action_state.keys()) != {"base_token"}:
+        return False
+    base_token = action_state["base_token"]
+    return torch.is_tensor(base_token) and base_token.ndim == 2
 
 
 def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> int:

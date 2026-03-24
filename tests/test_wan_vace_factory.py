@@ -612,6 +612,50 @@ def test_build_runtime_modules_keeps_fresh_action_encoder_when_none_checkpoint_p
     assert torch.count_nonzero(loaded_action_encoder.output_proj.bias) == 0
 
 
+def test_build_runtime_modules_keeps_fresh_action_encoder_when_none_checkpoint_saves_base_token() -> None:
+    """Treat none-checkpoint base-token state as null conditioning, not an action encoder."""
+    prepared = _make_prepared_batch()
+    none_cfg = InferScriptConfig(
+        conditioning_mode="none",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    action_cfg = replace(none_cfg, conditioning_mode="action")
+    model, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        none_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+    checkpoint = {
+        "model_state_dict": {key: torch.full_like(value, 0.25) for key, value in model.state_dict().items()},
+        "action_encoder_state_dict": {
+            "base_token": torch.linspace(0.0, 1.0, steps=16 * 5).view(5, 16),
+        },
+        "extra_state": {"config": {"conditioning_mode": "none"}},
+    }
+
+    loaded_model, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        action_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=checkpoint,
+    )
+
+    assert isinstance(loaded_action_encoder, ActionTokenEncoder)
+    first_model_key = next(iter(checkpoint["model_state_dict"]))
+    assert torch.allclose(loaded_model.state_dict()[first_model_key], checkpoint["model_state_dict"][first_model_key])
+    assert torch.count_nonzero(loaded_action_encoder.output_proj.weight) == 0
+    assert torch.count_nonzero(loaded_action_encoder.output_proj.bias) == 0
+
+
 def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypatch) -> None:
     """Load pretrained backbones in local-files-only mode when offline env vars are set."""
     prepared = _make_prepared_batch()
