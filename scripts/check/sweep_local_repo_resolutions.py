@@ -256,11 +256,11 @@ def _resolve_output_artifacts(
 def _uses_chunk_conditioning(runtime_cfg: SimpleNamespace) -> bool:
     """Mirror repo inference rules for prompt, action, and null-token conditioning."""
     conditioning_mode = str(getattr(runtime_cfg, "conditioning_mode", "none"))
-    if conditioning_mode == "prompt":
+    if conditioning_mode in {"prompt", "none"}:
         return False
     if conditioning_mode == "action":
         return str(getattr(runtime_cfg, "action_conditioning_window", "chunk")) == "chunk"
-    return True
+    return False
 
 
 def _resolve_plausibility_output_path(*, output_path: Path, resolution_count: int) -> Path:

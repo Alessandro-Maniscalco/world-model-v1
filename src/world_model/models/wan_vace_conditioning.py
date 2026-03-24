@@ -262,18 +262,20 @@ class NullConditioningEncoder(nn.Module):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         self.hidden_dim = int(hidden_dim)
         if base_token is None:
-            token = torch.zeros(self.hidden_dim, dtype=torch.float32)
+            token = torch.zeros(1, self.hidden_dim, dtype=torch.float32)
         else:
             if base_token.ndim not in (1, 2):
                 raise ValueError(
-                    "base_token must be shaped [D] or [1,D], "
+                    "base_token must be shaped [D] or [S,D], "
                     f"got {tuple(base_token.shape)}"
                 )
             if base_token.shape[-1] != self.hidden_dim:
                 raise ValueError(
                     f"base_token width {base_token.shape[-1]} does not match hidden_dim={self.hidden_dim}"
                 )
-            token = base_token.reshape(self.hidden_dim).detach().to(dtype=torch.float32)
+            token = base_token.detach().to(dtype=torch.float32)
+            if token.ndim == 1:
+                token = token.unsqueeze(0)
 
         if trainable:
             self.base_token = nn.Parameter(token.clone())
@@ -281,12 +283,14 @@ class NullConditioningEncoder(nn.Module):
             self.register_buffer("base_token", token.clone(), persistent=False)
 
     def forward(self, token_source: torch.Tensor) -> torch.Tensor:
-        """Return `[B,T,D]` repeated null-conditioning tokens."""
+        """Return `[B,T,D]` repeated tokens or `[B,S,D]` global null-token sequences."""
         if token_source.ndim != 3:
             raise ValueError(f"token_source must be [B,T,F], got {tuple(token_source.shape)}")
         batch_size, steps = token_source.shape[:2]
         token = self.base_token.to(device=token_source.device, dtype=token_source.dtype)
-        return token.view(1, 1, self.hidden_dim).expand(batch_size, steps, self.hidden_dim)
+        if token.shape[0] == 1:
+            return token.view(1, 1, self.hidden_dim).expand(batch_size, steps, self.hidden_dim)
+        return token.unsqueeze(0).expand(batch_size, -1, -1)
 
 
 def build_vace_control_tensor(

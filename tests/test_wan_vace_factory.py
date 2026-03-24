@@ -24,7 +24,7 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     """Use canonical Diffusers Wan VACE weights by default for train and infer configs."""
     prepared = _make_prepared_batch()
     calls: list[tuple[str, str | None]] = []
-    base_token = torch.linspace(0.1, 3.2, steps=32)
+    base_token = torch.linspace(0.1, 16.0, steps=32 * 5).view(5, 32)
 
     class _FakeBackbone(torch.nn.Module):
         def __init__(self) -> None:
@@ -71,7 +71,8 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, NullConditioningEncoder)
     tokens = action_encoder(torch.randn(2, 4, 7))
-    assert torch.allclose(tokens[0, 0], base_token)
+    assert tokens.shape == (2, 5, 32)
+    assert torch.allclose(tokens[0], base_token)
     assert model.control_black_latents is not None
     assert model.control_gray_latents is not None
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer", False)]

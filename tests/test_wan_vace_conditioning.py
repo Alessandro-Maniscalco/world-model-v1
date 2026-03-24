@@ -62,6 +62,17 @@ def test_null_conditioning_encoder_can_repeat_a_preinitialized_base_token() -> N
     assert torch.allclose(tokens[1, 3], base_token)
 
 
+def test_null_conditioning_encoder_can_emit_a_global_token_sequence() -> None:
+    """Allow prompt-free none conditioning to reuse a full empty-prompt token sequence."""
+    base_token = torch.arange(24, dtype=torch.float32).view(4, 6)
+    encoder = NullConditioningEncoder(hidden_dim=6, base_token=base_token, trainable=True)
+    tokens = encoder(torch.randn(2, 8, 3))
+
+    assert tokens.shape == (2, 4, 6)
+    assert torch.allclose(tokens[0], base_token)
+    assert torch.allclose(tokens[1], base_token)
+
+
 def test_action_token_encoder_supports_two_layer_mlp_projection() -> None:
     """Use the optional hidden MLP width when a deeper action encoder is requested."""
     encoder = ActionTokenEncoder(

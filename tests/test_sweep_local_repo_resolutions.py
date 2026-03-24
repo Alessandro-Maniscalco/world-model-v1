@@ -282,6 +282,15 @@ def test_repo_prompt_mode_forwards_prompt_to_repo_world_model(monkeypatch, tmp_p
     assert result["motion"] == {"summary": {"motion_verdict": "good"}}
 
 
+def test_sweep_script_disables_chunk_conditioning_for_none_mode() -> None:
+    """Treat prompt-free none conditioning like global text conditioning during rollout."""
+    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="none")) is False
+    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="prompt")) is False
+    assert script._uses_chunk_conditioning(
+        SimpleNamespace(conditioning_mode="action", action_conditioning_window="chunk")
+    ) is True
+
+
 def test_checkpoint_mode_forwards_prompt_and_runtime_overrides(monkeypatch, tmp_path) -> None:
     """Checkpoint sweeps should apply prompt and runtime overrides after loading checkpoint metadata."""
     captured_runtime_cfg: list[SimpleNamespace] = []

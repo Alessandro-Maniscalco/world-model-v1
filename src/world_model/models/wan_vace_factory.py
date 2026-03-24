@@ -205,7 +205,7 @@ def _offline_mode_enabled() -> bool:
 
 @torch.no_grad()
 def _build_pretrained_none_conditioning_token(*, cfg: Any, hidden_dim: int) -> torch.Tensor | None:
-    """Initialize prompt-free null conditioning from Wan's empty-prompt text embedding."""
+    """Initialize prompt-free null conditioning from Wan's empty-prompt token sequence."""
     if getattr(cfg, "conditioning_mode", "none") != "none":
         return None
     if not bool(getattr(cfg, "load_pretrained_backbone", False)):
@@ -246,12 +246,22 @@ def _build_pretrained_none_conditioning_token(*, cfg: Any, hidden_dim: int) -> t
         text_inputs.input_ids.to("cpu"),
         attention_mask,
     ).last_hidden_state.to(device="cpu", dtype=torch.float32)
-    summary_token = prompt_embeds[0, :seq_len].mean(dim=0)
-    if summary_token.shape[0] != hidden_dim:
+    prompt_tokens = prompt_embeds[0, :seq_len]
+    if prompt_tokens.shape[-1] != hidden_dim:
         raise ValueError(
-            f"Empty-prompt token width {summary_token.shape[0]} does not match hidden_dim={hidden_dim}"
+            f"Empty-prompt token width {prompt_tokens.shape[-1]} does not match hidden_dim={hidden_dim}"
         )
-    _NONE_CONDITIONING_TOKEN_CACHE[cache_key] = summary_token.detach().cpu()
+    padded_tokens = torch.cat(
+        [
+            prompt_tokens,
+            prompt_tokens.new_zeros(
+                _NONE_CONDITIONING_MAX_SEQUENCE_LENGTH - prompt_tokens.shape[0],
+                prompt_tokens.shape[1],
+            ),
+        ],
+        dim=0,
+    )
+    _NONE_CONDITIONING_TOKEN_CACHE[cache_key] = padded_tokens.detach().cpu()
     del text_encoder
     return _NONE_CONDITIONING_TOKEN_CACHE[cache_key].clone()
 
