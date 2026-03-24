@@ -44,41 +44,57 @@ acceptable.
   clips. Plausibility fails on `f3-f7`, and the generated video still sits far
   from the original none floor (`overall MAE≈41.1`) even though it is closer to
   the earlier zero-token dual-anchor probe (`overall MAE≈13.45`).
-- The remaining architectural mismatch is now concrete: the repo was still
-  treating `conditioning_mode=none` as chunk-conditioned per-future-step tokens,
-  so the empty prompt was collapsed into one repeated token instead of a global
-  text-token sequence like the pretrained Wan prompt path.
+- The remaining architectural mismatch after that run was concrete: the repo
+  was still treating `conditioning_mode=none` as chunk-conditioned
+  per-future-step tokens, so the empty prompt was collapsed into one repeated
+  token instead of a global text-token sequence like the pretrained Wan prompt
+  path.
 - The repo now uses Wan's full empty-prompt token sequence for
   `conditioning_mode=none` in the local checkpoint-eval path instead of a
-  repeated summary token. A real-model smoke check now confirms the
+  repeated summary token. A real-model smoke check confirms the
   null-conditioning tensor shape is `512x4096`, and the runtime encoder emits
   `1x512x4096` tokens for an 8-step future horizon.
+- That full empty-prompt token sequence materially improves the untouched-parent
+  base path on the same dual-anchor contract. In the validated
+  `untouched_base_none_pretrainedseq_dualanchor_...` run, prediction still
+  starts immediately at generated `f0` because the artifact is future-only, but
+  `f0-f7` keep the plate, fork, and gripper recognizable and stay out of the
+  catastrophic blue/purple collapse family. The remaining defect is milder:
+  the prediction is darker and cooler than the reference from `f0`, soft late
+  ghosting appears by the end of the horizon, and the fork still never reaches
+  contact. There were no held-out clips. Plausibility passes on all 8 frames,
+  the generated video differs from the old original none floor by
+  `overall MAE≈39.64`, differs from the older zero-token dual-anchor probe by
+  `≈8.31`, and differs from the summary-token dual-anchor probe by `≈17.55`.
 - The older eval root
   `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
   still contains only `eval_stdout.log`. Treat it as unfinished and
   unvalidated.
 
 ## Active Question
-- Can the prompt-free no-action base path be made visually acceptable by
-  replacing chunk-conditioned repeated null tokens with Wan's global
-  empty-prompt token sequence on the untouched parent checkpoint?
+- Can the prompt-free no-action base path keep this improved quality with
+  `future_control_fill_mode=last_context_frame` alone, or is
+  `future_latent_residual_mode=last_context_frame` also required on the
+  untouched parent checkpoint?
 
 ## Current Decision
 - Keep the validated code change that makes prompt-free none conditioning use
   Wan's full empty-prompt token sequence as global conditioning instead of
   chunk-conditioned repeated tokens.
-- The next controller pass should do only one research loop:
-  inspect the interrupted
-  `runs/training_optimizer/eval/untouched_base_none_pretrainedseq_dualanchor_224x128_ep1_start60_step0000_operator`
-  directory if it exists, and otherwise run that exact operator-only checkpoint
-  eval from scratch. Keep the same dual-anchor overrides so the result is a
-  fair A/B against both the earlier zero-token dual-anchor probe and the newer
-  empty-prompt summary-token probe. Do not branch away before answering this
-  question.
+- The token-path question is answered well enough to move on. The next
+  controller pass should do one bounded simplification test on the same
+  untouched parent and fixed operator slice: rerun the zero-step none eval with
+  `future_control_fill_mode=last_context_frame` but without
+  `future_latent_residual_mode=last_context_frame`, then compare that result
+  directly against the validated
+  `untouched_base_none_pretrainedseq_dualanchor_...` clip. The goal is to find
+  out whether the extra latent-residual anchor is actually needed or whether it
+  is contributing to the remaining cool tint and soft ghosting.
 - Rank the result by:
   visual inspection first,
-  whether the first future frame loses the blue/cyan tint,
-  whether the fork/gripper region stays sharp and recognizable without ghosting,
+  whether the fork/gripper region stays recognizable through `f7`,
+  whether the darker cool tint from `f0-f7` shrinks,
+  whether late ghosting gets better or worse,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -89,8 +105,10 @@ acceptable.
 - Do not expand beyond `episode_index=1`, `start_frame=60`.
 - Do not treat the trained `step_0000350` checkpoint as the active parent for
   this stage; it is only the quality reference.
-- Do not do broader repository exploration before the null-token base eval is
-  validated; the unresolved question is already concrete.
+- Do not rerun the older zero-token or summary-token none branches unless a new
+  regression makes the comparison necessary again.
+- Do not do broader repository exploration before the single-anchor none
+  ablation is answered; the unresolved question is already concrete.
 
 ## Kept Code Changes
 - `0456e04`: checkpoint-path local sweeps apply runtime overrides after loading
