@@ -146,6 +146,15 @@ same slice. Only then should action-conditioned training continue.
   never reaches contact. The generated MP4 is bitwise identical to the
   stabilized dual-anchor `repo_prompt` export (`overall MAE=0.0`,
   `late-frame MAE=0.0`) rather than to the original zero-step none baseline.
+- The same dual-anchor inference contract is harmful on the best prompt-free
+  trained none-conditioned checkpoint
+  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`.
+  The clip stays static through `f8`, `f9-f10` keep the scene recognizable but
+  add a blue cast, and `f11-f16` turn the predicted fork into a yellow/blue
+  smear with visible arm-crop ghosting. The rollout still misses contact,
+  plausibility now fails on `f11-f16`, and the dual-anchor export is far from
+  the standard `step_0000350` eval (`overall MAE≈11.06`,
+  `late-frame MAE≈21.93`).
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -182,16 +191,27 @@ same slice. Only then should action-conditioned training continue.
   loading is not the blocker there. But it is still prompt-conditioned and
   undercommitted, and the operator does not want prompt conditioning in the
   intended training path.
-- The next bounded major lever is prompt-free and checkpoint-local: rerun the
-  best trained none-conditioned checkpoint
-  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`
-  on the fixed operator slice with the same dual-anchor inference contract.
-  Distinct hypothesis: if the already-plausible non-prompt checkpoint improves
-  further under dual anchors, then the right base DiT path is to keep training
-  this prompt-free branch and only add action conditioning later as an exact
-  or near-no-op. If `step_0000350` is unchanged or worse under dual anchors,
-  then inference-contract tweaks are exhausted and the next move should shift
-  to prompt-free training/design changes on the none-conditioned branch.
+- Keep the standard prompt-free `step_0000350` eval as the best current base
+  DiT behavior on this slice. It stays coherent and grayscale through `f16`
+  with only mild late blur/ghosting and a small inward fork push that still
+  misses contact.
+- Retire the prompt-free dual-anchor inference branch as a harmful local
+  neighbor. On `step_0000350` it introduces the same kind of late blue/yellow
+  color drift seen in the prompt-path branch and is visibly worse than the
+  standard checkpoint eval by `f11-f16`.
+- A validated in-session runtime change now lets checkpoint probes keep a
+  fresh zero-initialized action encoder when a none-trained checkpoint is
+  evaluated with `conditioning_mode=action`, instead of trying to load the
+  checkpoint's null conditioning state into the action path.
+- The next bounded major lever is the operator's actual Stage 1 invariant:
+  run a zero-step `conditioning_mode=action` no-op probe on top of the best
+  prompt-free base checkpoint
+  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`.
+  Distinct hypothesis: if the fresh zero-init action path stays close to the
+  standard `step_0000350` none-conditioned rollout, then the repo can begin
+  action-conditioned work from a real prompt-free base whose actions initially
+  do not change anything. If it diverges visibly, the action-conditioning
+  architecture is still too invasive even before any action training.
 - Commit `3e80f6c` remains the bridge that lets these repo-path prompt probes
   stay on the fixed operator slice with the same MP4 comparison artifacts.
 
