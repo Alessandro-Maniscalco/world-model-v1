@@ -17,8 +17,8 @@ acceptable.
 
 ## Canonical Baselines
 - Untouched pretrained zero-step `conditioning_mode=none` is the floor. In the
-  full-window export, `f0-f8` copy context and the first future frame
-  (`f9`) collapses into the blue/purple failure family.
+  full-window export, `f0-f8` copy context and the first future frame (`f9`)
+  collapses into the blue/purple failure family.
 - The best prompt-free trained reference remains
   `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`.
   It stays coherent through `f16` with mild late soft blur/ghosting and still
@@ -55,7 +55,7 @@ acceptable.
   null-conditioning tensor shape is `512x4096`, and the runtime encoder emits
   `1x512x4096` tokens for an 8-step future horizon.
 - That full empty-prompt token sequence materially improves the untouched-parent
-  base path on the same dual-anchor contract. In the validated
+  base path on the dual-anchor contract. In the validated
   `untouched_base_none_pretrainedseq_dualanchor_...` run, prediction still
   starts immediately at generated `f0` because the artifact is future-only, but
   `f0-f7` keep the plate, fork, and gripper recognizable and stay out of the
@@ -66,35 +66,45 @@ acceptable.
   the generated video differs from the old original none floor by
   `overall MAE≈39.64`, differs from the older zero-token dual-anchor probe by
   `≈8.31`, and differs from the summary-token dual-anchor probe by `≈17.55`.
+- Removing the future latent residual anchor while keeping only
+  `future_control_fill_mode=last_context_frame` regresses the same
+  untouched-parent branch. In the validated
+  `untouched_base_none_pretrainedseq_controlfilllastctx_...` run, prediction is
+  future-only and starts immediately at generated `f0`; `f0` is still
+  recognizable, but by `f1-f7` the arm/fork region turns into a bright blue
+  overexposed blob with a blown-out plate edge and obvious arm-crop haloing.
+  The fork remains barely recognizable, motion stops early, and contact is
+  still missed. There were no held-out clips. Plausibility fails on `f1-f7`,
+  `overall MAE≈18.18` versus the validated dual-anchor run, and the branch is
+  visibly worse despite staying on the same token sequence.
 - The older eval root
   `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
   still contains only `eval_stdout.log`. Treat it as unfinished and
   unvalidated.
 
 ## Active Question
-- Can the prompt-free no-action base path keep this improved quality with
-  `future_control_fill_mode=last_context_frame` alone, or is
-  `future_latent_residual_mode=last_context_frame` also required on the
-  untouched parent checkpoint?
+- Can the prompt-free no-action base path keep the recovered quality with
+  `future_latent_residual_mode=last_context_frame` alone, or does the
+  untouched parent really need both anchors together?
 
 ## Current Decision
 - Keep the validated code change that makes prompt-free none conditioning use
   Wan's full empty-prompt token sequence as global conditioning instead of
   chunk-conditioned repeated tokens.
-- The token-path question is answered well enough to move on. The next
-  controller pass should do one bounded simplification test on the same
-  untouched parent and fixed operator slice: rerun the zero-step none eval with
-  `future_control_fill_mode=last_context_frame` but without
-  `future_latent_residual_mode=last_context_frame`, then compare that result
+- Control-fill-only is no longer an open candidate: it visibly regressed.
+- The next controller pass should do one final bounded simplification test on
+  the same untouched parent and fixed operator slice: rerun the zero-step none
+  eval with `future_latent_residual_mode=last_context_frame` but without
+  `future_control_fill_mode=last_context_frame`, then compare that result
   directly against the validated
   `untouched_base_none_pretrainedseq_dualanchor_...` clip. The goal is to find
-  out whether the extra latent-residual anchor is actually needed or whether it
-  is contributing to the remaining cool tint and soft ghosting.
+  out whether the residual anchor alone is enough or whether the dual-anchor
+  contract is the minimal stable prompt-free base path.
 - Rank the result by:
   visual inspection first,
   whether the fork/gripper region stays recognizable through `f7`,
-  whether the darker cool tint from `f0-f7` shrinks,
-  whether late ghosting gets better or worse,
+  whether the blue overexposed arm/fork blob returns,
+  whether late ghosting and the cool tint get better or worse,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -107,6 +117,8 @@ acceptable.
   this stage; it is only the quality reference.
 - Do not rerun the older zero-token or summary-token none branches unless a new
   regression makes the comparison necessary again.
+- Do not rerun the control-fill-only branch unless the residual-only result
+  creates a contradiction that needs a direct three-way visual comparison.
 - Do not do broader repository exploration before the single-anchor none
   ablation is answered; the unresolved question is already concrete.
 
