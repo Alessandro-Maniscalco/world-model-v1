@@ -101,21 +101,42 @@ acceptable.
   family: future-only clips, motion starting immediately at generated `f0`,
   plate/fork/gripper recognizable through `f7`, no return to the catastrophic
   blue/purple collapse family, and no held-out clips. `step_0000200` is the
-  better motion-first checkpoint so far: it remains undercommitted, but the
-  arm-crop clip shows slightly more late-horizon movement and less early
-  freezing than `step_0000400` (`late_motion_ratio≈0.666` vs `0.432`,
+  better motion-first checkpoint of that saved pair: it remains undercommitted,
+  but the arm-crop clip shows slightly more late-horizon movement and less
+  early freezing than `step_0000400` (`late_motion_ratio≈0.666` vs `0.432`,
   `total_motion_ratio≈0.838` vs `0.611`). `step_0000400` is slightly cleaner on
   framewise fidelity (`mean MAE≈8.20` vs `8.51`, `generated_temporal_mae≈1.58`
-  vs `2.03`) but looks more frozen. Training metrics explain the mismatch: the
-  best saved validation point is not `200` or `400`, but `step_0000300`
-  (`val_loss≈0.0328`), which was never checkpointed.
+  vs `2.03`) but looks more frozen.
+- The narrow resume-from-`step_0000200` recovery run to `max_steps=300`
+  succeeded through training and saved both `step_0000250` and `step_0000300`.
+  The long-command `returncode=1` came only from its post-run comparison helper,
+  which incorrectly assumed the new eval exports would still be future-only `8`
+  frames. Under the current eval path, both checkpoints export full-window
+  `17`-frame clips again (`f0-f8` copied context, visible prediction from
+  `f9-f16`), so future-tail comparisons must slice candidate frames `9:17`
+  against the older future-only zero-step and `step_0000200` references.
+- `step_0000250` is plausible on all `17` frames and keeps the scene coherent:
+  `f0-f8` are near-exact copies, visible motion starts at `f9`, and `f9-f16`
+  keep the plate, fork, and gripper recognizable with mild blur/ghosting and a
+  small inward fork drift, but the late horizon is still only `misaligned`
+  (`late_motion_ratio≈0.741`, `profile_correlation≈0.542`,
+  `mean MAE≈6.62`, `generated_temporal_mae≈2.33`) and still misses contact.
+- `step_0000300` is the best checkpoint in this branch so far by
+  motion-first ranking. It is also plausible on all `17` frames, still copies
+  `f0-f8`, and visible future motion begins at `f9`. From `f9-f16`, the
+  fork/gripper region stays recognizable and more committed than `step_0000250`
+  with no return to the blue/purple collapse family; the tradeoff is mild late
+  bright bloom/ghosting around the gripper in the arm crop, but the motion
+  report finally turns `good` (`late_motion_ratio≈0.894`,
+  `profile_correlation≈0.708`, `mean MAE≈5.06`,
+  `generated_temporal_mae≈2.14`). There were no held-out clips in either
+  resume-eval pass.
 
 ## Active Question
-- With the prompt-free none contract now repaired and reaching the real
-  untouched-parent eval path and the startup training blockers now removed,
-  does a short no-action training continuation from the untouched pretrained
-  parent improve motion and scene fidelity without reopening the blue-collapse
-  family?
+- With the repaired none contract now confirmed through real training and
+  `step_0000300` currently best on motion-first ranking, is there a better
+  checkpoint between `step_0000300` and the already-saved, more-frozen
+  `step_0000400`, or has this branch already peaked at `300`?
 
 ## Current Decision
 - Keep the validated code change that upgrades only untouched pretrained none
@@ -128,24 +149,27 @@ acceptable.
   `tests/test_infer_world_model_wan_vace.py`, and the plain no-override
   operator-slice eval now confirms that the default reaches the real
   checkpoint-eval path.
-- The next controller pass should spend the long-run budget on one bounded
-  no-action base-training continuation from the untouched pretrained none
-  parent, but it is now a narrow checkpoint-recovery run instead of a fresh
-  architecture or optimizer experiment. Resume from the validated
-  `step_0000200` Adafactor checkpoint under the same repaired none contract and
-  same fit-proven settings, cap at `max_steps=300`, save checkpoints every `50`
-  steps, and evaluate `step_0000250` and `step_0000300` on the fixed operator
-  slice. The unresolved question is whether the unsaved `step_0000300` valley
-  combines `step_0000200`'s better motion with `step_0000400`'s slightly better
-  frame fidelity while staying out of the blue/purple failure family.
+- The missing-checkpoint question between `200` and `300` is answered:
+  `step_0000300` beats `step_0000250` on motion-first grounds while also
+  improving plausibility and framewise MAE, so do not spend more time inside
+  the `200 -> 300` recovery neighborhood.
+- The next controller pass should spend the long-run budget on one final narrow
+  checkpoint-selection run inside the same repaired none-training branch:
+  resume from the validated `step_0000300` checkpoint under the same Adafactor
+  / `batch_size=1` / gradient-checkpointed settings, cap at `max_steps=350`,
+  save `step_0000350`, and evaluate that checkpoint on the fixed operator slice
+  with the same full-window export path. The distinct hypothesis is that
+  `step_0000350` may keep `step_0000300`'s stronger late-horizon fork/gripper
+  motion while shaving off some of the mild late bloom/ghosting before the
+  branch freezes into the older `step_0000400` behavior.
 - Rank the result by:
   visual inspection first,
   whether the future horizon stays out of the catastrophic blue/purple collapse
   family,
-  whether the fork/gripper region stays recognizable and motion becomes more
-  committed,
-  whether the darker cool tint and late ghosting shrink relative to the current
-  zero-step dual-anchor/default-dual-anchor baseline,
+  whether the fork/gripper region stays recognizable and motion remains at
+  least as committed as `step_0000300`,
+  whether the darker cool tint and late ghosting shrink relative to
+  `step_0000300`,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -158,8 +182,10 @@ acceptable.
   this stage; it is only the quality reference.
 - Do not rerun the older zero-token, summary-token, control-fill-only,
   residual-only, manual-dual-anchor, or plain-default-dual-anchor zero-step
-  branches unless the resumed `step_0000250` / `step_0000300` continuation
-  creates a contradiction that needs a direct comparison.
+  branches unless a later checkpoint creates a contradiction that needs a
+  direct comparison.
+- Do not spend more long-run budget recovering or reranking `step_0000250` /
+  `step_0000300`; that comparison is now resolved in favor of `step_0000300`.
 - Do not spend time fixing the saved summary metadata mismatch before the first
   bounded no-action training continuation is answered; the model-path question
   is already resolved.
