@@ -756,6 +756,115 @@ def test_build_wan_vace_model_from_config_rejects_backbone_channel_mismatch(monk
         wan_vace_factory.build_wan_vace_model_from_config(cfg, prepared)
 
 
+def test_apply_untouched_none_contract_defaults_upgrades_zero_step_parent() -> None:
+    """Upgrade untouched pretrained none checkpoints to the validated dual-anchor defaults."""
+    cfg = SimpleNamespace(
+        conditioning_mode="none",
+        load_pretrained_backbone=True,
+        future_control_fill_mode="gray",
+        future_latent_residual_mode="none",
+    )
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "none",
+                "future_control_fill_mode": "gray",
+                "future_latent_residual_mode": "none",
+                "load_pretrained_backbone": True,
+                "max_steps": 0,
+            }
+        }
+    }
+
+    wan_vace_factory._apply_untouched_none_contract_defaults(cfg=cfg, checkpoint=checkpoint)
+
+    assert cfg.future_control_fill_mode == "last_context_frame"
+    assert cfg.future_latent_residual_mode == "last_context_frame"
+
+
+def test_apply_untouched_none_contract_defaults_skips_trained_none_checkpoint() -> None:
+    """Leave trained none checkpoints on their saved runtime contract for fair reuse."""
+    cfg = SimpleNamespace(
+        conditioning_mode="none",
+        load_pretrained_backbone=True,
+        future_control_fill_mode="gray",
+        future_latent_residual_mode="none",
+    )
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "none",
+                "future_control_fill_mode": "gray",
+                "future_latent_residual_mode": "none",
+                "load_pretrained_backbone": True,
+                "max_steps": 400,
+            }
+        }
+    }
+
+    wan_vace_factory._apply_untouched_none_contract_defaults(cfg=cfg, checkpoint=checkpoint)
+
+    assert cfg.future_control_fill_mode == "gray"
+    assert cfg.future_latent_residual_mode == "none"
+
+
+def test_build_runtime_modules_propagates_dual_anchor_defaults_back_to_cfg(monkeypatch) -> None:
+    """Expose effective untouched-parent none defaults to later inference code that reuses the cfg."""
+    prepared = _make_prepared_batch()
+
+    class _FakeBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Parameter(torch.ones(1))
+            self.config = SimpleNamespace(
+                text_dim=32,
+                in_channels=16,
+                vace_in_channels=36,
+                vace_layers=(0, 1),
+            )
+
+    cfg = InferScriptConfig(mask_channels=4)
+    checkpoint = {
+        "model_state_dict": {"backbone.proj": torch.ones(1)},
+        "action_encoder_state_dict": {"base_token": torch.zeros((512, 32))},
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "none",
+                "future_control_fill_mode": "gray",
+                "future_latent_residual_mode": "none",
+                "load_pretrained_backbone": True,
+                "trainable_backbone": "full",
+                "max_steps": 0,
+            }
+        },
+    }
+    base_token = torch.linspace(0.1, 16.0, steps=32 * 5).view(5, 32)
+
+    monkeypatch.setattr(
+        wan_vace_factory.WanVACETransformer3DModel,
+        "from_pretrained",
+        lambda *args, **kwargs: _FakeBackbone(),
+    )
+    monkeypatch.setattr(
+        wan_vace_factory,
+        "_build_pretrained_none_conditioning_token",
+        lambda *, cfg, hidden_dim: base_token.clone(),
+    )
+
+    model, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=checkpoint,
+    )
+
+    assert isinstance(model, WanVACEWorldModel)
+    assert isinstance(action_encoder, NullConditioningEncoder)
+    assert model.future_control_fill_mode == "last_context_frame"
+    assert cfg.future_control_fill_mode == "last_context_frame"
+    assert cfg.future_latent_residual_mode == "last_context_frame"
+
+
 def _make_prepared_batch() -> PreparedPackedBatch:
     """Build a compact prepared batch fixture for Wan VACE module tests."""
     return PreparedPackedBatch(

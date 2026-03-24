@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from typing import Any
 
@@ -161,7 +162,10 @@ def build_wan_vace_runtime_modules(
     ActionTokenEncoder | NullConditioningEncoder,
 ]:
     """Build Wan VACE runtime modules and optionally overlay a local fine-tune checkpoint."""
+    original_cfg = cfg
     cfg = _merge_runtime_backbone_config(cfg=cfg, checkpoint=checkpoint)
+    _apply_untouched_none_contract_defaults(cfg=cfg, checkpoint=checkpoint)
+    _copy_runtime_contract_defaults(source_cfg=cfg, target_cfg=original_cfg)
     model = build_wan_vace_model_from_config(cfg, prepared_batch).to(device)
     action_encoder = build_conditioning_encoder_for_model(cfg, prepared_batch, model).to(device)
     if checkpoint is not None:
@@ -362,6 +366,65 @@ def _resolve_action_mlp_dim(cfg: Any) -> int | None:
     """Resolve non-positive config values to the encoder's default linear projection path."""
     value = int(getattr(cfg, "action_mlp_dim", 0) or 0)
     return None if value <= 0 else value
+
+
+def _apply_untouched_none_contract_defaults(*, cfg: Any, checkpoint: dict[str, object] | None) -> None:
+    """Upgrade untouched pretrained none checkpoints to the validated dual-anchor contract."""
+    if not _should_upgrade_untouched_none_contract(cfg=cfg, checkpoint=checkpoint):
+        return
+    if str(getattr(cfg, "future_control_fill_mode", "gray")) == "gray":
+        cfg.future_control_fill_mode = "last_context_frame"
+    if str(getattr(cfg, "future_latent_residual_mode", "none")) == "none":
+        cfg.future_latent_residual_mode = "last_context_frame"
+
+
+def _should_upgrade_untouched_none_contract(*, cfg: Any, checkpoint: dict[str, object] | None) -> bool:
+    """Detect untouched pretrained none checkpoints that still carry the legacy unstable defaults."""
+    if str(getattr(cfg, "conditioning_mode", "none")) != "none":
+        return False
+    if bool(getattr(cfg, "force_legacy_none_contract", False)):
+        return False
+    if not bool(getattr(cfg, "load_pretrained_backbone", False)):
+        return False
+    if str(getattr(cfg, "future_control_fill_mode", "gray")) != "gray":
+        return False
+    if str(getattr(cfg, "future_latent_residual_mode", "none")) != "none":
+        return False
+    return _checkpoint_saved_max_steps(checkpoint=checkpoint) == 0
+
+
+def _checkpoint_saved_max_steps(*, checkpoint: dict[str, object] | None) -> int | None:
+    """Read the saved train-step budget from checkpoint metadata when it is available."""
+    if checkpoint is None:
+        return None
+    extra_state = checkpoint.get("extra_state")
+    if not isinstance(extra_state, dict):
+        return None
+    saved_cfg = extra_state.get("config")
+    if not isinstance(saved_cfg, dict):
+        return None
+    value = saved_cfg.get("max_steps")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _copy_runtime_contract_defaults(*, source_cfg: Any, target_cfg: Any) -> None:
+    """Propagate effective none-contract defaults back to the caller-visible runtime config."""
+    for key in ("future_control_fill_mode", "future_latent_residual_mode"):
+        if hasattr(source_cfg, key):
+            _set_runtime_cfg_attr(target_cfg=target_cfg, key=key, value=getattr(source_cfg, key))
+
+
+def _set_runtime_cfg_attr(*, target_cfg: Any, key: str, value: Any) -> None:
+    """Assign runtime config fields even when the caller uses a frozen dataclass config."""
+    try:
+        setattr(target_cfg, key, value)
+    except (AttributeError, FrozenInstanceError, TypeError):
+        object.__setattr__(target_cfg, key, value)
 
 
 def _uses_action_added_kv(cfg: Any) -> bool:
