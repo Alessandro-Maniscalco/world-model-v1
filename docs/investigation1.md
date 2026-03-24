@@ -39,9 +39,11 @@ acceptable.
   Wan's empty prompt produces a dense nonzero `4096`-d null token, and the repo
   now uses that pretrained-compatible null token by default in
   `conditioning_mode=none`.
-- The interrupted eval root
+- The two interrupted eval roots
   `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
-  currently contains only `eval_stdout.log`. Treat it as unfinished and
+  and
+  `runs/training_optimizer/eval/untouched_base_none_pretrainednull_dualanchor_224x128_ep1_start60_step0000_operator`
+  currently contain only `eval_stdout.log`. Treat both as unfinished and
   unvalidated.
 
 ## Active Question
@@ -54,10 +56,11 @@ acceptable.
   from Wan's empty-prompt text embedding instead of literal zero tokens.
 - The next controller pass should do only one research loop:
   inspect the interrupted
-  `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
+  `runs/training_optimizer/eval/untouched_base_none_pretrainednull_dualanchor_224x128_ep1_start60_step0000_operator`
   directory, validate it if complete, and otherwise rerun that exact operator-
-  only checkpoint eval from scratch. Do not branch away before answering this
-  question.
+  only checkpoint eval from scratch. Keep the same dual-anchor overrides so the
+  result is a fair A/B against the earlier zero-token dual-anchor base probe.
+  Do not branch away before answering this question.
 - Rank the result by:
   visual inspection first,
   whether the first future frame loses the blue/cyan tint,
