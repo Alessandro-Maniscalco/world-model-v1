@@ -83,6 +83,18 @@ acceptable.
   `--no-auto-batch-size`, and `--gradient-checkpointing`, while allowing a
   fresh optimizer fallback when the saved optimizer parameter groups no longer
   match the current module layout.
+- The first startup-safe bounded continuation still never reached checkpointing
+  or video export. This time the failure moved later: the run got through model
+  load, chunk preparation, and resume setup, then died on the first optimizer
+  step when `AdamW` tried to allocate moment buffers
+  (`torch.OutOfMemoryError` during `exp_avg_sq` initialization). There were no
+  held-out clips because no evals ran. The key comparison is now configuration,
+  not model behavior: both the untouched parent checkpoint and the strongest
+  prompt-free full-backbone reference (`step_0000350`) were trained with
+  `optimizer_name=adafactor`, `batch_size=1`, and `gradient_checkpointing=true`
+  on the same `224x128` / `9+8` geometry. The failed bounded continuation used
+  the current default `AdamW`, so the blocker is optimizer-state memory rather
+  than evidence that the repaired none contract regresses under training.
 
 ## Active Question
 - With the prompt-free none contract now repaired and reaching the real
@@ -112,9 +124,13 @@ acceptable.
   (`future_control_fill_mode=last_context_frame`,
   `future_latent_residual_mode=last_context_frame`) together with the
   startup-safe settings that now pass local validation:
-  `batch_size=1`, `--no-auto-batch-size`, and `--gradient-checkpointing`. The
-  question is whether the repaired prompt-free base contract can now learn
-  useful future motion without reopening the blue/purple failure family.
+  `batch_size=1`, `--no-auto-batch-size`, and `--gradient-checkpointing`. Match
+  the optimizer family that already fit this geometry in prior successful
+  prompt-free runs: use `optimizer_name=adafactor` and the lower
+  `lr=5e-05` instead of the current `AdamW` default. The question is whether
+  the repaired prompt-free base contract can now learn useful future motion
+  without reopening the blue/purple failure family once the optimizer-memory
+  mismatch is removed.
 - Rank the result by:
   visual inspection first,
   whether the future horizon stays out of the catastrophic blue/purple collapse
