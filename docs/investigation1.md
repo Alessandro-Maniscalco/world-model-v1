@@ -122,30 +122,43 @@ visually acceptable first.
   `tests/test_sweep_local_repo_resolutions.py`, plus a real `step_0000300`
   checkpoint smoke that now builds an `ActionTokenEncoder` with zero nonzero
   entries in `output_proj.weight` and `output_proj.bias`.
+- The clean rerun of the same zero-step action probe did answer the invariant
+  question. It exports a full-window `17`-frame clip, so `f0-f8` are copied
+  context and visible future motion starts at `f9`. From `f9-f16`, the
+  action-conditioned rollout stays in the same safe visual family as the
+  `step_0000300` none baseline: the plate, fork, and gripper remain
+  recognizable, there is no return to the blue/purple collapse family, and
+  there were no held-out clips. The perturbation is small but not literally
+  zero. Visually, the late horizon looks slightly flatter and slightly less
+  bloomy than the none baseline, while the arm report falls from `good` to
+  `misaligned` on a narrow margin (`late_motion_ratio≈0.819`,
+  `profile_correlation≈0.690`, `total_motion_ratio≈0.976`). The direct
+  full-window diff against the none baseline is still small
+  (`overall MAE≈1.20` on the `0-255` RGB scale), so the current action path is
+  close enough to neutral to justify the first bounded action-training run.
 
 ## Active Question
-- With `step_0000300` now fixed as the best prompt-free base checkpoint in this
-  branch, does the action path stay neutral when attached to that checkpoint,
-  or does it immediately perturb the rollout before any action training?
+- Starting from the repaired `step_0000300` base checkpoint and a nearly
+  neutral zero-init action path, can a first bounded action-conditioned
+  continuation improve task-relevant fork/gripper motion without reopening blue
+  wash, heavy ghosting, or collapse?
 
 ## Current Decision
 - The checkpoint-selection question is answered: `step_0000350` is cleaner but
   more frozen, so `step_0000300` remains the best base-only checkpoint and this
   plain continuation neighborhood is exhausted.
-- The next controller pass should rerun the same bounded action-path invariant
-  check on top of `step_0000300`, but in a fresh output root after the overlay
-  fix in `7296a3a`: run the zero-step `conditioning_mode=action` override with
-  the fresh zero-initialized action encoder on the same fixed operator slice
-  and compare it directly against the validated `step_0000300`
-  none-conditioned rollout. The branch is ready for that rerun because the
-  first failing stage is now fixed and the base clip itself remains plausibly
-  stable and structurally coherent even though it still misses contact.
+- The action no-op question is answered well enough to move on. The next
+  controller pass should spend the long-run budget on the first bounded
+  action-conditioned continuation from `step_0000300` under the same repaired
+  dual-anchor contract: keep the fresh zero-init action path, use
+  `trainable_backbone=none` so the backbone stays frozen, and evaluate the
+  branch at small checkpoints before `400` total steps.
 - Rank that result by:
   visual inspection first,
-  whether the action-conditioned rollout stays visually indistinguishable or
-  very close to the `step_0000300` none baseline,
-  whether the fork/gripper region keeps the same late-horizon commitment and
-  avoids reopening blue wash, heavy ghosting, or early stop,
+  whether task-relevant fork/gripper motion becomes more committed than the
+  zero-step action probe and the none-conditioned `step_0000300` baseline,
+  whether the rollout stays in the same safe visual family without reopening
+  blue wash, heavy ghosting, or early stop,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -157,6 +170,9 @@ visually acceptable first.
 - Do not spend more long-run budget on plain `step_0000300 -> step_0000x` full
   backbone continuations without changing a major lever; `step_0000350`
   already showed the branch freezing again.
+- Do not spend more long-run budget on additional zero-step action no-op probes
+  unless a later contradiction appears; the current rerun is already close
+  enough to the none baseline to justify the first action-training branch.
 - Do not revisit the exhausted zero-token, summary-token, control-fill-only, or
   residual-only zero-step neighborhoods unless a later contradiction appears.
 - Do not treat the trained `fullft_subset8_spread_resume200_lr5e5_step400`
