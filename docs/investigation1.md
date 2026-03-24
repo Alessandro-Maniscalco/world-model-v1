@@ -107,6 +107,21 @@ visually acceptable first.
   `step_0000400` freeze (`overall MAE≈3.45` vs `step_0000300`, `≈8.16` vs
   `step_0000400` future tail), but the plain continuation family has now
   visibly peaked at `step_0000300`.
+- The first zero-step `conditioning_mode=action` probe on top of
+  `step_0000300` did not reach video export, so there were no new videos or
+  held-out clips to review from that long command. The first failing stage was
+  checkpoint overlay: the none-conditioned `step_0000300` checkpoint saves
+  `action_encoder_state_dict = {'base_token': ...}` from
+  `NullConditioningEncoder`, and the action probe incorrectly tried to load
+  that null-conditioning token into `ActionTokenEncoder`, aborting with
+  `RuntimeError: Unexpected action-encoder checkpoint keys: ['base_token']`.
+  Commit `7296a3a` now treats a base-token-only none checkpoint the same way as
+  the earlier empty-state none checkpoints and preserves the fresh zero-init
+  action encoder. That fix is validated by `47` passing tests across
+  `tests/test_wan_vace_factory.py` and
+  `tests/test_sweep_local_repo_resolutions.py`, plus a real `step_0000300`
+  checkpoint smoke that now builds an `ActionTokenEncoder` with zero nonzero
+  entries in `output_proj.weight` and `output_proj.bias`.
 
 ## Active Question
 - With `step_0000300` now fixed as the best prompt-free base checkpoint in this
@@ -117,13 +132,14 @@ visually acceptable first.
 - The checkpoint-selection question is answered: `step_0000350` is cleaner but
   more frozen, so `step_0000300` remains the best base-only checkpoint and this
   plain continuation neighborhood is exhausted.
-- The next controller pass should spend the long-run budget on a bounded
-  action-path invariant check on top of `step_0000300`: run the current
-  zero-step `conditioning_mode=action` override with the fresh zero-initialized
-  action encoder on the same fixed operator slice and compare it directly
-  against the validated `step_0000300` none-conditioned rollout. The branch is
-  ready for that check because the base clip is now plausibly stable and
-  structurally coherent even though it still misses contact.
+- The next controller pass should rerun the same bounded action-path invariant
+  check on top of `step_0000300`, but in a fresh output root after the overlay
+  fix in `7296a3a`: run the zero-step `conditioning_mode=action` override with
+  the fresh zero-initialized action encoder on the same fixed operator slice
+  and compare it directly against the validated `step_0000300`
+  none-conditioned rollout. The branch is ready for that rerun because the
+  first failing stage is now fixed and the base clip itself remains plausibly
+  stable and structurally coherent even though it still misses contact.
 - Rank that result by:
   visual inspection first,
   whether the action-conditioned rollout stays visually indistinguishable or
@@ -157,6 +173,9 @@ visually acceptable first.
 - `7896373`: untouched pretrained none checkpoints (`max_steps == 0`) now
   default to the validated dual-anchor contract, while trained none checkpoints
   keep their saved contract.
+- `7296a3a`: action probes from none-conditioned checkpoints now treat a
+  base-token-only `action_encoder_state_dict` as null-conditioning state and
+  keep the fresh zero-init `ActionTokenEncoder`.
 - `validated in worktree`: training-side chunkwise flow matching now accepts
   global prompt-free none-conditioning token sequences, and
   `_resume_training_state` can fall back to a fresh optimizer when saved
