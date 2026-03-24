@@ -56,34 +56,52 @@ acceptable.
   blue/purple smear, extreme color shift, and unreadable arm-crop blobs. There
   were no held-out clips in either run. This exhausts the single-anchor
   neighborhood.
+- The plain no-override untouched-parent eval,
+  `untouched_base_none_pretrainedseq_defaultdualanchor_...`, is bitwise
+  identical to the validated manual dual-anchor clip
+  `untouched_base_none_pretrainedseq_dualanchor_...` (`overall MAE=0.0`,
+  `per-frame MAE=0.0`). Prediction is still future-only and starts immediately
+  at generated `f0`, but `f0-f7` keep the plate, fork, and gripper
+  recognizable, stay out of the catastrophic blue/purple collapse family, and
+  only retain the milder darker cool tint plus soft late ghosting from the
+  validated dual-anchor branch. There were no held-out clips. The saved summary
+  metadata still reports the legacy `gray` / `none` values, but that is now
+  only a reporting mismatch, not a model-path mismatch.
 
 ## Active Question
-- Does the new factory-side default keep untouched pretrained none checkpoints
-  on the validated dual-anchor contract without manual overrides, so the plain
-  zero-step base eval now stays on the recovered prompt-free path?
+- With the prompt-free none contract now repaired and reaching the real
+  untouched-parent eval path, does a short no-action training continuation from
+  the untouched pretrained parent improve motion and scene fidelity without
+  reopening the blue-collapse family?
 
 ## Current Decision
 - Keep the validated code change that upgrades only untouched pretrained none
   checkpoints (`max_steps == 0` in checkpoint metadata) from the legacy
   `gray`/`none` contract to the validated dual-anchor contract while leaving
   trained none checkpoints alone. The implementation lives in
-  `src/world_model/models/wan_vace_factory.py`, and targeted validation passed
-  with `76` tests across `tests/test_wan_vace_factory.py`,
+  `src/world_model/models/wan_vace_factory.py`, targeted validation passed with
+  `76` tests across `tests/test_wan_vace_factory.py`,
   `tests/test_sweep_local_repo_resolutions.py`, and
-  `tests/test_infer_world_model_wan_vace.py`.
-- The next controller pass should do one bounded validation run only: rerun the
-  untouched zero-step none checkpoint on the fixed operator slice with no
-  future-control or future-latent overrides, then compare that plain no-override
-  result directly against the validated
-  `untouched_base_none_pretrainedseq_dualanchor_...` clip. The question is
-  whether the code-level default now makes the base path work without manual
-  per-run patching.
+  `tests/test_infer_world_model_wan_vace.py`, and the plain no-override
+  operator-slice eval now confirms that the default reaches the real
+  checkpoint-eval path.
+- The next controller pass should spend the long-run budget on one bounded
+  no-action base-training continuation from the untouched pretrained none
+  parent, not on more zero-step architecture ablations. Keep the fixed geometry
+  (`224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`), keep
+  `conditioning_mode=none`, keep actions out of the run, cap the continuation
+  at `400` steps, and then evaluate the resulting checkpoints on the fixed
+  operator slice. The question is whether the repaired prompt-free base
+  contract can now learn useful future motion without reopening the blue/purple
+  failure family.
 - Rank the result by:
   visual inspection first,
-  whether `f0-f7` stay out of the catastrophic blue/purple collapse family,
-  whether the fork/gripper region stays recognizable through `f7`,
-  whether the darker cool tint and late ghosting remain at the milder
-  dual-anchor level,
+  whether the future horizon stays out of the catastrophic blue/purple collapse
+  family,
+  whether the fork/gripper region stays recognizable and motion becomes more
+  committed,
+  whether the darker cool tint and late ghosting shrink relative to the current
+  zero-step dual-anchor/default-dual-anchor baseline,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -94,11 +112,15 @@ acceptable.
 - Do not expand beyond `episode_index=1`, `start_frame=60`.
 - Do not treat the trained `step_0000350` checkpoint as the active parent for
   this stage; it is only the quality reference.
-- Do not rerun the older zero-token, summary-token, control-fill-only, or
-  residual-only none branches unless the plain no-override validation creates a
+- Do not rerun the older zero-token, summary-token, control-fill-only,
+  residual-only, manual-dual-anchor, or plain-default-dual-anchor zero-step
+  branches unless the first bounded training continuation creates a
   contradiction that needs a direct comparison.
-- Do not do broader repository exploration before the plain no-override
-  untouched-parent eval is answered; the unresolved question is already
+- Do not spend time fixing the saved summary metadata mismatch before the first
+  bounded no-action training continuation is answered; the model-path question
+  is already resolved.
+- Do not do broader repository exploration before the first bounded untouched-
+  parent training continuation is answered; the unresolved question is already
   concrete.
 
 ## Kept Code Changes
