@@ -1,217 +1,132 @@
 ## Goal
-Make the prompt-free base model produce a decent future video on the fixed slice
-before any action-conditioned branch resumes. Actions should initially have no
-effect, so they are off-policy until the base continuation path is visually
-acceptable.
+Make the prompt-free base model produce a decent future video on the fixed
+operator slice before any action-conditioned branch resumes. Actions should
+initially have no effect, so the base no-action continuation path must be
+visually acceptable first.
 
 ## Fixed Policy
 - Run Python and pytest inside `.venv`.
 - Review only `episode_index=1`, `start_frame=60`.
 - Do not use a text prompt.
-- Do not run new action-conditioned experiments until the no-action base path is
-  visibly good.
+- Do not spend long-run budget on new action-conditioned experiments until the
+  no-action base path is visibly good.
 - Keep the same geometry unless a result proves it is the blocker:
   `224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`.
-- Keep new base-path architecture branches anchored to the same untouched
-  pretrained Wan/VACE parent.
+- Keep new base-path branches anchored to the same untouched pretrained
+  Wan/VACE parent.
 
-## Canonical Baselines
-- Untouched pretrained zero-step `conditioning_mode=none` is the floor. In the
-  full-window export, `f0-f8` copy context and the first future frame (`f9`)
-  collapses into the blue/purple failure family.
-- The best prompt-free trained reference remains
-  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`.
-  It stays coherent through `f16` with mild late soft blur/ghosting and still
-  misses contact. Use it only as a reference for what a decent prompt-free base
-  looks like, not as the active parent for base-architecture diagnosis.
+## Best Run
+- Current best base-only checkpoint: `step_0000300` from
+  `runs/untouched_base_none_pretrainedseq_dualanchor_fullft_subset8_adafactor_lr5e5_bs1gc_resume0200_step300_ckpt50/checkpoints/step_0000300.pt`.
+- On the fixed operator slice it exports a full-window `17`-frame clip:
+  `f0-f8` copy context, visible future motion begins at `f9`, and `f9-f16`
+  keep the plate, fork, and gripper recognizable without reopening the
+  catastrophic blue/purple collapse family.
+- The late horizon is still not solved: mild bright bloom/ghosting appears
+  around the gripper by `f14-f16`, the fork never reaches contact, and there
+  were no held-out clips in this operator-only pass.
 
-## Proven Outcomes
-- The legacy prompt-free `conditioning_mode=none` contract is not neutral:
-  literal/summary null tokens plus gray future control and no latent residual
-  are off-distribution for pretrained Wan/VACE, which is why the untouched
-  parent collapses into the blue/purple failure family.
-- Correct checkpoint runtime overrides now apply after checkpoint metadata load
-  (`0456e04`), so zero-step checkpoint probes are trustworthy.
-- `872de58` fixed the none-token path so checkpoint evals use Wan's full
-  empty-prompt token sequence as global conditioning instead of chunked repeated
+## Findings
+- The legacy prompt-free `conditioning_mode=none` contract was off-distribution
+  for pretrained Wan/VACE. Literal or summary null tokens plus gray future
+  control caused the untouched parent to collapse into the blue/purple failure
+  family at the first future frame.
+- `0456e04` made checkpoint-path local sweeps apply runtime overrides after
+  checkpoint metadata load, keeping zero-step comparison probes honest.
+- `0348c65` stopped using literal zero tokens for none conditioning and instead
+  reused Wan's empty-prompt embedding.
+- `872de58` switched the none path to Wan's full empty-prompt token sequence
+  and treated it as global conditioning instead of chunk-sliced repeated
   summary tokens.
-- With that token fix plus both anchors
+- `7896373` upgraded only untouched pretrained none checkpoints (`max_steps ==
+  0`) to the validated dual-anchor contract by default, while trained none
+  checkpoints keep their saved contract.
+- With the full empty-prompt sequence plus both anchors
   (`future_control_fill_mode=last_context_frame` and
-  `future_latent_residual_mode=last_context_frame`), the untouched-parent base
-  path becomes the first none-conditioned branch that stays out of the
-  catastrophic blue/purple collapse family. In the validated
-  `untouched_base_none_pretrainedseq_dualanchor_...` run, prediction is
-  future-only and starts immediately at generated `f0`, but `f0-f7` keep the
-  plate, fork, and gripper recognizable. The remaining defect is milder: the
-  prediction is darker and cooler than the reference from `f0`, soft late
-  ghosting appears by the end of the horizon, and the fork still never reaches
-  contact. There were no held-out clips. Plausibility passes on all 8 frames.
-- Both single-anchor simplifications regress visibly on the same untouched
-  parent and fixed slice:
-  `untouched_base_none_pretrainedseq_controlfilllastctx_...` keeps only
-  last-context control fill and by `f1-f7` turns the arm/fork region into a
-  bright blue overexposed blob with a blown-out plate edge and arm-crop haloing;
-  `untouched_base_none_pretrainedseq_residuallastctx_...` keeps only the latent
-  residual anchor and is even worse, failing from `f0` with full-frame
-  blue/purple smear, extreme color shift, and unreadable arm-crop blobs. There
-  were no held-out clips in either run. This exhausts the single-anchor
-  neighborhood.
-- The plain no-override untouched-parent eval,
-  `untouched_base_none_pretrainedseq_defaultdualanchor_...`, is bitwise
-  identical to the validated manual dual-anchor clip
-  `untouched_base_none_pretrainedseq_dualanchor_...` (`overall MAE=0.0`,
-  `per-frame MAE=0.0`). Prediction is still future-only and starts immediately
-  at generated `f0`, but `f0-f7` keep the plate, fork, and gripper
-  recognizable, stay out of the catastrophic blue/purple collapse family, and
-  only retain the milder darker cool tint plus soft late ghosting from the
-  validated dual-anchor branch. There were no held-out clips. The saved summary
-  metadata still reports the legacy `gray` / `none` values, but that is now
-  only a reporting mismatch, not a model-path mismatch.
-- The first bounded no-action training continuation attempt from the untouched
-  parent never reached checkpointing or video export. The first failure stage
-  was startup train-step preparation: training still treated the repaired
-  prompt-free none tokens as if they were horizon-aligned action tokens and
-  raised `ValueError: action_tokens time length must match z_future_video latent
-  horizon`. That training-path mismatch is now fixed, so global empty-prompt
-  token sequences are kept intact across teacher-forced chunks instead of being
-  sliced like actions.
-- After the training-path token fix, the next blocker was startup plumbing, not
-  model behavior: the original command still failed in auto batch-size probing
-  and then on resume optimizer-state mismatch. A cheap local reproduction now
-  shows the repaired training entrypoint can complete a real `max_steps=0`
-  startup pass from the untouched checkpoint when run with `batch_size=1`,
-  `--no-auto-batch-size`, and `--gradient-checkpointing`, while allowing a
-  fresh optimizer fallback when the saved optimizer parameter groups no longer
-  match the current module layout.
-- The first startup-safe bounded continuation still never reached checkpointing
-  or video export. This time the failure moved later: the run got through model
-  load, chunk preparation, and resume setup, then died on the first optimizer
-  step when `AdamW` tried to allocate moment buffers
-  (`torch.OutOfMemoryError` during `exp_avg_sq` initialization). There were no
-  held-out clips because no evals ran. The key comparison is now configuration,
-  not model behavior: both the untouched parent checkpoint and the strongest
-  prompt-free full-backbone reference (`step_0000350`) were trained with
-  `optimizer_name=adafactor`, `batch_size=1`, and `gradient_checkpointing=true`
-  on the same `224x128` / `9+8` geometry. The failed bounded continuation used
-  the current default `AdamW`, so the blocker is optimizer-state memory rather
-  than evidence that the repaired none contract regresses under training.
-- The Adafactor rerun answered the main training question positively. The
-  bounded no-action full-backbone continuation reached both `step_0000200` and
-  `step_0000400`, and both operator-slice evals stayed in the safe visual
-  family: future-only clips, motion starting immediately at generated `f0`,
-  plate/fork/gripper recognizable through `f7`, no return to the catastrophic
-  blue/purple collapse family, and no held-out clips. `step_0000200` is the
-  better motion-first checkpoint of that saved pair: it remains undercommitted,
-  but the arm-crop clip shows slightly more late-horizon movement and less
-  early freezing than `step_0000400` (`late_motion_ratio≈0.666` vs `0.432`,
-  `total_motion_ratio≈0.838` vs `0.611`). `step_0000400` is slightly cleaner on
-  framewise fidelity (`mean MAE≈8.20` vs `8.51`, `generated_temporal_mae≈1.58`
-  vs `2.03`) but looks more frozen.
+  `future_latent_residual_mode=last_context_frame`), the untouched parent was
+  the first prompt-free base branch to stay out of the catastrophic blue/purple
+  collapse family on the fixed operator slice.
+- Both single-anchor simplifications regressed visibly on the untouched parent.
+  Control-fill-only turned the arm/fork region into a bright blue overexposed
+  blob by `f1-f7`; residual-only was even worse and failed from `f0` with
+  blue/purple smear and unreadable arm-crop blobs. That neighborhood is
+  exhausted.
+- The first startup-safe no-action continuation attempts exposed training-path
+  blockers, not model-quality blockers: none tokens were still being treated as
+  horizon-aligned action tokens, resume optimizer state could mismatch the
+  current module layout, and `AdamW` moment buffers OOMed at `batch_size=1`.
+  The accepted fixes are now in the shared worktree and the fit-proven training
+  profile is `Adafactor`, `batch_size=1`, `--no-auto-batch-size`, and
+  `--gradient-checkpointing`.
+- The first successful bounded no-action continuation under the repaired none
+  contract reached `step_0000200` and `step_0000400`. Both stayed in the safe
+  visual family. `step_0000200` had better motion-first behavior than the saved
+  `step_0000400`, which looked cleaner but more frozen.
 - The narrow resume-from-`step_0000200` recovery run to `max_steps=300`
-  succeeded through training and saved both `step_0000250` and `step_0000300`.
-  The long-command `returncode=1` came only from its post-run comparison helper,
-  which incorrectly assumed the new eval exports would still be future-only `8`
-  frames. Under the current eval path, both checkpoints export full-window
-  `17`-frame clips again (`f0-f8` copied context, visible prediction from
-  `f9-f16`), so future-tail comparisons must slice candidate frames `9:17`
-  against the older future-only zero-step and `step_0000200` references.
+  succeeded through training and saved `step_0000250` and `step_0000300`. The
+  long-command `returncode=1` came only from a post-run comparison helper that
+  incorrectly assumed future-only `8`-frame exports.
 - `step_0000250` is plausible on all `17` frames and keeps the scene coherent:
   `f0-f8` are near-exact copies, visible motion starts at `f9`, and `f9-f16`
   keep the plate, fork, and gripper recognizable with mild blur/ghosting and a
   small inward fork drift, but the late horizon is still only `misaligned`
   (`late_motion_ratio≈0.741`, `profile_correlation≈0.542`,
   `mean MAE≈6.62`, `generated_temporal_mae≈2.33`) and still misses contact.
-- `step_0000300` is the best checkpoint in this branch so far by
-  motion-first ranking. It is also plausible on all `17` frames, still copies
-  `f0-f8`, and visible future motion begins at `f9`. From `f9-f16`, the
-  fork/gripper region stays recognizable and more committed than `step_0000250`
-  with no return to the blue/purple collapse family; the tradeoff is mild late
-  bright bloom/ghosting around the gripper in the arm crop, but the motion
-  report finally turns `good` (`late_motion_ratio≈0.894`,
-  `profile_correlation≈0.708`, `mean MAE≈5.06`,
-  `generated_temporal_mae≈2.14`). There were no held-out clips in either
-  resume-eval pass.
+- `step_0000300` is the best checkpoint in this branch so far by motion-first
+  ranking. It is plausible on all `17` frames, still copies `f0-f8`, and
+  visible future motion begins at `f9`. From `f9-f16`, the fork/gripper region
+  stays recognizable and more committed than `step_0000250`, with no return to
+  the blue/purple collapse family; the tradeoff is mild late bright
+  bloom/ghosting around the gripper in the arm crop. The motion report finally
+  turns `good` (`late_motion_ratio≈0.894`, `profile_correlation≈0.708`,
+  `mean MAE≈5.06`, `generated_temporal_mae≈2.14`). There were no held-out
+  clips in either resume-eval pass.
+- Shape-aware diffs back the visual ranking: `step_0000300` is much closer to
+  the earlier good-motion `step_0000200` future tail than `step_0000250` is
+  (`overall MAE≈4.96` vs `≈10.49`). The older saved `step_0000400` remains the
+  more frozen endpoint of this same training family.
 
 ## Active Question
-- With the repaired none contract now confirmed through real training and
-  `step_0000300` currently best on motion-first ranking, is there a better
-  checkpoint between `step_0000300` and the already-saved, more-frozen
-  `step_0000400`, or has this branch already peaked at `300`?
+- Is there a better checkpoint between the current best `step_0000300` and the
+  older, more frozen `step_0000400`, or has this branch already peaked at
+  `300`?
 
 ## Current Decision
-- Keep the validated code change that upgrades only untouched pretrained none
-  checkpoints (`max_steps == 0` in checkpoint metadata) from the legacy
-  `gray`/`none` contract to the validated dual-anchor contract while leaving
-  trained none checkpoints alone. The implementation lives in
-  `src/world_model/models/wan_vace_factory.py`, targeted validation passed with
-  `76` tests across `tests/test_wan_vace_factory.py`,
-  `tests/test_sweep_local_repo_resolutions.py`, and
-  `tests/test_infer_world_model_wan_vace.py`, and the plain no-override
-  operator-slice eval now confirms that the default reaches the real
-  checkpoint-eval path.
-- The missing-checkpoint question between `200` and `300` is answered:
-  `step_0000300` beats `step_0000250` on motion-first grounds while also
-  improving plausibility and framewise MAE, so do not spend more time inside
-  the `200 -> 300` recovery neighborhood.
-- The next controller pass should spend the long-run budget on one final narrow
-  checkpoint-selection run inside the same repaired none-training branch:
-  resume from the validated `step_0000300` checkpoint under the same Adafactor
-  / `batch_size=1` / gradient-checkpointed settings, cap at `max_steps=350`,
-  save `step_0000350`, and evaluate that checkpoint on the fixed operator slice
-  with the same full-window export path. The distinct hypothesis is that
-  `step_0000350` may keep `step_0000300`'s stronger late-horizon fork/gripper
-  motion while shaving off some of the mild late bloom/ghosting before the
-  branch freezes into the older `step_0000400` behavior.
-- Rank the result by:
+- The active long command is the right next spend. Keep the same repaired none
+  contract and same fit-proven Adafactor / `batch_size=1` /
+  gradient-checkpointed settings, resume from `step_0000300`, cap at
+  `max_steps=350`, save `step_0000350`, and evaluate that checkpoint on the
+  fixed operator slice.
+- Rank `step_0000350` by:
   visual inspection first,
-  whether the future horizon stays out of the catastrophic blue/purple collapse
-  family,
-  whether the fork/gripper region stays recognizable and motion remains at
-  least as committed as `step_0000300`,
-  whether the darker cool tint and late ghosting shrink relative to
-  `step_0000300`,
+  whether the future horizon stays out of the blue/purple collapse family,
+  whether the fork/gripper motion stays at least as committed as `step_0000300`,
+  whether the mild late bloom/ghosting shrinks relative to `step_0000300`,
   and only then scalar MAE.
 
 ## Not Needed Now
 - Do not resume action-conditioned branches until the prompt-free base path is
   visually acceptable.
-- Do not spend time on prompt-conditioned branches; they answered earlier
-  diagnosis questions but are off-policy for the target model.
-- Do not expand beyond `episode_index=1`, `start_frame=60`.
-- Do not treat the trained `step_0000350` checkpoint as the active parent for
-  this stage; it is only the quality reference.
-- Do not rerun the older zero-token, summary-token, control-fill-only,
-  residual-only, manual-dual-anchor, or plain-default-dual-anchor zero-step
-  branches unless a later checkpoint creates a contradiction that needs a
-  direct comparison.
-- Do not spend more long-run budget recovering or reranking `step_0000250` /
-  `step_0000300`; that comparison is now resolved in favor of `step_0000300`.
-- Do not spend time fixing the saved summary metadata mismatch before the first
-  bounded no-action training continuation is answered; the model-path question
-  is already resolved.
-- Do not spend time shrinking or redesigning the 512-token empty-prompt
-  sequence before the startup-safe training continuation is answered; that is
-  only needed if the bounded run still fails or regresses.
-- Do not do broader repository exploration before the first bounded untouched-
-  parent training continuation is answered; the unresolved question is already
-  concrete.
+- Do not spend long-run budget on prompt-conditioned branches.
+- Do not spend more budget reranking `step_0000250` versus `step_0000300`; that
+  comparison is already resolved in favor of `step_0000300`.
+- Do not revisit the exhausted zero-token, summary-token, control-fill-only, or
+  residual-only zero-step neighborhoods unless a later contradiction appears.
+- Do not treat the trained `fullft_subset8_spread_resume200_lr5e5_step400`
+  `step_0000350` checkpoint as the active parent for this stage; it remains
+  only the quality reference.
 
 ## Kept Code Changes
 - `0456e04`: checkpoint-path local sweeps apply runtime overrides after loading
-  checkpoint metadata, which keeps base-path comparison probes honest.
+  checkpoint metadata.
 - `0348c65`: prompt-free none conditioning stopped using literal zero tokens
-  and began reusing Wan's empty-prompt text embedding instead.
+  and now reuses Wan's empty-prompt embedding.
 - `872de58`: prompt-free none conditioning now uses Wan's full empty-prompt
-  token sequence in the local checkpoint-eval path, and none-mode rollout
-  treats that sequence as global conditioning instead of chunk slicing.
+  token sequence and treats it as global conditioning instead of chunk slicing.
 - `7896373`: untouched pretrained none checkpoints (`max_steps == 0`) now
-  default to the validated dual-anchor contract in the runtime factory, while
-  trained none checkpoints keep their saved contract.
+  default to the validated dual-anchor contract, while trained none checkpoints
+  keep their saved contract.
 - `validated in worktree`: training-side chunkwise flow matching now accepts
-  global prompt-free none-conditioning token sequences instead of forcing them
-  to match the latent future horizon, and `_resume_training_state` now falls
-  back to a fresh optimizer when saved optimizer parameter groups do not match
-  the current module layout. Targeted pytest passes (`97 passed`) and the exact
-  `max_steps=0` startup reproduction now completes with the startup-safe
-  settings (`batch_size=1`, `--no-auto-batch-size`,
-  `--gradient-checkpointing`).
+  global prompt-free none-conditioning token sequences, and
+  `_resume_training_state` can fall back to a fresh optimizer when saved
+  optimizer parameter groups do not match the current module layout.
