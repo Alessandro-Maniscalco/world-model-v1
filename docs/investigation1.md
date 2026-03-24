@@ -95,6 +95,20 @@ acceptable.
   on the same `224x128` / `9+8` geometry. The failed bounded continuation used
   the current default `AdamW`, so the blocker is optimizer-state memory rather
   than evidence that the repaired none contract regresses under training.
+- The Adafactor rerun answered the main training question positively. The
+  bounded no-action full-backbone continuation reached both `step_0000200` and
+  `step_0000400`, and both operator-slice evals stayed in the safe visual
+  family: future-only clips, motion starting immediately at generated `f0`,
+  plate/fork/gripper recognizable through `f7`, no return to the catastrophic
+  blue/purple collapse family, and no held-out clips. `step_0000200` is the
+  better motion-first checkpoint so far: it remains undercommitted, but the
+  arm-crop clip shows slightly more late-horizon movement and less early
+  freezing than `step_0000400` (`late_motion_ratio≈0.666` vs `0.432`,
+  `total_motion_ratio≈0.838` vs `0.611`). `step_0000400` is slightly cleaner on
+  framewise fidelity (`mean MAE≈8.20` vs `8.51`, `generated_temporal_mae≈1.58`
+  vs `2.03`) but looks more frozen. Training metrics explain the mismatch: the
+  best saved validation point is not `200` or `400`, but `step_0000300`
+  (`val_loss≈0.0328`), which was never checkpointed.
 
 ## Active Question
 - With the prompt-free none contract now repaired and reaching the real
@@ -116,21 +130,14 @@ acceptable.
   checkpoint-eval path.
 - The next controller pass should spend the long-run budget on one bounded
   no-action base-training continuation from the untouched pretrained none
-  parent, not on more zero-step architecture ablations. Keep the fixed geometry
-  (`224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`), keep
-  `conditioning_mode=none`, keep actions out of the run, cap the continuation
-  at `400` steps, and then evaluate the resulting checkpoints on the fixed
-  operator slice. Use the repaired none contract explicitly
-  (`future_control_fill_mode=last_context_frame`,
-  `future_latent_residual_mode=last_context_frame`) together with the
-  startup-safe settings that now pass local validation:
-  `batch_size=1`, `--no-auto-batch-size`, and `--gradient-checkpointing`. Match
-  the optimizer family that already fit this geometry in prior successful
-  prompt-free runs: use `optimizer_name=adafactor` and the lower
-  `lr=5e-05` instead of the current `AdamW` default. The question is whether
-  the repaired prompt-free base contract can now learn useful future motion
-  without reopening the blue/purple failure family once the optimizer-memory
-  mismatch is removed.
+  parent, but it is now a narrow checkpoint-recovery run instead of a fresh
+  architecture or optimizer experiment. Resume from the validated
+  `step_0000200` Adafactor checkpoint under the same repaired none contract and
+  same fit-proven settings, cap at `max_steps=300`, save checkpoints every `50`
+  steps, and evaluate `step_0000250` and `step_0000300` on the fixed operator
+  slice. The unresolved question is whether the unsaved `step_0000300` valley
+  combines `step_0000200`'s better motion with `step_0000400`'s slightly better
+  frame fidelity while staying out of the blue/purple failure family.
 - Rank the result by:
   visual inspection first,
   whether the future horizon stays out of the catastrophic blue/purple collapse
@@ -151,8 +158,8 @@ acceptable.
   this stage; it is only the quality reference.
 - Do not rerun the older zero-token, summary-token, control-fill-only,
   residual-only, manual-dual-anchor, or plain-default-dual-anchor zero-step
-  branches unless the first bounded training continuation creates a
-  contradiction that needs a direct comparison.
+  branches unless the resumed `step_0000250` / `step_0000300` continuation
+  creates a contradiction that needs a direct comparison.
 - Do not spend time fixing the saved summary metadata mismatch before the first
   bounded no-action training continuation is answered; the model-path question
   is already resolved.
