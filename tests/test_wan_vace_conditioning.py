@@ -7,6 +7,7 @@ import torch
 
 from world_model.models.wan_vace_conditioning import (
     ActionTokenEncoder,
+    NullConditioningEncoder,
     build_vace_control_tensor,
 )
 
@@ -17,11 +18,59 @@ def test_action_token_encoder_projects_actions_to_wan_text_width() -> None:
     tokens = encoder(torch.randn(2, 4, 7))
 
     assert tokens.shape == (2, 4, 4096)
+    assert torch.count_nonzero(tokens) == 0
+
+
+def test_action_token_encoder_starts_as_noop_by_default() -> None:
+    """Keep fresh action conditioning at an exact zero-token no-op by default."""
+    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    tokens = encoder(torch.randn(2, 4, 7))
+
+    assert torch.equal(tokens, torch.zeros_like(tokens))
+
+
+def test_action_token_encoder_can_disable_zero_init_output() -> None:
+    """Allow explicit opt-out from the no-op initialization for ablations and legacy math tests."""
+    encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        output_zero_init=False,
+    )
+    tokens = encoder(torch.randn(2, 4, 7))
+
+    assert torch.count_nonzero(tokens) > 0
+
+
+def test_null_conditioning_encoder_defaults_to_zero_tokens() -> None:
+    """Keep legacy no-conditioning behavior available as the explicit zero-token fallback."""
+    encoder = NullConditioningEncoder(hidden_dim=6)
+    tokens = encoder(torch.randn(2, 4, 3))
+
+    assert tokens.shape == (2, 4, 6)
+    assert torch.equal(tokens, torch.zeros_like(tokens))
+
+
+def test_null_conditioning_encoder_can_repeat_a_preinitialized_base_token() -> None:
+    """Allow prompt-free base mode to reuse one pretrained-compatible null token at every future step."""
+    base_token = torch.arange(6, dtype=torch.float32)
+    encoder = NullConditioningEncoder(hidden_dim=6, base_token=base_token, trainable=True)
+    tokens = encoder(torch.randn(2, 4, 3))
+
+    assert tokens.shape == (2, 4, 6)
+    assert torch.allclose(tokens[0, 0], base_token)
+    assert torch.allclose(tokens[1, 3], base_token)
 
 
 def test_action_token_encoder_supports_two_layer_mlp_projection() -> None:
     """Use the optional hidden MLP width when a deeper action encoder is requested."""
-    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, mlp_dim=11, input_layernorm=False)
+    encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        mlp_dim=11,
+        input_layernorm=False,
+        output_zero_init=False,
+    )
     tokens = encoder(torch.randn(2, 4, 7))
 
     assert tokens.shape == (2, 4, 32)
@@ -31,7 +80,14 @@ def test_action_token_encoder_supports_two_layer_mlp_projection() -> None:
 
 def test_action_token_encoder_supports_residual_mlp_projection() -> None:
     """Allow the optional action MLP to augment the legacy linear path residually."""
-    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, mlp_dim=11, mlp_residual=True, input_layernorm=False)
+    encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        mlp_dim=11,
+        mlp_residual=True,
+        input_layernorm=False,
+        output_zero_init=False,
+    )
     tokens = encoder(torch.randn(2, 4, 7))
 
     assert tokens.shape == (2, 4, 32)
@@ -46,15 +102,17 @@ def test_action_token_encoder_residual_mlp_preserves_linear_path_when_zeroed() -
     torch.manual_seed(0)
     actions = torch.randn(2, 4, 7)
 
-    linear_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    linear_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     residual_encoder = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         mlp_dim=11,
         mlp_residual=True,
         input_layernorm=False,
+        output_zero_init=False,
     )
     residual_encoder.net.load_state_dict(linear_encoder.net.state_dict())
+    residual_encoder.output_proj.load_state_dict(linear_encoder.output_proj.state_dict())
     for parameter in residual_encoder.residual_net.parameters():
         parameter.data.zero_()
 
@@ -67,8 +125,13 @@ def test_action_token_encoder_scale_invariance_depends_on_input_layernorm() -> N
     actions = torch.randn(2, 4, 7)
     scaled = actions * 1.5
 
-    normalized_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=True)
-    unnormalized_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    normalized_encoder = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=True, output_zero_init=False)
+    unnormalized_encoder = ActionTokenEncoder(
+        action_dim=7,
+        hidden_dim=32,
+        input_layernorm=False,
+        output_zero_init=False,
+    )
     unnormalized_encoder.load_state_dict(normalized_encoder.state_dict(), strict=False)
 
     normalized_tokens = normalized_encoder(actions)
@@ -85,12 +148,13 @@ def test_action_token_encoder_token_scale_multiplies_projected_tokens() -> None:
     torch.manual_seed(0)
     actions = torch.randn(2, 4, 7)
 
-    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     scaled = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         input_layernorm=False,
         token_scale=2.5,
+        output_zero_init=False,
     )
     scaled.load_state_dict(baseline.state_dict(), strict=False)
 
@@ -104,6 +168,7 @@ def test_action_token_encoder_can_predict_future_latent_summaries() -> None:
         hidden_dim=32,
         latent_summary_channels=5,
         input_layernorm=False,
+        output_zero_init=False,
     )
     tokens = encoder(torch.randn(2, 4, 7))
     predicted = encoder.predict_future_latent_summary(tokens)
@@ -120,12 +185,13 @@ def test_action_token_encoder_temporal_difference_scale_is_noop_for_constant_act
     torch.manual_seed(0)
     actions = torch.ones(2, 4, 7)
 
-    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     temporal = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         input_layernorm=False,
         temporal_difference_scale=0.75,
+        output_zero_init=False,
     )
     temporal.load_state_dict(baseline.state_dict(), strict=False)
 
@@ -137,12 +203,13 @@ def test_action_token_encoder_temporal_difference_scale_changes_varying_sequence
     torch.manual_seed(0)
     actions = torch.randn(2, 4, 7)
 
-    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     temporal = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         input_layernorm=False,
         temporal_difference_scale=0.75,
+        output_zero_init=False,
     )
     temporal.load_state_dict(baseline.state_dict(), strict=False)
 
@@ -154,18 +221,24 @@ def test_action_token_encoder_temporal_mixer_is_noop_until_trained() -> None:
     torch.manual_seed(0)
     actions = torch.randn(2, 4, 7)
 
-    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     temporal = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         input_layernorm=False,
         temporal_mixer_kernel_size=3,
         temporal_mixer_scale=0.5,
+        output_zero_init=False,
     )
     temporal.load_state_dict(baseline.state_dict(), strict=False)
 
     assert torch.allclose(baseline(actions), temporal(actions))
-    assert temporal.allowed_missing_state_dict_keys() == {"temporal_mixer.weight", "temporal_mixer.bias"}
+    assert temporal.allowed_missing_state_dict_keys() == {
+        "output_proj.weight",
+        "output_proj.bias",
+        "temporal_mixer.weight",
+        "temporal_mixer.bias",
+    }
 
 
 def test_action_token_encoder_order_conditioning_is_noop_until_trained() -> None:
@@ -173,12 +246,13 @@ def test_action_token_encoder_order_conditioning_is_noop_until_trained() -> None
     torch.manual_seed(0)
     actions = torch.randn(2, 4, 7)
 
-    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False)
+    baseline = ActionTokenEncoder(action_dim=7, hidden_dim=32, input_layernorm=False, output_zero_init=False)
     ordered = ActionTokenEncoder(
         action_dim=7,
         hidden_dim=32,
         input_layernorm=False,
         order_conditioning=True,
+        output_zero_init=False,
     )
     ordered.load_state_dict(baseline.state_dict(), strict=False)
 
@@ -205,6 +279,7 @@ def test_action_token_encoder_order_conditioning_can_distinguish_permuted_plans(
         hidden_dim=4,
         input_layernorm=False,
         order_conditioning=True,
+        output_zero_init=False,
     )
     encoder.net[1].weight.data.fill_(1.0)
     encoder.net[1].bias.data.zero_()
@@ -243,6 +318,16 @@ def test_action_token_encoder_rejects_negative_token_scale() -> None:
     """Reject negative post-projection token gains."""
     with pytest.raises(ValueError, match="token_scale must be non-negative"):
         ActionTokenEncoder(action_dim=7, hidden_dim=32, token_scale=-0.1)
+
+
+def test_action_token_encoder_restores_legacy_output_projection_to_identity() -> None:
+    """Recover pre-zero-init action behavior when older checkpoints omit the output projection."""
+    encoder = ActionTokenEncoder(action_dim=7, hidden_dim=4, input_layernorm=False)
+
+    encoder.restore_legacy_output_projection()
+
+    assert torch.allclose(encoder.output_proj.weight, torch.eye(4))
+    assert torch.allclose(encoder.output_proj.bias, torch.zeros(4))
 
 
 def test_action_token_encoder_rejects_invalid_temporal_mixer_config() -> None:

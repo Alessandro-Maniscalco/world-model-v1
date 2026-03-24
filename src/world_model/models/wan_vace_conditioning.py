@@ -24,6 +24,7 @@ class ActionTokenEncoder(nn.Module):
         temporal_mixer_kernel_size: int = 0,
         temporal_mixer_scale: float = 0.0,
         token_scale: float = 1.0,
+        output_zero_init: bool = True,
     ) -> None:
         """Initialize an action-token projection stack."""
         super().__init__()
@@ -76,6 +77,7 @@ class ActionTokenEncoder(nn.Module):
         self.temporal_mixer_kernel_size = int(temporal_mixer_kernel_size)
         self.temporal_mixer_scale = float(temporal_mixer_scale)
         self.token_scale = float(token_scale)
+        self.output_zero_init = bool(output_zero_init)
         input_norm = nn.LayerNorm(self.action_dim) if self.input_layernorm else nn.Identity()
 
         if self.mlp_residual and mlp_dim is None:
@@ -139,6 +141,11 @@ class ActionTokenEncoder(nn.Module):
             nn.init.zeros_(self.temporal_mixer.weight)
             if self.temporal_mixer.bias is not None:
                 nn.init.zeros_(self.temporal_mixer.bias)
+        self.output_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+        if self.output_zero_init:
+            nn.init.zeros_(self.output_proj.weight)
+            if self.output_proj.bias is not None:
+                nn.init.zeros_(self.output_proj.bias)
         self.latent_summary_head: nn.Linear | None = None
         if self.latent_summary_channels > 0:
             self.latent_summary_head = nn.Linear(self.hidden_dim, self.latent_summary_channels)
@@ -153,11 +160,11 @@ class ActionTokenEncoder(nn.Module):
             )
         tokens = self._project_tokens(a_plan)
         if self.temporal_difference_scale <= 0.0 or a_plan.shape[1] <= 1:
-            return self._apply_output_scale(self._apply_temporal_mixer(tokens))
+            return self._apply_output_scale(self._project_output(self._apply_temporal_mixer(tokens)))
         delta_source = _build_temporal_differences(a_plan)
         delta_tokens = self._project_tokens(delta_source) - self._project_tokens(torch.zeros_like(delta_source))
         mixed = self._apply_temporal_mixer(tokens + (self.temporal_difference_scale * delta_tokens))
-        return self._apply_output_scale(mixed)
+        return self._apply_output_scale(self._project_output(mixed))
 
     def _project_tokens(self, a_plan: torch.Tensor) -> torch.Tensor:
         """Project one action tensor through the configured base and residual paths."""
@@ -179,11 +186,21 @@ class ActionTokenEncoder(nn.Module):
         mixed = self.temporal_mixer(tokens.transpose(1, 2)).transpose(1, 2)
         return tokens + (self.temporal_mixer_scale * mixed)
 
+    def _project_output(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Map internal action features into the Wan cross-attention token space."""
+        return self.output_proj(tokens)
+
     def _apply_output_scale(self, tokens: torch.Tensor) -> torch.Tensor:
         """Scale projected action tokens before they enter Wan cross-attention."""
         if self.token_scale == 1.0:
             return tokens
         return tokens * self.token_scale
+
+    def restore_legacy_output_projection(self) -> None:
+        """Recover pre-zero-init behavior for checkpoints saved before `output_proj` existed."""
+        nn.init.eye_(self.output_proj.weight)
+        if self.output_proj.bias is not None:
+            nn.init.zeros_(self.output_proj.bias)
 
     def predict_future_latent_summary(self, tokens: torch.Tensor) -> torch.Tensor:
         """Predict per-step latent summaries `[B,C,T]` from projected action tokens."""
@@ -199,7 +216,10 @@ class ActionTokenEncoder(nn.Module):
 
     def allowed_missing_state_dict_keys(self) -> set[str]:
         """List optional state-dict keys that older checkpoints may legitimately omit."""
-        missing: set[str] = set()
+        missing: set[str] = {
+            "output_proj.weight",
+            "output_proj.bias",
+        }
         if self.order_net is not None:
             missing.update(
                 {
@@ -227,21 +247,46 @@ class ActionTokenEncoder(nn.Module):
 
 
 class NullConditioningEncoder(nn.Module):
-    """Emit constant zero cross-attention tokens while ignoring conditioning inputs."""
+    """Emit repeated null-conditioning tokens while ignoring conditioning inputs."""
 
-    def __init__(self, hidden_dim: int) -> None:
-        """Store the output token width used by the Wan backbone."""
+    def __init__(
+        self,
+        hidden_dim: int,
+        *,
+        base_token: torch.Tensor | None = None,
+        trainable: bool = False,
+    ) -> None:
+        """Store one reusable null-conditioning token in the Wan text space."""
         super().__init__()
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         self.hidden_dim = int(hidden_dim)
+        if base_token is None:
+            token = torch.zeros(self.hidden_dim, dtype=torch.float32)
+        else:
+            if base_token.ndim not in (1, 2):
+                raise ValueError(
+                    "base_token must be shaped [D] or [1,D], "
+                    f"got {tuple(base_token.shape)}"
+                )
+            if base_token.shape[-1] != self.hidden_dim:
+                raise ValueError(
+                    f"base_token width {base_token.shape[-1]} does not match hidden_dim={self.hidden_dim}"
+                )
+            token = base_token.reshape(self.hidden_dim).detach().to(dtype=torch.float32)
+
+        if trainable:
+            self.base_token = nn.Parameter(token.clone())
+        else:
+            self.register_buffer("base_token", token.clone(), persistent=False)
 
     def forward(self, token_source: torch.Tensor) -> torch.Tensor:
-        """Return `[B,T,D]` zero tokens using only batch/time from `token_source`."""
+        """Return `[B,T,D]` repeated null-conditioning tokens."""
         if token_source.ndim != 3:
             raise ValueError(f"token_source must be [B,T,F], got {tuple(token_source.shape)}")
         batch_size, steps = token_source.shape[:2]
-        return token_source.new_zeros(batch_size, steps, self.hidden_dim)
+        token = self.base_token.to(device=token_source.device, dtype=token_source.dtype)
+        return token.view(1, 1, self.hidden_dim).expand(batch_size, steps, self.hidden_dim)
 
 
 def build_vace_control_tensor(

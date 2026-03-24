@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from diffusers.pipelines.wan.pipeline_wan_vace import prompt_clean
+from transformers import AutoTokenizer, UMT5EncoderModel
 
 from world_model.data.schema import PreparedPackedBatch
 from world_model.models.wan_vace_conditioning import (
@@ -15,6 +17,10 @@ from world_model.models.wan_vace_conditioning import (
 )
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 from world_model.vendor.wan import WanVACETransformer3DModel
+
+
+_NONE_CONDITIONING_TOKEN_CACHE: dict[tuple[str, int], torch.Tensor] = {}
+_NONE_CONDITIONING_MAX_SEQUENCE_LENGTH = 512
 
 
 def build_wan_vace_model_from_config(cfg: Any, prepared_batch: PreparedPackedBatch) -> WanVACEWorldModel:
@@ -83,7 +89,13 @@ def build_conditioning_encoder_for_model(
 ) -> ActionTokenEncoder | NullConditioningEncoder:
     """Build the configured cross-attention encoder matching the Wan text width."""
     if getattr(cfg, "conditioning_mode", "none") != "action":
-        return NullConditioningEncoder(hidden_dim=int(model.backbone.config.text_dim))
+        hidden_dim = int(model.backbone.config.text_dim)
+        base_token = _build_pretrained_none_conditioning_token(cfg=cfg, hidden_dim=hidden_dim)
+        return NullConditioningEncoder(
+            hidden_dim=hidden_dim,
+            base_token=base_token,
+            trainable=base_token is not None,
+        )
     return ActionTokenEncoder(
         action_dim=int(prepared_batch.a_plan.shape[-1]),
         hidden_dim=int(model.backbone.config.text_dim),
@@ -100,6 +112,7 @@ def build_conditioning_encoder_for_model(
         temporal_mixer_kernel_size=int(getattr(cfg, "action_temporal_mixer_kernel_size", 0) or 0),
         temporal_mixer_scale=float(getattr(cfg, "action_temporal_mixer_scale", 0.0)),
         token_scale=float(getattr(cfg, "action_token_scale", 1.0)),
+        output_zero_init=bool(getattr(cfg, "action_output_zero_init", True)),
     )
 
 
@@ -128,6 +141,12 @@ def apply_wan_vace_checkpoint_overlay(
     if not isinstance(action_state, dict):
         raise ValueError("Checkpoint missing action_encoder_state_dict")
     model.load_state_dict(model_state)
+    if _checkpoint_uses_fresh_action_encoder(
+        checkpoint=checkpoint,
+        action_encoder=action_encoder,
+        action_state=action_state,
+    ):
+        return
     _load_action_encoder_state_dict(action_encoder=action_encoder, action_state=action_state)
 
 
@@ -154,6 +173,26 @@ def build_wan_vace_runtime_modules(
     return model, action_encoder
 
 
+def _checkpoint_uses_fresh_action_encoder(
+    *,
+    checkpoint: dict[str, object],
+    action_encoder: ActionTokenEncoder | NullConditioningEncoder,
+    action_state: dict[str, torch.Tensor],
+) -> bool:
+    """Keep a fresh zero-init action encoder when probing action mode from a none checkpoint."""
+    if isinstance(action_encoder, NullConditioningEncoder):
+        return False
+    if action_state:
+        return False
+    extra_state = checkpoint.get("extra_state")
+    if not isinstance(extra_state, dict):
+        return False
+    saved_cfg = extra_state.get("config")
+    if not isinstance(saved_cfg, dict):
+        return False
+    return str(saved_cfg.get("conditioning_mode", "none")) == "none"
+
+
 def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> int:
     """Compute the `[inactive; reactive; mask]` control-stream channel count."""
     return (2 * int(latent_channels)) + int(mask_channels)
@@ -162,6 +201,59 @@ def _expected_control_channels(*, latent_channels: int, mask_channels: int) -> i
 def _offline_mode_enabled() -> bool:
     """Mirror Hugging Face offline env handling for local-cache-only loading."""
     return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+@torch.no_grad()
+def _build_pretrained_none_conditioning_token(*, cfg: Any, hidden_dim: int) -> torch.Tensor | None:
+    """Initialize prompt-free null conditioning from Wan's empty-prompt text embedding."""
+    if getattr(cfg, "conditioning_mode", "none") != "none":
+        return None
+    if not bool(getattr(cfg, "load_pretrained_backbone", False)):
+        return None
+    model_id = str(getattr(cfg, "wan_vace_model_id", "") or "")
+    if not model_id:
+        return None
+
+    cache_key = (model_id, int(hidden_dim))
+    cached = _NONE_CONDITIONING_TOKEN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.clone()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        subfolder="tokenizer",
+        local_files_only=_offline_mode_enabled(),
+    )
+    text_encoder = UMT5EncoderModel.from_pretrained(
+        model_id,
+        subfolder="text_encoder",
+        local_files_only=_offline_mode_enabled(),
+    )
+    text_encoder.eval()
+
+    text_inputs = tokenizer(
+        [prompt_clean("")],
+        padding="max_length",
+        max_length=_NONE_CONDITIONING_MAX_SEQUENCE_LENGTH,
+        truncation=True,
+        add_special_tokens=True,
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    attention_mask = text_inputs.attention_mask.to("cpu")
+    seq_len = int(attention_mask.gt(0).sum(dim=1).long().item())
+    prompt_embeds = text_encoder(
+        text_inputs.input_ids.to("cpu"),
+        attention_mask,
+    ).last_hidden_state.to(device="cpu", dtype=torch.float32)
+    summary_token = prompt_embeds[0, :seq_len].mean(dim=0)
+    if summary_token.shape[0] != hidden_dim:
+        raise ValueError(
+            f"Empty-prompt token width {summary_token.shape[0]} does not match hidden_dim={hidden_dim}"
+        )
+    _NONE_CONDITIONING_TOKEN_CACHE[cache_key] = summary_token.detach().cpu()
+    del text_encoder
+    return _NONE_CONDITIONING_TOKEN_CACHE[cache_key].clone()
 
 
 def _attach_lora_adapters(*, backbone: WanVACETransformer3DModel, cfg: Any) -> None:
@@ -227,6 +319,7 @@ def _merge_runtime_backbone_config(cfg: Any, checkpoint: dict[str, object] | Non
         "action_temporal_mixer_kernel_size",
         "action_temporal_mixer_scale",
         "action_token_scale",
+        "action_output_zero_init",
     )
     updates: dict[str, Any] = {}
     for key in update_keys:
@@ -310,6 +403,7 @@ def _enable_action_added_kv_path(backbone: WanVACETransformer3DModel) -> WanVACE
             "Unexpected missing pretrained key when enabling action added-K/V path: "
             f"{key!r}"
         )
+    _zero_init_new_action_added_kv_modules(backbone=upgraded)
     return upgraded
 
 
@@ -318,6 +412,17 @@ def _enable_action_added_kv_training(*, backbone: WanVACETransformer3DModel) -> 
     for name, parameter in backbone.named_parameters():
         if "condition_embedder.image_embedder" in name or ".add_k_proj." in name or ".add_v_proj." in name:
             parameter.requires_grad = True
+
+
+def _zero_init_new_action_added_kv_modules(*, backbone: WanVACETransformer3DModel) -> None:
+    """Start newly added action-conditioning modules as an exact zero-token no-op."""
+    image_embedder = getattr(getattr(backbone, "condition_embedder", None), "image_embedder", None)
+    if image_embedder is not None:
+        for parameter in image_embedder.parameters():
+            torch.nn.init.zeros_(parameter)
+    for name, parameter in backbone.named_parameters():
+        if ".add_k_proj." in name or ".add_v_proj." in name:
+            torch.nn.init.zeros_(parameter)
 
 
 def _load_action_encoder_state_dict(
@@ -338,4 +443,6 @@ def _load_action_encoder_state_dict(
     disallowed_missing = missing_keys - allowed_missing
     if disallowed_missing:
         raise RuntimeError(f"Missing required action-encoder checkpoint keys: {sorted(disallowed_missing)}")
+    if "output_proj.weight" in missing_keys:
+        action_encoder.restore_legacy_output_projection()
     return bool(missing_keys)

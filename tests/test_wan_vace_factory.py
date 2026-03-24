@@ -17,12 +17,14 @@ from world_model.models.wan_vace_conditioning import (
 )
 from world_model.models.wan_vace_world_model import WanVACEWorldModel
 from world_model.models import wan_vace_factory
+from world_model.vendor.wan import WanVACETransformer3DModel
 
 
 def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch) -> None:
     """Use canonical Diffusers Wan VACE weights by default for train and infer configs."""
     prepared = _make_prepared_batch()
     calls: list[tuple[str, str | None]] = []
+    base_token = torch.linspace(0.1, 3.2, steps=32)
 
     class _FakeBackbone(torch.nn.Module):
         def __init__(self) -> None:
@@ -44,6 +46,11 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
         return _FakeBackbone()
 
     monkeypatch.setattr(wan_vace_factory.WanVACETransformer3DModel, "from_pretrained", _fake_from_pretrained)
+    monkeypatch.setattr(
+        wan_vace_factory,
+        "_build_pretrained_none_conditioning_token",
+        lambda *, cfg, hidden_dim: base_token.clone(),
+    )
 
     assert load_train_config().load_pretrained_backbone is True
     defaults = load_infer_config()
@@ -63,9 +70,38 @@ def test_build_runtime_modules_loads_pretrained_backbone_by_default(monkeypatch)
 
     assert isinstance(model, WanVACEWorldModel)
     assert isinstance(action_encoder, NullConditioningEncoder)
+    tokens = action_encoder(torch.randn(2, 4, 7))
+    assert torch.allclose(tokens[0, 0], base_token)
     assert model.control_black_latents is not None
     assert model.control_gray_latents is not None
     assert calls == [("Wan-AI/Wan2.1-VACE-1.3B-diffusers", "transformer", False)]
+
+
+def test_build_runtime_modules_keeps_zero_null_tokens_without_pretrained_none_token() -> None:
+    """Fall back to literal zero tokens when no pretrained null-token initializer is available."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="none",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, NullConditioningEncoder)
+    assert torch.equal(action_encoder(torch.randn(2, 4, 7)), torch.zeros(2, 4, 16))
 
 
 def test_build_runtime_modules_respects_action_input_layernorm_flag() -> None:
@@ -217,6 +253,34 @@ def test_build_runtime_modules_respects_action_token_scale() -> None:
     assert action_encoder.token_scale == pytest.approx(2.0)
 
 
+def test_build_runtime_modules_respects_action_output_zero_init() -> None:
+    """Propagate the no-op-at-init output projection flag into the runtime encoder."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_output_zero_init=False,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+
+    assert isinstance(action_encoder, ActionTokenEncoder)
+    assert action_encoder.output_zero_init is False
+
+
 def test_build_runtime_modules_builds_action_latent_aux_head_from_cfg() -> None:
     """Restore the optional action-token latent-summary head from runtime config."""
     prepared = _make_prepared_batch()
@@ -336,6 +400,40 @@ def test_build_runtime_modules_enables_action_added_kv_path() -> None:
     assert model.backbone.config.added_kv_proj_dim == 16
 
 
+def test_enable_action_added_kv_path_zero_initializes_new_modules() -> None:
+    """Keep newly introduced added-K/V modules as an exact zero-step no-op."""
+    backbone = WanVACETransformer3DModel(
+        patch_size=(1, 2, 2),
+        num_attention_heads=2,
+        attention_head_dim=8,
+        in_channels=16,
+        out_channels=16,
+        text_dim=16,
+        freq_dim=8,
+        ffn_dim=32,
+        num_layers=2,
+        image_dim=None,
+        added_kv_proj_dim=None,
+        vace_layers=(0, 1),
+        vace_in_channels=36,
+    )
+
+    upgraded = wan_vace_factory._enable_action_added_kv_path(backbone=backbone)
+
+    image_embedder = upgraded.condition_embedder.image_embedder
+    assert image_embedder is not None
+    for parameter in image_embedder.parameters():
+        assert torch.count_nonzero(parameter) == 0
+    add_kv_params = [
+        parameter
+        for name, parameter in upgraded.named_parameters()
+        if ".add_k_proj." in name or ".add_v_proj." in name
+    ]
+    assert add_kv_params
+    for parameter in add_kv_params:
+        assert torch.count_nonzero(parameter) == 0
+
+
 def test_build_runtime_modules_applies_local_checkpoint_overlay() -> None:
     """Overlay local fine-tune weights on top of the Wan VACE runtime modules."""
     prepared = _make_prepared_batch()
@@ -422,6 +520,97 @@ def test_build_runtime_modules_allows_older_action_checkpoint_without_temporal_m
     assert torch.count_nonzero(loaded_action_encoder.temporal_mixer.weight) == 0
 
 
+def test_build_runtime_modules_restores_identity_output_proj_for_legacy_action_checkpoints() -> None:
+    """Recover pre-zero-init action behavior when old checkpoints omit the new output projection."""
+    prepared = _make_prepared_batch()
+    cfg = InferScriptConfig(
+        conditioning_mode="action",
+        action_input_layernorm=False,
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    _, action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+    legacy_action_state = {
+        key: value
+        for key, value in action_encoder.state_dict().items()
+        if not key.startswith("output_proj.")
+    }
+    checkpoint = {
+        "model_state_dict": wan_vace_factory.build_wan_vace_runtime_modules(
+            cfg,
+            prepared,
+            device=torch.device("cpu"),
+            checkpoint=None,
+        )[0].state_dict(),
+        "action_encoder_state_dict": legacy_action_state,
+    }
+
+    _, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=checkpoint,
+    )
+
+    assert isinstance(loaded_action_encoder, ActionTokenEncoder)
+    assert torch.allclose(loaded_action_encoder.output_proj.weight, torch.eye(16))
+    assert torch.allclose(loaded_action_encoder.output_proj.bias, torch.zeros(16))
+
+
+def test_build_runtime_modules_keeps_fresh_action_encoder_when_none_checkpoint_probes_action() -> None:
+    """Allow prompt-free zero-step action probes to keep a fresh zero-init action encoder."""
+    prepared = _make_prepared_batch()
+    none_cfg = InferScriptConfig(
+        conditioning_mode="none",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    action_cfg = replace(none_cfg, conditioning_mode="action")
+    model, _ = wan_vace_factory.build_wan_vace_runtime_modules(
+        none_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=None,
+    )
+    checkpoint = {
+        "model_state_dict": {key: torch.full_like(value, 0.25) for key, value in model.state_dict().items()},
+        "action_encoder_state_dict": {},
+        "extra_state": {"config": {"conditioning_mode": "none"}},
+    }
+
+    loaded_model, loaded_action_encoder = wan_vace_factory.build_wan_vace_runtime_modules(
+        action_cfg,
+        prepared,
+        device=torch.device("cpu"),
+        checkpoint=checkpoint,
+    )
+
+    assert isinstance(loaded_action_encoder, ActionTokenEncoder)
+    first_model_key = next(iter(checkpoint["model_state_dict"]))
+    assert torch.allclose(loaded_model.state_dict()[first_model_key], checkpoint["model_state_dict"][first_model_key])
+    assert torch.count_nonzero(loaded_action_encoder.output_proj.weight) == 0
+    assert torch.count_nonzero(loaded_action_encoder.output_proj.bias) == 0
+
+
 def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypatch) -> None:
     """Load pretrained backbones in local-files-only mode when offline env vars are set."""
     prepared = _make_prepared_batch()
@@ -438,6 +627,11 @@ def test_build_runtime_modules_forwards_offline_mode_to_pretrained_load(monkeypa
         return _FakeBackbone()
 
     monkeypatch.setattr(wan_vace_factory.WanVACETransformer3DModel, "from_pretrained", _fake_from_pretrained)
+    monkeypatch.setattr(
+        wan_vace_factory,
+        "_build_pretrained_none_conditioning_token",
+        lambda *, cfg, hidden_dim: None,
+    )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     wan_vace_factory.build_wan_vace_runtime_modules(
@@ -571,6 +765,6 @@ def _make_prepared_batch() -> PreparedPackedBatch:
         total_latent_steps=6,
         context_latent_steps=2,
         horizon_latent_steps=4,
-        control_black_latents=torch.full((2, 16, 6, 8, 8), -1.0),
+        control_black_latents=torch.zeros((2, 16, 6, 8, 8)),
         control_gray_latents=torch.full((2, 16, 6, 8, 8), 0.5),
     )
