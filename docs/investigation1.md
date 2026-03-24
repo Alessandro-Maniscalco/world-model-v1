@@ -34,33 +34,47 @@ acceptable.
   control defaults that are off-distribution for pretrained Wan/VACE.
 - Correct checkpoint runtime overrides now apply after checkpoint metadata load
   (`0456e04`), so zero-step checkpoint probes are trustworthy.
-- The strongest code-level lever found so far is to stop feeding literal zero
-  text tokens to the prompt-free none path. A real-model smoke check confirmed
-  Wan's empty prompt produces a dense nonzero `4096`-d null token, and the repo
-  now uses that pretrained-compatible null token by default in
-  `conditioning_mode=none`.
-- The two interrupted eval roots
+- Replacing literal zero tokens with a pretrained empty-prompt summary token
+  helped but did not fix the base path. In the validated
+  `untouched_base_none_pretrainednull_dualanchor_...` run, prediction starts
+  immediately at generated `f0` because the artifact is future-only; `f0-f2`
+  keep the plate and fork recognizable with less catastrophic wash than the old
+  zero-token dual-anchor probe, but `f3-f7` still pick up strong blue/yellow
+  color shift, arm-crop ghosting, and missed contact. There were no held-out
+  clips. Plausibility fails on `f3-f7`, and the generated video still sits far
+  from the original none floor (`overall MAE≈41.1`) even though it is closer to
+  the earlier zero-token dual-anchor probe (`overall MAE≈13.45`).
+- The remaining architectural mismatch is now concrete: the repo was still
+  treating `conditioning_mode=none` as chunk-conditioned per-future-step tokens,
+  so the empty prompt was collapsed into one repeated token instead of a global
+  text-token sequence like the pretrained Wan prompt path.
+- The repo now uses Wan's full empty-prompt token sequence for
+  `conditioning_mode=none` in the local checkpoint-eval path instead of a
+  repeated summary token. A real-model smoke check now confirms the
+  null-conditioning tensor shape is `512x4096`, and the runtime encoder emits
+  `1x512x4096` tokens for an 8-step future horizon.
+- The older eval root
   `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
-  and
-  `runs/training_optimizer/eval/untouched_base_none_pretrainednull_dualanchor_224x128_ep1_start60_step0000_operator`
-  currently contain only `eval_stdout.log`. Treat both as unfinished and
+  still contains only `eval_stdout.log`. Treat it as unfinished and
   unvalidated.
 
 ## Active Question
 - Can the prompt-free no-action base path be made visually acceptable by
-  replacing literal zero null-conditioning tokens with a pretrained-compatible
-  empty-prompt token on the untouched parent checkpoint?
+  replacing chunk-conditioned repeated null tokens with Wan's global
+  empty-prompt token sequence on the untouched parent checkpoint?
 
 ## Current Decision
-- Keep the validated code change that initializes prompt-free none conditioning
-  from Wan's empty-prompt text embedding instead of literal zero tokens.
+- Keep the validated code change that makes prompt-free none conditioning use
+  Wan's full empty-prompt token sequence as global conditioning instead of
+  chunk-conditioned repeated tokens.
 - The next controller pass should do only one research loop:
   inspect the interrupted
-  `runs/training_optimizer/eval/untouched_base_none_pretrainednull_dualanchor_224x128_ep1_start60_step0000_operator`
-  directory, validate it if complete, and otherwise rerun that exact operator-
-  only checkpoint eval from scratch. Keep the same dual-anchor overrides so the
-  result is a fair A/B against the earlier zero-token dual-anchor base probe.
-  Do not branch away before answering this question.
+  `runs/training_optimizer/eval/untouched_base_none_pretrainedseq_dualanchor_224x128_ep1_start60_step0000_operator`
+  directory if it exists, and otherwise run that exact operator-only checkpoint
+  eval from scratch. Keep the same dual-anchor overrides so the result is a
+  fair A/B against both the earlier zero-token dual-anchor probe and the newer
+  empty-prompt summary-token probe. Do not branch away before answering this
+  question.
 - Rank the result by:
   visual inspection first,
   whether the first future frame loses the blue/cyan tint,
@@ -81,6 +95,8 @@ acceptable.
 ## Kept Code Changes
 - `0456e04`: checkpoint-path local sweeps apply runtime overrides after loading
   checkpoint metadata, which keeps base-path comparison probes honest.
-- `0348c65`: prompt-free none conditioning now reuses Wan's empty-prompt text
-  embedding instead of literal zero tokens, while the action path keeps its
-  validated zero-init no-op behavior and legacy checkpoint compatibility.
+- `0348c65`: prompt-free none conditioning stopped using literal zero tokens
+  and began reusing Wan's empty-prompt text embedding instead.
+- `872de58`: prompt-free none conditioning now uses Wan's full empty-prompt
+  token sequence in the local checkpoint-eval path, and none-mode rollout
+  treats that sequence as global conditioning instead of chunk slicing.
