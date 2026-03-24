@@ -24,15 +24,9 @@ acceptable.
   It stays coherent through `f16` with mild late soft blur/ghosting and still
   misses contact. Use it only as a reference for what a decent prompt-free base
   looks like, not as the active parent for base-architecture diagnosis.
-- The latest corrected untouched-parent no-action probe is
-  `untouched_base_none_dualanchor_trueoverride_224x128_ep1_start60_step0000_operator`.
-  It is future-only (`8` frames). From the first generated frame (`f0`,
-  corresponding to baseline `f9`), the prediction is already darker and
-  blue/cyan-tinted than the reference. The plate and arm/fork stay faintly
-  recognizable through `f7`, but the whole horizon remains softly blurred,
-  undercommitted, and visibly tinted. The arm-crop clip shows the fork/gripper
-  region surviving structurally but smeared and blue from the start. There were
-  no held-out clips.
+- The old untouched-parent no-action probes are only diagnosis evidence now.
+  They proved the blue collapse is already in the base continuation path; they
+  are not current candidate solutions.
 
 ## Proven Outcomes
 - The current prompt-free `conditioning_mode=none` contract is not neutral:
@@ -40,32 +34,46 @@ acceptable.
   control defaults that are off-distribution for pretrained Wan/VACE.
 - Correct checkpoint runtime overrides now apply after checkpoint metadata load
   (`0456e04`), so zero-step checkpoint probes are trustworthy.
-- Dual anchors alone are not enough on the untouched no-action parent. The
-  corrected dual-anchor run is safer than the old catastrophic floor, but it is
-  still visibly bad from the first future frame and does not count as a working
-  base path.
-- The strongest code-level lever is to stop feeding literal zero text tokens to
-  the prompt-free none path. A real-model smoke check now confirms Wan's empty
-  prompt produces a dense nonzero `4096`-d null token.
+- The strongest code-level lever found so far is to stop feeding literal zero
+  text tokens to the prompt-free none path. A real-model smoke check confirmed
+  Wan's empty prompt produces a dense nonzero `4096`-d null token, and the repo
+  now uses that pretrained-compatible null token by default in
+  `conditioning_mode=none`.
+- The interrupted eval root
+  `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
+  currently contains only `eval_stdout.log`. Treat it as unfinished and
+  unvalidated.
 
 ## Active Question
 - Can the prompt-free no-action base path be made visually acceptable by
   replacing literal zero null-conditioning tokens with a pretrained-compatible
-  empty-prompt token while keeping the same fixed slice and the same dual-anchor
-  future-control contract?
+  empty-prompt token on the untouched parent checkpoint?
 
 ## Current Decision
 - Keep the validated code change that initializes prompt-free none conditioning
   from Wan's empty-prompt text embedding instead of literal zero tokens.
-- Next run:
-  rerun the untouched zero-step `conditioning_mode=none` checkpoint on the
-  fixed operator slice with the same true dual-anchor overrides and the new
-  pretrained null-token path.
+- The next controller pass should do only one research loop:
+  inspect the interrupted
+  `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
+  directory, validate it if complete, and otherwise rerun that exact operator-
+  only checkpoint eval from scratch. Do not branch away before answering this
+  question.
 - Rank the result by:
   visual inspection first,
   whether the first future frame loses the blue/cyan tint,
   whether the fork/gripper region stays sharp and recognizable without ghosting,
   and only then scalar MAE.
+
+## Not Needed Now
+- Do not resume action-conditioned branches until the prompt-free base path is
+  visually acceptable.
+- Do not spend time on prompt-conditioned branches; they answered earlier
+  diagnosis questions but are off-policy for the target model.
+- Do not expand beyond `episode_index=1`, `start_frame=60`.
+- Do not treat the trained `step_0000350` checkpoint as the active parent for
+  this stage; it is only the quality reference.
+- Do not do broader repository exploration before the null-token base eval is
+  validated; the unresolved question is already concrete.
 
 ## Kept Code Changes
 - `0456e04`: checkpoint-path local sweeps apply runtime overrides after loading
