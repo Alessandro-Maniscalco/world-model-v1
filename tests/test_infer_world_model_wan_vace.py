@@ -66,6 +66,8 @@ def test_infer_script_parser_omits_legacy_dit_shape_flags() -> None:
     assert "--chunk-schedule-mode" in option_strings
     assert "--action-order-conditioning" in option_strings
     assert "--action-token-scale" in option_strings
+    assert "--action-output-zero-init" in option_strings
+    assert "--no-action-output-zero-init" in option_strings
     assert "--future-latent-residual-mode" in option_strings
     assert "--action-control-prior-scale" not in option_strings
     assert "--action-control-prior-mode" not in option_strings
@@ -467,6 +469,25 @@ def test_infer_script_restores_action_token_scale_from_checkpoint_defaults() -> 
 
     assert restored.conditioning_mode == "action"
     assert restored.action_token_scale == pytest.approx(2.0)
+
+
+def test_infer_script_restores_action_output_zero_init_from_checkpoint_defaults() -> None:
+    """Reuse saved no-op action-init settings when infer config uses defaults."""
+    infer_script = _load_infer_script_module()
+    cfg = InferScriptConfig()
+    checkpoint = {
+        "extra_state": {
+            "config": {
+                "conditioning_mode": "action",
+                "action_output_zero_init": False,
+            }
+        }
+    }
+
+    restored = infer_script._restore_runtime_config_from_checkpoint(cfg, checkpoint)
+
+    assert restored.conditioning_mode == "action"
+    assert restored.action_output_zero_init is False
 
 
 def test_infer_script_restores_action_temporal_mixer_settings_from_checkpoint_defaults() -> None:

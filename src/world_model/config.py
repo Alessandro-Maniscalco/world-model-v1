@@ -27,6 +27,7 @@ class TrainScriptConfig:
     horizon_len: int = 8
     dt: float = 0.1
     batch_size: int = 2
+    auto_batch_size: bool = True
     k: int = 1
     chunk_schedule_mode: str = "k_chunks"
     max_steps: int = 2000
@@ -95,6 +96,7 @@ class TrainScriptConfig:
     action_temporal_mixer_kernel_size: int = 0
     action_temporal_mixer_scale: float = 0.0
     action_token_scale: float = 1.0
+    action_output_zero_init: bool = True
     frame_height: int = 0
     frame_width: int = 0
     num_workers: int = 0
@@ -165,6 +167,7 @@ class InferScriptConfig:
     action_temporal_mixer_kernel_size: int = 0
     action_temporal_mixer_scale: float = 0.0
     action_token_scale: float = 1.0
+    action_output_zero_init: bool = True
     future_latent_residual_mode: str = "none"
     frame_height: int = 0
     frame_width: int = 0

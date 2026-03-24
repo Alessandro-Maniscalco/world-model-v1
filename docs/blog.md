@@ -112,3 +112,18 @@ The open questions I care about most are:
 The honest summary is: this project has moved beyond basic plumbing and can now
 produce partially plausible action-conditioned predictions, but it still does
 not reliably learn the task-relevant dynamics I want.
+
+
+## Learnings
+
+Iterate as fast as possible. Also with the resolution, find the smallest resolution that works and scale up from there.
+
+Understnad everything, for now codex is great at doing what you are told but it doesn't have the vision of what to do. Interesting to see when it will achieve it.
+
+Start with a simple baseline and gradually increase complexity. 
+
+Reflect on failures.
+
+Fcous on simplicity.
+
+Make sure the problem is drafted perfectly.

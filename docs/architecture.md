@@ -36,6 +36,9 @@ The staged training optimizer uses one shared-session controller:
    - exposes the CLI for the optimizer loop
    - passes the train config, prompt, memory markdown, and shared controller
      state path into the controller runtime
+   - when `--state-path` is omitted, derives a matching controller-state JSON
+     path from `--memory-path` so separate investigation memories can run as
+     clean branches
 2. `src/world_model/optimization/controller.py`
    - owns the persistent Codex session, snapshot/rollback protection, state
      persistence, and bounded long-command execution
@@ -177,7 +180,7 @@ Current practical resolution decision for ALOHA fork-pick-up:
 2. training should preserve that `4:3` aspect ratio instead of stretching to
    `16:9`-like sizes such as `448x256`
 3. the public Wan/VACE pipeline still works at several smaller `4:3` sizes
-   (`512x384`, `384x288`, `320x240`, `256x192`, `192x144`). Check these sizes with sweep_base_dit_resolutions.py
+   (`512x384`, `384x288`, `320x240`, `256x192`, `192x144`)
 4. `128x96` is below the stable floor and collapses into large color patches
 5. Currently `320x240` is used.
 
@@ -494,6 +497,18 @@ $$
 \operatorname{AdaLN}(h; \Delta, \Gamma) = \operatorname{Norm}(h) \odot (1 + \Gamma) + \Delta.
 $$
 
+### Masking
+
+The repo's chunkwise block-causal logic remains defined in latent time, but the
+Wan backbone attends over patch tokens after 3D patch embedding. Therefore:
+
+1. latent-frame chunk ids must be expanded to patch-token chunk ids
+2. additive block-causal masks must be threaded through Wan self-attention
+3. masked self-attention must be implemented in the local vendored fork
+
+This is the main intentional fork from upstream Wan/VACE behavior. Without it,
+the repo cannot preserve its current chunkwise teacher-forcing guarantees.
+
 ### Transformer block structure
 
 The main Wan backbone block is ordered as:
@@ -616,51 +631,6 @@ For one transformer evaluation inside one denoising step:
 
 That output is not yet a decoded video. It is the model's prediction in latent
 space for the scheduler update.
-
-#### What a single Wan block does
-
-One main Wan transformer block is easiest to think of as:
-
-1. pre-norm self-attention over video patch tokens
-2. pre-norm cross-attention over the conditioning token sequence
-3. pre-norm feed-forward MLP
-
-Each sublayer is wrapped in a residual connection. The timestep embedding does
-more than simply get added once at the input. It modulates the block through
-AdaLN-style shift, scale, and gate terms, so the diffusion timestep can control
-how strongly attention and the MLP update the hidden state at that noise level.
-
-In more concrete terms, the block does:
-
-1. normalize hidden states
-2. apply timestep-dependent shift and scale
-3. run self-attention and add the result back through a learned gate
-4. normalize again and run cross-attention to action tokens or prompt tokens
-5. normalize again, run the feed-forward network, and add that result back
-   through another learned gate
-
-So the intuition "the latents go through a DiT made of repeated attention and
-MLP blocks" is correct. The important refinements are:
-
-1. the latents are first patchified into video tokens
-2. each denoising step runs many such blocks, not just one
-3. the block is pre-norm and timestep-modulated rather than a plain
-   post-norm Transformer block
-4. VACE adds a second control path whose hints are injected at selected depths
-
-#### Why one visible progress-bar step is expensive
-
-One visible denoising step usually performs:
-
-1. one conditional transformer pass using the real prompt or action
-   conditioning
-2. one unconditional transformer pass when classifier-free guidance is enabled
-3. one scheduler update that combines those predictions into the next latent
-   sample
-
-This is why the wall-clock time per progress-bar step can be several seconds
-even for a short generated clip. The expensive part is repeated full-video
-latent denoising, not frame decoding.
 
 When classifier-free guidance is enabled with guidance scale $w$, the
 conditional and unconditional predictions are combined as:
@@ -794,17 +764,6 @@ This `50` also matches the current upstream VACE Wan inference default:
 `ali-vilab/VACE` sets `args.sample_steps = 50` in
 `vace/vace_wan_inference.py` when `--sample_steps` is omitted.
 
-## Masking
-
-The repo's chunkwise block-causal logic remains defined in latent time, but the
-Wan backbone attends over patch tokens after 3D patch embedding. Therefore:
-
-1. latent-frame chunk ids must be expanded to patch-token chunk ids
-2. additive block-causal masks must be threaded through Wan self-attention
-3. masked self-attention must be implemented in the local vendored fork
-
-This is the main intentional fork from upstream Wan/VACE behavior. Without it,
-the repo cannot preserve its current chunkwise teacher-forcing guarantees.
 
 ## Model ownership boundaries
 
@@ -833,8 +792,6 @@ Local code should own:
 5. the experiment controller that stages train/eval/check loops around the
    canonical entrypoints, records findings back into markdown memory, and
    stores manual comparison-video review guidance alongside each staged result
-6. a bounded self-edit layer for controller policy, with applied source edits
-   logged under `## Controller Edits` in the optimizer memory
 
 Configuration ownership:
 

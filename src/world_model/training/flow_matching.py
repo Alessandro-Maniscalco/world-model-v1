@@ -373,12 +373,14 @@ def _chunkwise_teacher_forcing_video_loss(
                 start=start,
                 end=end,
                 action_conditioning_window=action_conditioning_window,
+                total_future_steps=total_future_steps,
             ),
             action_image_tokens=_select_action_tokens(
                 action_tokens=action_image_tokens,
                 start=start,
                 end=end,
                 action_conditioning_window=action_conditioning_window,
+                total_future_steps=total_future_steps,
             )
             if action_image_tokens is not None
             else None,
@@ -477,12 +479,24 @@ def _validate_chunkwise_video_inputs(
         raise ValueError("z_past_video and z_future_video must share spatial shape")
     if action_tokens.shape[0] != z_future_video.shape[0]:
         raise ValueError("action_tokens batch size must match latent-video batch size")
-    if action_tokens.shape[1] != z_future_video.shape[2]:
+    if (
+        action_tokens.shape[1] != z_future_video.shape[2]
+        and not _uses_global_conditioning_tokens(
+            action_tokens=action_tokens,
+            total_future_steps=z_future_video.shape[2],
+        )
+    ):
         raise ValueError("action_tokens time length must match z_future_video latent horizon")
     if action_image_tokens is not None:
         if action_image_tokens.shape[0] != z_future_video.shape[0]:
             raise ValueError("action_image_tokens batch size must match latent-video batch size")
-        if action_image_tokens.shape[1] != z_future_video.shape[2]:
+        if (
+            action_image_tokens.shape[1] != z_future_video.shape[2]
+            and not _uses_global_conditioning_tokens(
+                action_tokens=action_image_tokens,
+                total_future_steps=z_future_video.shape[2],
+            )
+        ):
             raise ValueError("action_image_tokens time length must match z_future_video latent horizon")
     if action_conditioning_window not in {"chunk", "full"}:
         raise ValueError(
@@ -517,11 +531,24 @@ def _select_action_tokens(
     start: int,
     end: int,
     action_conditioning_window: Literal["chunk", "full"],
+    total_future_steps: int,
 ) -> torch.Tensor:
     """Select either the active action chunk or the full future plan for teacher forcing."""
+    if _uses_global_conditioning_tokens(
+        action_tokens=action_tokens,
+        total_future_steps=total_future_steps,
+    ):
+        return action_tokens
     if action_conditioning_window == "full":
         return action_tokens
     return action_tokens[:, start:end]
+
+
+def _uses_global_conditioning_tokens(*, action_tokens: torch.Tensor, total_future_steps: int) -> bool:
+    """Return whether cross-attention tokens are global context rather than horizon-aligned steps."""
+    if total_future_steps <= 0:
+        raise ValueError(f"total_future_steps must be positive, got {total_future_steps}")
+    return int(action_tokens.shape[1]) > int(total_future_steps)
 
 
 def _select_observed_video(

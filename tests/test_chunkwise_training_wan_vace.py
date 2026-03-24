@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from world_model.models.wan_vace_conditioning import ActionTokenEncoder
+from world_model.models.wan_vace_conditioning import ActionTokenEncoder, NullConditioningEncoder
 from world_model.training import train_chunkwise_batch
 from world_model.training.chunkwise_training import (
     _compute_action_token_latent_aux_loss,
@@ -110,6 +110,30 @@ def test_train_chunkwise_batch_supports_structured_latent_videos() -> None:
     assert metrics.loss > 0.0
     assert metrics.grad_norm > 0.0
     assert metrics.per_chunk_lengths == (4, 4)
+    assert len(model.calls) == 2
+
+
+def test_train_chunkwise_batch_supports_global_none_conditioning_sequences() -> None:
+    """Allow prompt-free null-conditioning token sequences to flow through training unchanged."""
+    torch.manual_seed(0)
+    model = _RecordingVideoModel()
+    action_encoder = NullConditioningEncoder(hidden_dim=16, base_token=torch.randn(6, 16))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+
+    metrics = train_chunkwise_batch(
+        model=model,
+        action_encoder=action_encoder,
+        optimizer=optimizer,
+        z_past_video=torch.randn(2, 16, 3, 8, 8),
+        z_future_video=torch.randn(2, 16, 4, 8, 8),
+        a_plan=torch.randn(2, 4, 6),
+        k=2,
+        t_min=0.5,
+        t_max=0.5,
+    )
+
+    assert metrics.loss > 0.0
+    assert metrics.per_chunk_lengths == (2, 2)
     assert len(model.calls) == 2
 
 

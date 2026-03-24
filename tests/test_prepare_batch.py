@@ -236,8 +236,8 @@ def test_make_constant_video_like_preserves_expected_numeric_ranges(
     assert torch.equal(constant_video, expected_fill)
 
 
-def test_prepare_packed_batch_encodes_black_and_gray_control_templates() -> None:
-    """Encode black and gray control templates with the expected latent semantics."""
+def test_prepare_packed_batch_encodes_neutral_and_gray_control_templates() -> None:
+    """Encode upstream-style neutral and gray control templates with the expected latent semantics."""
     prepare_mod._CONTROL_LATENT_TEMPLATE_CACHE.clear()
     encoder = _MeanValueEncoder(latent_steps=5)
     batch_video = torch.linspace(-1.0, 1.0, steps=17 * 3 * 16 * 16, dtype=torch.float32).reshape(1, 17, 3, 16, 16)
@@ -255,13 +255,14 @@ def test_prepare_packed_batch_encodes_black_and_gray_control_templates() -> None
         horizon_len=8,
     )
 
+    expected_neutral = 0.0
     expected_gray = (128.0 / 255.0) * 2.0 - 1.0
 
     assert encoder.call_count == 3
-    assert torch.equal(encoder.seen_inputs[0], torch.full_like(batch_video, -1.0))
+    assert torch.equal(encoder.seen_inputs[0], torch.full_like(batch_video, expected_neutral))
     assert torch.allclose(encoder.seen_inputs[1], torch.full_like(batch_video, expected_gray))
     assert torch.equal(encoder.seen_inputs[2], batch_video)
-    assert torch.allclose(prepared.control_black_latents, torch.full((1, 1, 5, 1, 1), -1.0))
+    assert torch.allclose(prepared.control_black_latents, torch.full((1, 1, 5, 1, 1), expected_neutral))
     assert torch.allclose(prepared.control_gray_latents, torch.full((1, 1, 5, 1, 1), expected_gray))
     prepare_mod._CONTROL_LATENT_TEMPLATE_CACHE.clear()
 

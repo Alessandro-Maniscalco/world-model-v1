@@ -18,17 +18,6 @@ Small dataset-backed ALOHA smoke preset for the Wan VACE path. This keeps the
 low-memory head-only recipe for quick cache-backed sanity checks on a 16 GB
 workstation GPU.
 
-## Documentation
-
-- `docs/training_optimizer.md`
-Persistent experiment memory for the current training-optimization loop. The
-controller appends `[controller ...]` findings to `Current Signal`, rewrites
-the current controller recommendation under `Next Work`, and logs completed
-stages under `Training runs`, including comparison-video paths plus manual
-visual-review commands for the saved sweep artifacts. In Codex mode it also
-stores the latest model-side planning summary under `Codex Analysis` and keeps
-the audit trail for bounded controller or validated repo edits under
-`Controller Edits`.
 
 ## Source Packages
 
@@ -142,7 +131,10 @@ experiment at a time from `docs/training_optimizer.md`; persists structured
 history to `runs/training_optimizer/controller_state.json`; and updates the
 markdown memory with the latest finding plus next recommendation. The CLI
 manages shared-session Codex options such as resume/fresh-session control,
-turn timeout, dry-run mode, and external-command iteration limits.
+turn timeout, dry-run mode, and external-command iteration limits. When
+`--state-path` is omitted, the CLI now derives a matching controller-state JSON
+path from `--memory-path` so alternate investigation markdown files can run as
+clean controller branches without manually choosing a second state file.
 
 - `scripts/train/infer_world_model.py`
 Canonical Wan VACE inference and visualization entrypoint. Loads the pretrained
@@ -156,9 +148,8 @@ inference when AMP is enabled, and saves a comparison grid.
 
 - `scripts/check/`
 Canonical diagnostics (`dataset`, `forward_real_batch`, `latent_cache`,
-`masking_leakage`, `vae_roundtrip`, `latents_summary`) plus manual sweep tools
-such as `sweep_infer_resolutions.py` and
-`sweep_vae_roundtrip_resolutions.py`. The controller-driven evaluation path
-centers on `sweep_local_repo_resolutions.py`,
+`masking_leakage`, `vae_roundtrip`, `latents_summary`) plus the controller
+evaluation sweep `sweep_local_repo_resolutions.py`. The controller-driven
+evaluation path centers on `sweep_local_repo_resolutions.py`,
 `check_generated_video_plausibility.py`, and
 `check_arm_motion_alignment.py`.

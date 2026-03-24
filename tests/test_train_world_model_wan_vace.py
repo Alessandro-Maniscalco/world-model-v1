@@ -126,6 +126,69 @@ def test_train_script_builds_action_encoder_with_mlp_when_requested() -> None:
     assert action_encoder.net[4].out_features == 16
 
 
+def test_train_script_auto_batch_size_uses_power_then_binary_search() -> None:
+    """Pick the largest fitting startup batch size under the configured cap."""
+    train_script = _load_train_script_module()
+    attempted: list[int] = []
+
+    selected, probes = train_script._find_largest_batch_size(
+        max_batch_size=7,
+        probe_fits=lambda candidate: attempted.append(candidate) or (candidate <= 5),
+    )
+
+    assert selected == 5
+    assert probes == (1, 2, 4, 7, 5, 6)
+    assert attempted == [1, 2, 4, 7, 5, 6]
+
+
+def test_train_script_autotune_logs_when_probe_hits_configured_cap(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Log only the selected startup batch size."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    cfg = TrainScriptConfig(batch_size=4, auto_batch_size=True)
+    fake_model = object()
+    fake_action_encoder = object()
+
+    monkeypatch.setattr(train_script, "build_model_from_config", lambda cfg, prepared: fake_model)
+    monkeypatch.setattr(
+        train_script,
+        "build_action_encoder_from_config",
+        lambda cfg, prepared, model: fake_action_encoder,
+    )
+    monkeypatch.setattr(
+        train_script,
+        "_move_train_modules_to_runtime",
+        lambda **kwargs: (kwargs["model"], kwargs["action_encoder"]),
+    )
+    monkeypatch.setattr(train_script, "_find_largest_batch_size", lambda **kwargs: (4, (1, 2, 4)))
+    monkeypatch.setattr(train_script, "_clear_runtime_memory", lambda **kwargs: None)
+
+    selected, attempted = train_script._autotune_batch_size(
+        cfg=cfg,
+        train_episode_ids=(0,),
+        vae=object(),
+        prepared=prepared,
+        device=torch.device("cuda"),
+        runtime_dtype=torch.bfloat16,
+    )
+
+    assert selected == 4
+    assert attempted == (1, 2, 4)
+    stdout = capsys.readouterr().out
+    assert stdout == "Auto batch size selected 4\n"
+
+
 def test_train_script_builds_action_encoder_with_residual_mlp_when_requested() -> None:
     """Allow the train config to request a residual action-token MLP."""
     train_script = _load_train_script_module()
@@ -619,6 +682,64 @@ def test_train_script_can_resume_old_action_checkpoint_without_temporal_mixer_op
     assert torch.count_nonzero(resumed_action_encoder.temporal_mixer.weight) == 0
 
 
+def test_train_script_can_resume_when_optimizer_param_groups_do_not_match(tmp_path: Path) -> None:
+    """Fall back to a fresh optimizer when resume-time parameter groups differ."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    cfg = TrainScriptConfig(
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    source_model = train_script.build_model_from_config(cfg, prepared)
+    source_action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, source_model)
+    source_parameters = train_script._configure_trainable_parameters(cfg, source_model, source_action_encoder)
+    source_optimizer = torch.optim.AdamW(source_parameters, lr=1e-3)
+
+    checkpoint_path = tmp_path / "resume_optimizer_mismatch.pt"
+    torch.save(
+        {
+            "step": 123,
+            "model_state_dict": source_model.state_dict(),
+            "action_encoder_state_dict": source_action_encoder.state_dict(),
+            "optimizer_state_dict": source_optimizer.state_dict(),
+        },
+        checkpoint_path,
+    )
+
+    resumed_model = train_script.build_model_from_config(cfg, prepared)
+    resumed_action_encoder = train_script.build_action_encoder_from_config(cfg, prepared, resumed_model)
+    resumed_parameters = train_script._configure_trainable_parameters(cfg, resumed_model, resumed_action_encoder)
+    extra_parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    resumed_optimizer = torch.optim.AdamW(list(resumed_parameters) + [extra_parameter], lr=1e-3)
+
+    checkpoint = train_script._load_training_checkpoint(checkpoint_path)
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=resumed_model,
+        action_encoder=resumed_action_encoder,
+        optimizer=resumed_optimizer,
+    )
+
+    assert resumed_step == 123
+    assert restored_optimizer_state is False
+
+
 def test_train_script_can_resume_full_checkpoint_into_action_lora_backbone(tmp_path: Path) -> None:
     """Allow action-conditioned LoRA tuning to start from a full-backbone checkpoint."""
     train_script = _load_train_script_module()
@@ -700,6 +821,91 @@ def test_train_script_can_resume_full_checkpoint_into_action_lora_backbone(tmp_p
     assert resumed_step == 123
     assert restored_optimizer_state is False
     assert any("lora_" in key for key in resumed_model.state_dict())
+    assert torch.allclose(resumed_model.state_dict()[shared_key], source_model.state_dict()[shared_key])
+
+
+def test_train_script_can_resume_full_checkpoint_into_action_added_kv_lora_backbone(tmp_path: Path) -> None:
+    """Allow action-added-K/V LoRA tuning to start from a full-backbone checkpoint."""
+    train_script = _load_train_script_module()
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(1, 16, 2, 8, 8),
+        z_future_video=torch.randn(1, 16, 2, 8, 8),
+        a_plan=torch.randn(1, 2, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=4,
+        context_latent_steps=2,
+        horizon_latent_steps=2,
+    )
+    source_cfg = TrainScriptConfig(
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+    resumed_cfg = TrainScriptConfig(
+        trainable_backbone="lora",
+        conditioning_mode="action",
+        action_backbone_added_kv_mode="reuse_action_tokens",
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+        lora_rank=4,
+        lora_alpha=8,
+        lora_target_modules=("to_q", "to_k", "to_v", "to_out.0", "proj_in", "proj_out"),
+    )
+
+    source_model = train_script.build_model_from_config(source_cfg, prepared)
+    source_action_encoder = train_script.build_action_encoder_from_config(source_cfg, prepared, source_model)
+    source_parameters = train_script._configure_trainable_parameters(source_cfg, source_model, source_action_encoder)
+    source_optimizer = torch.optim.AdamW(source_parameters, lr=1e-3)
+    for parameter in source_model.parameters():
+        parameter.data.fill_(0.25)
+
+    checkpoint_path = tmp_path / "resume_full_to_added_kv_lora.pt"
+    torch.save(
+        {
+            "step": 123,
+            "model_state_dict": source_model.state_dict(),
+            "action_encoder_state_dict": source_action_encoder.state_dict(),
+            "optimizer_state_dict": source_optimizer.state_dict(),
+            "extra_state": {
+                "config": {
+                    "conditioning_mode": "none",
+                    "trainable_backbone": "full",
+                }
+            },
+        },
+        checkpoint_path,
+    )
+
+    resumed_model = train_script.build_model_from_config(resumed_cfg, prepared)
+    resumed_action_encoder = train_script.build_action_encoder_from_config(resumed_cfg, prepared, resumed_model)
+    resumed_parameters = train_script._configure_trainable_parameters(resumed_cfg, resumed_model, resumed_action_encoder)
+    resumed_optimizer = torch.optim.AdamW(resumed_parameters, lr=1e-3)
+
+    checkpoint = train_script._load_training_checkpoint(checkpoint_path)
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=resumed_model,
+        action_encoder=resumed_action_encoder,
+        optimizer=resumed_optimizer,
+    )
+
+    shared_key = next(key for key in source_model.state_dict() if key in resumed_model.state_dict())
+    assert resumed_step == 123
+    assert restored_optimizer_state is False
+    assert resumed_model.backbone.config.added_kv_proj_dim == 16
     assert torch.allclose(resumed_model.state_dict()[shared_key], source_model.state_dict()[shared_key])
 
 
@@ -1201,6 +1407,109 @@ def test_train_script_preserves_logs_when_validation_is_disabled(monkeypatch, tm
 
     assert len(captured_logs) == 2
     assert all("val_loss" not in payload for payload in captured_logs)
+
+
+def test_train_script_autotunes_batch_size_before_training(monkeypatch, tmp_path: Path) -> None:
+    """Use the selected startup batch size for real loaders and checkpoint config."""
+    train_script = _load_train_script_module()
+    output_dir = tmp_path / "train_run"
+    seen_batch_sizes: list[int] = []
+    saved_batch_sizes: list[int] = []
+
+    cfg = TrainScriptConfig(
+        output_dir=str(output_dir),
+        repo_id="repo/x",
+        video_key="video",
+        context_len=5,
+        horizon_len=4,
+        batch_size=4,
+        auto_batch_size=True,
+        max_steps=1,
+        checkpoint_every=1,
+        checkpoint_early_every=0,
+        checkpoint_early_until=0,
+        log_every=10,
+        load_pretrained_backbone=False,
+        validation_enabled=False,
+    )
+    prepared = PreparedPackedBatch(
+        z_past_video=torch.randn(2, 16, 2, 8, 8),
+        z_future_video=torch.randn(2, 16, 1, 8, 8),
+        a_plan=torch.randn(2, 1, 6),
+        latent_shape=(16, 8, 8),
+        total_latent_steps=3,
+        context_latent_steps=2,
+        horizon_latent_steps=1,
+    )
+    train_batches = [{"video": torch.randn(2, 9, 3, 8, 8), "action": torch.randn(2, 9, 6)}]
+
+    class _FakeEncoder:
+        """Minimal VAE placeholder for startup auto-batch-size tests."""
+
+        def encode(self, video: torch.Tensor) -> torch.Tensor:
+            """Return a structured latent tensor with valid Wan temporal packing."""
+            batch_size = video.shape[0]
+            return torch.zeros(batch_size, 16, 3, 8, 8)
+
+    class _FakeModel(torch.nn.Module):
+        """Small trainable model placeholder for startup auto-batch-size tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class _FakeActionEncoder(torch.nn.Module):
+        """Small action encoder placeholder for startup auto-batch-size tests."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    def _fake_build_loader(**kwargs):
+        seen_batch_sizes.append(int(kwargs["batch_size"]))
+        return train_batches
+
+    monkeypatch.setattr(train_script, "_load_args", lambda: cfg)
+    monkeypatch.setattr(train_script, "_set_seed", lambda seed: None)
+    monkeypatch.setattr(train_script.WanVAE, "from_pretrained", lambda **_: _FakeEncoder())
+    monkeypatch.setattr(train_script, "build_lerobot_dataloader", _fake_build_loader)
+    monkeypatch.setattr(train_script, "prepare_packed_batch", lambda **_: prepared)
+    monkeypatch.setattr(train_script, "_validate_chunk_schedule", lambda cfg, prepared: None)
+    monkeypatch.setattr(train_script, "_autotune_batch_size", lambda **_: (2, (1, 2, 4)))
+    monkeypatch.setattr(train_script, "build_model_from_config", lambda cfg, prepared: _FakeModel())
+    monkeypatch.setattr(
+        train_script,
+        "build_action_encoder_from_config",
+        lambda cfg, prepared, model: _FakeActionEncoder(),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "_configure_trainable_parameters",
+        lambda cfg, model, action_encoder: list(model.parameters()) + list(action_encoder.parameters()),
+    )
+    monkeypatch.setattr(
+        train_script,
+        "train_chunkwise_batch",
+        lambda **_: ChunkwiseStepMetrics(
+            loss=0.5,
+            grad_norm=0.1,
+            per_chunk_losses=(0.5,),
+            per_chunk_lengths=(1,),
+        ),
+    )
+    monkeypatch.setattr(train_script, "append_jsonl", lambda path, payload: None)
+    monkeypatch.setattr(
+        train_script,
+        "save_checkpoint",
+        lambda **kwargs: saved_batch_sizes.append(int(kwargs["extra_state"]["config"]["batch_size"]))
+        or (output_dir / f"step_{int(kwargs['step']):07d}.pt"),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    train_script.main()
+
+    assert seen_batch_sizes == [1, 2]
+    assert saved_batch_sizes == [2, 2]
 
 
 def test_train_script_keeps_running_when_validation_patience_is_disabled(

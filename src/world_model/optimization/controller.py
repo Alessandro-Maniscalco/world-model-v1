@@ -19,26 +19,17 @@ import threading
 from typing import Any
 
 from world_model.config import DEFAULT_TRAIN_CONFIG_PATH
+from world_model.optimization import paths as optimization_paths
 from world_model.optimization.codex_runner import (
     ensure_codex_chatgpt_login,
     run_codex_exec,
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MEMORY_RELATIVE_PATH = Path("docs/complexity_ladder_training.md")
-DEFAULT_PROMPT_RELATIVE_PATH = Path("docs/controller_prompt.md")
-DEFAULT_STATE_RELATIVE_PATH = Path("runs/training_optimizer/controller_state.json")
-DEFAULT_MEMORY_PATH = REPO_ROOT / DEFAULT_MEMORY_RELATIVE_PATH
-DEFAULT_PROMPT_PATH = REPO_ROOT / DEFAULT_PROMPT_RELATIVE_PATH
-DEFAULT_INSTRUCTIONS_PATH = DEFAULT_PROMPT_PATH
-DEFAULT_STATE_PATH = REPO_ROOT / DEFAULT_STATE_RELATIVE_PATH
-LEGACY_TRAINING_OPTIMIZER_MEMORY_RELATIVE_PATH = Path("docs/training_optimizer.md")
-FIXED_ANCHOR_MEMORY_RELATIVE_PATH = Path("docs/fixed_anchor_investigation.md")
-FIXED_ANCHOR_PROMPT_RELATIVE_PATH = Path("docs/controller_prompt_fixed_anchor.md")
-FIXED_ANCHOR_STATE_RELATIVE_PATH = Path(
-    "runs/training_optimizer/fixed_anchor_controller_state.json"
-)
+REPO_ROOT = optimization_paths.REPO_ROOT
+DEFAULT_MEMORY_PATH = optimization_paths.default_memory_path(REPO_ROOT)
+DEFAULT_PROMPT_PATH = optimization_paths.default_prompt_path(REPO_ROOT)
+DEFAULT_STATE_PATH = optimization_paths.default_state_path(REPO_ROOT)
 DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS = 25 * 60
 DEFAULT_LOG_TAIL_CHARS = 4000
 SNAPSHOT_EXCLUDED_PATH_PARTS = frozenset(
@@ -55,6 +46,14 @@ SNAPSHOT_EXCLUDED_PATH_PARTS = frozenset(
         ".coverage",
     }
 )
+
+
+def derive_state_path_for_memory_path(memory_path: str | Path) -> Path:
+    """Map a memory markdown path to its default controller-state JSON path."""
+    return optimization_paths.derive_state_path_for_memory_path(
+        memory_path,
+        repo_root=REPO_ROOT,
+    )
 
 
 def run_training_optimization_loop(
@@ -79,14 +78,9 @@ def run_training_optimization_loop(
         )
 
     train_config_path = Path(train_config_path)
-    memory_path = Path(memory_path)
-    prompt_path = Path(prompt_path)
-    state_path = Path(state_path)
-    memory_path, prompt_path, state_path, workflow_notes = _resolve_controller_workflow_paths(
-        memory_path=memory_path,
-        prompt_path=prompt_path,
-        state_path=state_path,
-    )
+    memory_path = _resolve_repo_relative_path(memory_path)
+    prompt_path = _resolve_repo_relative_path(prompt_path)
+    state_path = _resolve_repo_relative_path(state_path)
     if not _resolve_repo_relative_path(train_config_path).exists():
         raise FileNotFoundError(
             f"train_config_path does not exist: {_display_path(train_config_path)}"
@@ -94,11 +88,7 @@ def run_training_optimization_loop(
 
     _log_controller_status("Checking Codex ChatGPT login status.")
     ensure_codex_chatgpt_login()
-    for note in workflow_notes:
-        _log_controller_status(note)
-    _log_controller_status(
-        f"state: {_display_path(_resolve_repo_relative_path(state_path))}"
-    )
+    _log_controller_status(f"state: {_display_path(state_path)}")
     state = load_controller_state(state_path)
     state = _initialize_controller_state(
         state=state,
@@ -435,100 +425,72 @@ def _build_turn_prompt(
         else "You must return `stop` in this turn after finishing validation and memory updates."
     )
     note_block = "" if not phase_note else f"\n\nController note:\n{phase_note}"
+    context_json = json.dumps(prompt_payload, indent=2, sort_keys=True)
     if fresh_session:
-        return _build_initial_turn_prompt(
+        return _build_fresh_session_prompt(
             train_config_path=train_config_path,
             memory_path=memory_path,
             prompt_path=prompt_path,
             state_path=state_path,
-            prompt_payload=prompt_payload,
             action_instruction=action_instruction,
             note_block=note_block,
+            context_json=context_json,
         )
-    return _build_resume_turn_prompt(
+    return _build_continuation_prompt(
         train_config_path=train_config_path,
         memory_path=memory_path,
         prompt_path=prompt_path,
         state_path=state_path,
-        prompt_payload=prompt_payload,
         action_instruction=action_instruction,
         note_block=note_block,
+        context_json=context_json,
     )
 
 
-def _build_initial_turn_prompt(
+def _build_fresh_session_prompt(
     *,
     train_config_path: Path,
     memory_path: Path,
     prompt_path: Path,
     state_path: Path,
-    prompt_payload: dict[str, Any],
     action_instruction: str,
     note_block: str,
+    context_json: str,
 ) -> str:
-    """Build the full initial prompt for a fresh shared Codex session."""
-    return "\n".join(
-        [
-            "You are the shared-session Codex controller for this repository.",
-            f"This is a fresh shared session. First read and adopt {_display_path(prompt_path)} before doing any work.",
-            f"Read {_display_path(state_path)} for the latest controller history, current controller status, active command if any, latest artifacts, and the latest completed long-command result.",
-            f"Read {_display_path(train_config_path)} for the base training configuration.",
-            f"Use {_display_path(memory_path)} as the mutable optimization memory.",
-            "Do short work inside this Codex session: inspect code/artifacts, edit repo files, update the memory markdown, inspect metrics, and validate MP4/video outputs.",
-            "If there is no latest run result to validate yet, do only the minimum quick inspection needed to decide the next action. Prefer a concrete `run_long_command` over extended repository exploration.",
-            "Do not start long-running work inside the session. If training, sweep generation, or another long experiment command is needed, stop tool use and return it as `run_long_command` instead.",
-            "Optimize for the best next action under long-run experiment cost, not the smallest or cheapest follow-up. In-session code edits are effectively free compared with another train/eval cycle.",
-            "Ground validation summaries and next-action reasons in concrete video observations from the reviewed clips, especially last-horizon timing, held-out differences, and visible blur/ghosting or missed contact.",
-            "When you edit repo files and want to keep them, validate them inside the session before returning and set `repo_edit_status` to `validated`.",
-            "If you want the controller to undo all repo edits made during this turn, set `repo_edit_status` to `rollback_requested`.",
-            "At the start of a fresh session, after reading the controller state and optimization memory, you may delete only clearly dominated checkpoints that are explicitly superseded in the memory; never delete the best overall checkpoint, the best checkpoint in any branch, the latest checkpoint from the most recent run, or anything still needed for resume, validation, or referenced summaries.",
-            "Human operator messages added directly to this shared session are authoritative. If the operator asked to stop after the full loop, honor that after post-run validation by returning `stop`.",
-            action_instruction,
-            "Return one raw JSON object only as your final answer.",
-            note_block,
-            "",
-            "Context JSON:",
-            json.dumps(prompt_payload, indent=2, sort_keys=True),
-        ]
-    ).strip()
+    """Build the single fresh-session prompt template."""
+    prompt_path_text = _display_path(prompt_path)
+    memory_path_text = _display_path(memory_path)
+    state_path_text = _display_path(state_path)
+    train_config_path_text = _display_path(train_config_path)
+    return f"""This is a shared session. Read {prompt_path_text}. The ##Goal is in {memory_path_text}.
+Latest controller state: {state_path_text}.
+Read {train_config_path_text} for the base training configuration.
+{action_instruction}
+Your final output should be a JSON object.{note_block}
+
+Context JSON:
+{context_json}""".strip()
 
 
-def _build_resume_turn_prompt(
+def _build_continuation_prompt(
     *,
     train_config_path: Path,
     memory_path: Path,
     prompt_path: Path,
     state_path: Path,
-    prompt_payload: dict[str, Any],
     action_instruction: str,
     note_block: str,
+    context_json: str,
 ) -> str:
-    """Build the compact continuation prompt for a resumed shared session."""
-    return "\n".join(
-        [
-            "Continue the same shared Codex session.",
-            f"Check {_display_path(prompt_path)} before deciding, especially these sections:",
-            "- ## Repo Edits And Rollback",
-            "- ## Long Experiment Commands",
-            "- ## Validation",
-            "- ### Motion-First Ranking",
-            "- ## Decision Rule",
-            "- ## Operator Control",
-            "- ## Ending",
-            f"Read {_display_path(state_path)} for the latest controller history, current controller status, active command if any, latest artifacts, and the latest completed long-command result.",
-            f"Read {_display_path(train_config_path)} for the base training configuration.",
-            f"Use {_display_path(memory_path)} as the mutable optimization memory.",
-            "Validate the latest result if one was just completed, update the memory markdown if needed, and then decide the next action.",
-            "Choose the best next action for the overall long-run budget, not just the smallest follow-up. In-session code edits are effectively free compared with another long run.",
-            "Describe the reviewed videos concretely in your summary and reasoning, including when motion starts, how long it stays static, and any blur, ghosting, or missed contact in the held-out clips.",
-            action_instruction,
-            "Return one raw JSON object only as your final answer.",
-            note_block,
-            "",
-            "Context JSON:",
-            json.dumps(prompt_payload, indent=2, sort_keys=True),
-        ]
-    ).strip()
+    """Build the single continuation prompt template."""
+    prompt_path_text = _display_path(prompt_path)
+    memory_path_text = _display_path(memory_path)
+    state_path_text = _display_path(state_path)
+    train_config_path_text = _display_path(train_config_path)
+    return f"""Continue the same shared Codex session.
+
+Context JSON:
+{context_json}""".strip()
 
 
 def _turn_response_schema() -> dict[str, Any]:
@@ -649,7 +611,7 @@ def _run_long_command(
     expected_artifacts: list[str],
 ) -> dict[str, Any]:
     """Execute one long shell command and mirror its logs to files and the terminal."""
-    logs_dir = REPO_ROOT / "runs" / "training_optimizer" / "controller_logs"
+    logs_dir = optimization_paths.controller_logs_root(REPO_ROOT)
     logs_dir.mkdir(parents=True, exist_ok=True)
     timestamp = _utc_timestamp().replace(":", "-")
     stdout_log = logs_dir / f"{timestamp}_stdout.log"
@@ -845,60 +807,6 @@ def _append_current_invocation_run_summary(
         summaries.append(text)
 
 
-def _resolve_controller_workflow_paths(
-    *,
-    memory_path: Path,
-    prompt_path: Path,
-    state_path: Path,
-) -> tuple[Path, Path, Path, list[str]]:
-    """Resolve legacy controller aliases onto the fixed-anchor workflow paths."""
-    resolved_memory = _resolve_repo_relative_path(memory_path)
-    resolved_prompt = _resolve_repo_relative_path(prompt_path)
-    resolved_state = _resolve_repo_relative_path(state_path)
-
-    default_prompt = _resolve_repo_relative_path(DEFAULT_PROMPT_RELATIVE_PATH)
-    default_state = _resolve_repo_relative_path(DEFAULT_STATE_RELATIVE_PATH)
-    legacy_memory = _resolve_repo_relative_path(LEGACY_TRAINING_OPTIMIZER_MEMORY_RELATIVE_PATH)
-    fixed_memory = _resolve_repo_relative_path(FIXED_ANCHOR_MEMORY_RELATIVE_PATH)
-    fixed_prompt = _resolve_repo_relative_path(FIXED_ANCHOR_PROMPT_RELATIVE_PATH)
-    fixed_state = _resolve_repo_relative_path(FIXED_ANCHOR_STATE_RELATIVE_PATH)
-
-    notes: list[str] = []
-
-    if resolved_memory == legacy_memory:
-        resolved_memory = fixed_memory
-        if resolved_prompt == default_prompt:
-            resolved_prompt = fixed_prompt
-        notes.append(
-            "workflow alias: docs/training_optimizer.md selects the fixed-anchor memory "
-            "docs/fixed_anchor_investigation.md"
-        )
-
-    if resolved_memory == fixed_memory and resolved_prompt == default_prompt:
-        resolved_prompt = fixed_prompt
-        notes.append(
-            "workflow alias: docs/fixed_anchor_investigation.md selects "
-            "docs/controller_prompt_fixed_anchor.md"
-        )
-    elif resolved_prompt == fixed_prompt and resolved_memory != fixed_memory:
-        resolved_memory = fixed_memory
-        notes.append(
-            "workflow alias: docs/controller_prompt_fixed_anchor.md selects "
-            "docs/fixed_anchor_investigation.md"
-        )
-
-    if (
-        resolved_memory == fixed_memory or resolved_prompt == fixed_prompt
-    ) and resolved_state == default_state:
-        resolved_state = fixed_state
-        notes.append(
-            "workflow alias: fixed-anchor runs use "
-            "runs/training_optimizer/fixed_anchor_controller_state.json"
-        )
-
-    return resolved_memory, resolved_prompt, resolved_state, notes
-
-
 def _format_resume_command(session_id: Any) -> str:
     """Format the `codex resume` command for the active session id."""
     if not isinstance(session_id, str) or not session_id.strip():
@@ -995,18 +903,12 @@ def _read_tail(path: Path, *, max_chars: int = DEFAULT_LOG_TAIL_CHARS) -> str:
 
 def _resolve_repo_relative_path(raw_path: str | Path) -> Path:
     """Resolve a possibly repo-relative path inside the current repository."""
-    path = Path(raw_path)
-    if path.is_absolute():
-        return path
-    return (REPO_ROOT / path).resolve()
+    return optimization_paths.resolve_repo_relative_path(raw_path, repo_root=REPO_ROOT)
 
 
 def _display_path(path: Path) -> str:
     """Render an absolute path relative to the repo when possible."""
-    try:
-        return str(path.resolve().relative_to(REPO_ROOT))
-    except ValueError:
-        return str(path.resolve())
+    return optimization_paths.display_repo_path(path, repo_root=REPO_ROOT)
 
 
 def _utc_timestamp() -> str:

@@ -80,21 +80,6 @@ def test_base_mode_keeps_resolution_named_outputs() -> None:
     assert summary_path == Path("runs/sweep_local/summary.json")
 
 
-def test_repo_prompt_mode_keeps_resolution_named_outputs() -> None:
-    """Checkpoint-free repo prompt sweeps should use shared resolution-named outputs."""
-    output_path, comparison_path, summary_path = script._resolve_output_artifacts(
-        mode="repo_prompt",
-        output_dir=None,
-        checkpoint_path=None,
-        label="512x384",
-        resolution_count=1,
-    )
-
-    assert output_path == Path("runs/sweep_local/512x384.mp4")
-    assert comparison_path == Path("runs/sweep_local/512x384_comparison.mp4")
-    assert summary_path == Path("runs/sweep_local/summary.json")
-
-
 def test_base_mode_forwards_prompt_and_guidance_to_local_pipeline(monkeypatch, tmp_path) -> None:
     """Base-mode sweeps should pass the caller prompt and guidance into local pipeline inference."""
     captured_local_kwargs: dict[str, object] = {}
@@ -184,111 +169,6 @@ def test_base_mode_forwards_prompt_and_guidance_to_local_pipeline(monkeypatch, t
     assert captured_local_kwargs["conditioning_scale"] == 1.0
     assert result["plausibility"] == {"plausible": True}
     assert result["motion"] == {"summary": {"motion_verdict": "good"}}
-
-
-def test_repo_prompt_mode_forwards_prompt_to_repo_world_model(monkeypatch, tmp_path) -> None:
-    """Repo prompt sweeps should load base runtime config and call repo inference without a checkpoint."""
-    captured_runtime_cfg: list[SimpleNamespace] = []
-    captured_checkpoints: list[object] = []
-
-    monkeypatch.setattr(
-        script,
-        "_load_base_runtime_config",
-        lambda path: SimpleNamespace(
-            control_scale=1.0,
-            max_sequence_length=128,
-            prompt="default prompt",
-            negative_prompt="",
-            guidance_scale=1.0,
-            context_len=9,
-            horizon_len=8,
-            conditioning_mode="none",
-            action_token_scale=1.0,
-            wan_vace_model_id="wan",
-            chunk_schedule_mode="k_chunks",
-            future_latent_residual_mode="none",
-        ),
-    )
-    monkeypatch.setattr(script, "_resolve_device", lambda device_name: torch.device("cpu"))
-    monkeypatch.setattr(script, "_select_runtime_dtype", lambda device: torch.float32)
-    monkeypatch.setattr(
-        script,
-        "_load_checkpoint_clip",
-        lambda **kwargs: (torch.zeros(1, 17, 3, 240, 320), torch.zeros(1, 17, 2)),
-    )
-
-    def _fake_run_checkpoint_world_model(*, runtime_cfg, checkpoint, **kwargs):
-        """Capture prompt-conditioned runtime config and checkpoint usage."""
-        captured_runtime_cfg.append(runtime_cfg)
-        captured_checkpoints.append(checkpoint)
-        target = torch.zeros(1, 17, 3, 4, 5)
-        pred = torch.ones(1, 17, 3, 4, 5)
-        return target, pred
-
-    monkeypatch.setattr(script, "_run_checkpoint_world_model", _fake_run_checkpoint_world_model)
-    monkeypatch.setattr(script, "_tensor_video_to_frames", lambda video_btchw: [0.0])
-    monkeypatch.setattr(script, "_build_side_by_side_video", lambda **kwargs: torch.zeros(1, 17, 3, 4, 5))
-    monkeypatch.setattr(script, "_export_video", lambda **kwargs: None)
-    monkeypatch.setattr(script, "_write_plausibility_report", lambda **kwargs: {"plausible": True})
-    monkeypatch.setattr(
-        script,
-        "_write_arm_motion_report",
-        lambda **kwargs: {"summary": {"motion_verdict": "good"}},
-    )
-
-    result = script._run_one_checkpoint_resolution(
-        mode="repo_prompt",
-        config_path=Path("configs/train/world_model.yaml"),
-        checkpoint_path=Path("unused.pt"),
-        width=320,
-        height=240,
-        output_path=tmp_path / "generated.mp4",
-        comparison_path=tmp_path / "comparison.mp4",
-        plausibility_output_path=tmp_path / "plausibility_report.json",
-        motion_output_path=tmp_path / "arm_motion_report.json",
-        repo_id="repo",
-        episode_index=1,
-        start_frame=60,
-        video_key="observation.images.cam_high",
-        context_len=9,
-        horizon_len=8,
-        k=1,
-        integration_steps=50,
-        fps=10,
-        seed=0,
-        single_chunk_rollout=True,
-        device_name="cpu",
-        action_source="auto",
-        action_scale=1.0,
-        action_token_scale=1.0,
-        control_scale=None,
-        prompt="robot arm picks up a fork from a table",
-        negative_prompt="distorted colors",
-        guidance_scale=5.0,
-        max_sequence_length=256,
-    )
-
-    assert len(captured_runtime_cfg) == 1
-    runtime_cfg = captured_runtime_cfg[0]
-    assert runtime_cfg.conditioning_mode == "prompt"
-    assert runtime_cfg.prompt == "robot arm picks up a fork from a table"
-    assert runtime_cfg.negative_prompt == "distorted colors"
-    assert runtime_cfg.guidance_scale == 5.0
-    assert runtime_cfg.max_sequence_length == 256
-    assert runtime_cfg.single_chunk_rollout is True
-    assert captured_checkpoints == [None]
-    assert "Repo prompt mode uses the repo chunkwise world-model inference path with prompt tokens and no checkpoint overlay." in result["notes"]
-    assert result["plausibility"] == {"plausible": True}
-    assert result["motion"] == {"summary": {"motion_verdict": "good"}}
-
-
-def test_sweep_script_disables_chunk_conditioning_for_none_mode() -> None:
-    """Treat prompt-free none conditioning like global text conditioning during rollout."""
-    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="none")) is False
-    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="prompt")) is False
-    assert script._uses_chunk_conditioning(
-        SimpleNamespace(conditioning_mode="action", action_conditioning_window="chunk")
-    ) is True
 
 
 def test_checkpoint_mode_forwards_prompt_and_runtime_overrides(monkeypatch, tmp_path) -> None:
@@ -399,6 +279,15 @@ def test_checkpoint_mode_forwards_prompt_and_runtime_overrides(monkeypatch, tmp_
     assert "Overrode runtime future_latent_residual_mode from 'none' to 'last_context_frame' for this probe." in result["notes"]
     assert result["plausibility"] == {"plausible": True}
     assert result["motion"] == {"summary": {"motion_verdict": "good"}}
+
+
+def test_sweep_script_disables_chunk_conditioning_for_none_mode() -> None:
+    """Treat prompt-free none conditioning like global text conditioning during rollout."""
+    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="none")) is False
+    assert script._uses_chunk_conditioning(SimpleNamespace(conditioning_mode="prompt")) is False
+    assert script._uses_chunk_conditioning(
+        SimpleNamespace(conditioning_mode="action", action_conditioning_window="chunk")
+    ) is True
 
 
 def test_run_local_pipeline_enables_cfg_when_guidance_scale_above_one() -> None:
@@ -638,10 +527,36 @@ def test_decode_future_latents_uses_past_context_to_keep_full_wan_horizon() -> N
         runtime_dtype=torch.float32,
     )
 
-    assert pred_video.shape == (1, 4, 3, 1, 1)
-    assert target_video.shape == (1, 4, 3, 1, 1)
-    assert torch.equal(pred_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
-    assert torch.equal(target_video[0, :, 0, 0, 0], torch.tensor([21.0, 22.0, 23.0, 24.0]))
+    assert pred_video.shape == (1, 25, 3, 1, 1)
+    assert target_video.shape == (1, 25, 3, 1, 1)
+    assert torch.equal(pred_video[0, :, 0, 0, 0], torch.arange(25, dtype=torch.float32))
+    assert torch.equal(target_video[0, :, 0, 0, 0], torch.arange(25, dtype=torch.float32))
+
+
+def test_build_rollout_video_aligns_full_target_and_generated_videos() -> None:
+    """Checkpoint exports should keep the generated rollout exactly as decoded."""
+    target_full_video = torch.tensor(
+        [[[[[0.1]]], [[[0.2]]], [[[0.3]]], [[[0.4]]], [[[0.5]]]]],
+        dtype=torch.float32,
+    )
+    pred_full_video = torch.tensor(
+        [[[[[0.91]]], [[[0.92]]], [[[0.93]]]]],
+        dtype=torch.float32,
+    )
+
+    target_rollout, pred_rollout = script._build_rollout_video(
+        target_full_video=target_full_video,
+        pred_full_video=pred_full_video,
+    )
+
+    assert torch.equal(
+        target_rollout,
+        torch.tensor([[[[[0.1]]], [[[0.2]]], [[[0.3]]]]], dtype=torch.float32),
+    )
+    assert torch.equal(
+        pred_rollout,
+        pred_full_video,
+    )
 
 
 def test_checkpoint_mode_exports_generated_rollout_and_comparison_order(monkeypatch, tmp_path) -> None:
@@ -919,7 +834,7 @@ def test_run_checkpoint_world_model_matches_current_action_infer_logic(monkeypat
     monkeypatch.setattr(
         script,
         "_build_rollout_video",
-        lambda *, target_full_video, pred_future_video, context_len: (
+        lambda *, target_full_video, pred_full_video: (
             torch.full((1, 5, 3, 1, 1), 8.0),
             torch.full((1, 5, 3, 1, 1), 6.0),
         ),
@@ -955,134 +870,3 @@ def test_run_checkpoint_world_model_matches_current_action_infer_logic(monkeypat
     assert torch.equal(pred_rollout, torch.full((1, 5, 3, 1, 1), 6.0))
     assert torch.equal(captured_infer_kwargs["image_attention_tokens"], torch.full((1, 3, 4), 7.0))
     assert captured_infer_kwargs["future_latent_residual_mode"] == "last_context_frame"
-
-
-def test_run_checkpoint_world_model_supports_prompt_conditioning_without_checkpoint(monkeypatch) -> None:
-    """Repo inference should pass prompt CFG tokens through chunkwise sampling without a checkpoint."""
-
-    class _FakeBackbone(torch.nn.Module):
-        """Backbone stub that exposes one parameter for dtype discovery."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float32))
-
-    class _FakeModel(torch.nn.Module):
-        """World-model stub with a backbone parameter and eval/to shims."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.backbone = _FakeBackbone()
-
-        def to(self, *args, **kwargs):
-            return self
-
-        def eval(self):
-            return self
-
-    class _UnusedActionEncoder(torch.nn.Module):
-        """Action encoder stub that should not be touched in prompt mode."""
-
-        def forward(self, a_plan: torch.Tensor) -> torch.Tensor:
-            raise AssertionError("prompt mode should not use the action encoder")
-
-        def to(self, *args, **kwargs):
-            return self
-
-        def eval(self):
-            return self
-
-    prepared = SimpleNamespace(
-        a_plan=torch.arange(6, dtype=torch.float32).view(1, 3, 2),
-        z_past_video=torch.full((1, 2, 2, 1, 1), 3.0),
-        z_future_video=torch.full((1, 2, 3, 1, 1), 4.0),
-    )
-    captured_infer_kwargs: dict[str, object] = {}
-
-    monkeypatch.setattr(script.WanVAE, "from_pretrained", lambda **kwargs: object())
-    monkeypatch.setattr(script, "prepare_packed_batch", lambda **kwargs: prepared)
-    monkeypatch.setattr(
-        script,
-        "build_wan_vace_runtime_modules",
-        lambda runtime_cfg, prepared_batch, device, checkpoint: (_FakeModel(), _UnusedActionEncoder()),
-    )
-    monkeypatch.setattr(
-        script.FlowMatchEulerDiscreteScheduler,
-        "from_pretrained",
-        lambda *args, **kwargs: object(),
-    )
-    monkeypatch.setattr(script, "_load_prompt_encoder", lambda runtime_cfg: ("tok", "enc"))
-    monkeypatch.setattr(
-        script,
-        "_build_prompt_conditioning_tokens",
-        lambda **kwargs: (
-            torch.full((1, 5, 4), 9.0, dtype=torch.float32),
-            torch.full((1, 5, 4), 2.0, dtype=torch.float32),
-        ),
-    )
-
-    def _fake_infer_future_videos_chunkwise(model, **kwargs):
-        """Capture prompt-conditioning kwargs and return a deterministic latent future."""
-        del model
-        captured_infer_kwargs.update(kwargs)
-        return torch.full((1, 2, 3, 1, 1), 9.0)
-
-    monkeypatch.setattr(script, "infer_future_videos_chunkwise", _fake_infer_future_videos_chunkwise)
-    monkeypatch.setattr(
-        script,
-        "_decode_future_latents",
-        lambda **kwargs: (
-            torch.full((1, 3, 3, 1, 1), 8.0),
-            torch.full((1, 3, 3, 1, 1), 6.0),
-        ),
-    )
-    monkeypatch.setattr(
-        script,
-        "preprocess_video_for_vae",
-        lambda video, frame_height, frame_width: torch.zeros(1, 5, 3, 1, 1),
-    )
-    monkeypatch.setattr(
-        script,
-        "_build_rollout_video",
-        lambda *, target_full_video, pred_future_video, context_len: (
-            torch.full((1, 5, 3, 1, 1), 8.0),
-            torch.full((1, 5, 3, 1, 1), 6.0),
-        ),
-    )
-
-    target_rollout, pred_rollout = script._run_checkpoint_world_model(
-        runtime_cfg=SimpleNamespace(
-            wan_vace_model_id="wan",
-            conditioning_mode="prompt",
-            prompt="pick up the fork",
-            negative_prompt="distorted colors",
-            guidance_scale=5.0,
-            max_sequence_length=128,
-            context_len=2,
-            horizon_len=3,
-            chunk_schedule_mode="k_chunks",
-            action_conditioning_window="chunk",
-            future_latent_residual_mode="none",
-        ),
-        checkpoint=None,
-        video=torch.zeros(1, 5, 3, 4, 4),
-        action_seq=torch.zeros(1, 5, 2),
-        video_key="observation.images.cam_high",
-        width=320,
-        height=240,
-        k=1,
-        integration_steps=10,
-        single_chunk_rollout=True,
-        action_source="auto",
-        device=torch.device("cpu"),
-        runtime_dtype=torch.float32,
-        generator=None,
-    )
-
-    assert torch.equal(target_rollout, torch.full((1, 5, 3, 1, 1), 8.0))
-    assert torch.equal(pred_rollout, torch.full((1, 5, 3, 1, 1), 6.0))
-    assert torch.equal(captured_infer_kwargs["cross_attention_tokens"], torch.full((1, 5, 4), 9.0))
-    assert torch.equal(captured_infer_kwargs["negative_cross_attention_tokens"], torch.full((1, 5, 4), 2.0))
-    assert captured_infer_kwargs["guidance_scale"] == 5.0
-    assert captured_infer_kwargs["chunk_conditioning"] is False
-    assert captured_infer_kwargs["image_attention_tokens"] is None

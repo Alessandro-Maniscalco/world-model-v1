@@ -20,13 +20,14 @@ import tempfile
 import time
 from typing import Any
 
+from world_model.optimization import paths as optimization_paths
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = optimization_paths.REPO_ROOT
 CODEX_HOME = Path.home() / ".codex"
 CODEX_SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 CODEX_SESSION_ROOT = CODEX_HOME / "sessions"
 CODEX_ARCHIVED_SESSION_ROOT = CODEX_HOME / "archived_sessions"
-CODEX_DEBUG_ROOT = REPO_ROOT / "runs" / "training_optimizer" / "debug"
+CODEX_DEBUG_ROOT = optimization_paths.codex_debug_root(REPO_ROOT)
 DEFAULT_CODEX_BIN_CANDIDATES = (
     "/home/amaniscalco/.antigravity/extensions/openai.chatgpt-*/bin/*/codex",
 )
@@ -184,7 +185,7 @@ def _run_codex_exec_once(
     debug_metadata: dict[str, Any] | None,
 ) -> CodexExecutionResult:
     """Run one fresh or resumed Codex command and return parsed metadata."""
-    temp_parent = REPO_ROOT / "runs" / "training_optimizer"
+    temp_parent = optimization_paths.training_optimizer_run_root(REPO_ROOT)
     temp_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="codex_runner_", dir=str(temp_parent)) as temp_dir:
         temp_root = Path(temp_dir)

@@ -25,6 +25,7 @@ from world_model.optimization.controller import (
     DEFAULT_MEMORY_PATH,
     DEFAULT_PROMPT_PATH,
     DEFAULT_STATE_PATH,
+    derive_state_path_for_memory_path,
     render_controller_status,
     run_training_optimization_loop,
 )
@@ -50,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt-path",
         "--instructions-path",
+        "--controller-prompt",
+        "--controller_prompt",
         type=Path,
         default=DEFAULT_PROMPT_PATH,
         help="Static markdown prompt file that defines the controller workflow.",
@@ -57,8 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--state-path",
         type=Path,
-        default=DEFAULT_STATE_PATH,
-        help="Machine-readable shared-session controller state JSON path.",
+        default=None,
+        help=(
+            "Optional machine-readable shared-session controller state JSON path. "
+            "If omitted, the CLI derives one from --memory-path "
+            f"(default memory keeps {DEFAULT_STATE_PATH})."
+        ),
     )
     parser.add_argument(
         "--codex-model",
@@ -105,14 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     """Parse CLI flags and run the shared-session controller."""
     args = build_parser().parse_args()
+    state_path = args.state_path or derive_state_path_for_memory_path(args.memory_path)
     if args.status:
-        print(render_controller_status(args.state_path))
+        print(render_controller_status(state_path))
         return 0
     run_training_optimization_loop(
         train_config_path=args.train_config,
         memory_path=args.memory_path,
         prompt_path=args.prompt_path,
-        state_path=args.state_path,
+        state_path=state_path,
         codex_model=args.codex_model,
         codex_timeout_seconds=args.codex_timeout_seconds,
         codex_session_id=args.codex_session_id,

@@ -54,14 +54,14 @@ class _RecordingBackbone(torch.nn.Module):
         return SimpleNamespace(sample=hidden_states)
 
 
-def test_wan_vace_world_model_uses_black_fill_latents_with_gray_future_template() -> None:
-    """Match the public VACE control layout instead of defaulting masked regions to latent zero."""
+def test_wan_vace_world_model_uses_upstream_neutral_fill_with_gray_future_template() -> None:
+    """Match the upstream VACE neutral-fill control layout instead of using true-black latents."""
     backbone = _RecordingBackbone()
     model = WanVACEWorldModel(
         backbone=backbone,
         control_scale=0.75,
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 2, 1, 1)),
         control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
     )
     observed_video = torch.tensor([[[[[2.0]]], [[[3.0]]]]], dtype=torch.float32)
@@ -86,8 +86,8 @@ def test_wan_vace_world_model_uses_black_fill_latents_with_gray_future_template(
     expected_control_hidden_states = build_vace_control_tensor(
         observed_latents=expected_control_video,
         observed_mask=expected_control_mask,
-        inactive_fill_latents=torch.full_like(expected_control_video, -1.0),
-        reactive_fill_latents=torch.full_like(expected_control_video, -1.0),
+        inactive_fill_latents=torch.zeros_like(expected_control_video),
+        reactive_fill_latents=torch.zeros_like(expected_control_video),
         mask_channels=1,
     )
 
@@ -106,7 +106,7 @@ def test_wan_vace_world_model_can_fill_future_control_with_last_context_frame() 
         control_scale=1.0,
         future_control_fill_mode="last_context_frame",
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 3, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 3, 1, 1)),
         control_gray_latents=torch.full((1, 2, 3, 1, 1), 0.5),
     )
 
@@ -131,11 +131,11 @@ def test_wan_vace_world_model_can_fill_future_control_with_last_context_frame() 
         observed_latents=expected_control_video,
         observed_mask=expected_control_mask,
         inactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[-1.0]], [[4.0]]], [[[-1.0]], [[-1.0]], [[5.0]]]]],
+            [[[[[0.0]], [[0.0]], [[4.0]]], [[[0.0]], [[0.0]], [[5.0]]]]],
             dtype=torch.float32,
         ),
         reactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[-1.0]], [[4.0]]], [[[-1.0]], [[-1.0]], [[5.0]]]]],
+            [[[[[0.0]], [[0.0]], [[4.0]]], [[[0.0]], [[0.0]], [[5.0]]]]],
             dtype=torch.float32,
         ),
         mask_channels=1,
@@ -152,7 +152,7 @@ def test_wan_vace_world_model_residualizes_future_control_stream_when_requested(
         backbone=backbone,
         control_scale=1.0,
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 2, 1, 1)),
         control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
     )
 
@@ -174,11 +174,11 @@ def test_wan_vace_world_model_residualizes_future_control_stream_when_requested(
         observed_latents=expected_control_video,
         observed_mask=expected_control_mask,
         inactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[-3.0]]], [[[-1.0]], [[-3.0]]]]],
+            [[[[[0.0]], [[-2.0]]], [[[0.0]], [[-2.0]]]]],
             dtype=torch.float32,
         ),
         reactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[-3.0]]], [[[-1.0]], [[-3.0]]]]],
+            [[[[[0.0]], [[-2.0]]], [[[0.0]], [[-2.0]]]]],
             dtype=torch.float32,
         ),
         mask_channels=1,
@@ -196,7 +196,7 @@ def test_wan_vace_world_model_zeroes_last_context_fill_under_residual_targets() 
         control_scale=1.0,
         future_control_fill_mode="last_context_frame",
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 2, 1, 1)),
         control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
     )
 
@@ -218,11 +218,11 @@ def test_wan_vace_world_model_zeroes_last_context_fill_under_residual_targets() 
         observed_latents=expected_control_video,
         observed_mask=expected_control_mask,
         inactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[0.0]]], [[[-1.0]], [[0.0]]]]],
+            [[[[[0.0]], [[0.0]]], [[[0.0]], [[0.0]]]]],
             dtype=torch.float32,
         ),
         reactive_fill_latents=torch.tensor(
-            [[[[[-1.0]], [[0.0]]], [[[-1.0]], [[0.0]]]]],
+            [[[[[0.0]], [[0.0]]], [[[0.0]], [[0.0]]]]],
             dtype=torch.float32,
         ),
         mask_channels=1,
@@ -239,7 +239,7 @@ def test_wan_vace_world_model_allows_missing_block_causal_attention_mask() -> No
         backbone=backbone,
         control_scale=1.0,
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 2, 1, 1)),
         control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
     )
 
@@ -261,7 +261,7 @@ def test_wan_vace_world_model_forwards_action_image_tokens_to_backbone() -> None
         backbone=backbone,
         control_scale=1.0,
         mask_channels=1,
-        control_black_latents=torch.full((1, 2, 2, 1, 1), -1.0),
+        control_black_latents=torch.zeros((1, 2, 2, 1, 1)),
         control_gray_latents=torch.full((1, 2, 2, 1, 1), 0.5),
     )
     action_image_tokens = torch.randn(1, 1, 4)

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import gc
 import itertools
 import random
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
 import sys
+from typing import Callable
 
 import torch
 from torch import nn
@@ -47,6 +49,7 @@ from world_model.data.schema import PreparedPackedBatch
 from world_model.latents import WanVAE
 from world_model.models import WanVACEWorldModel
 from world_model.models.wan_vace_factory import (
+    _action_state_is_none_conditioning_token,
     build_conditioning_encoder_for_model,
     build_wan_vace_model_from_config,
     _load_action_encoder_state_dict,
@@ -92,6 +95,18 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
     parser.add_argument("--horizon-len", type=int, default=defaults.horizon_len, help="frame-time horizon length (H)")
     parser.add_argument("--dt", type=float, default=defaults.dt)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
+    parser.add_argument(
+        "--auto-batch-size",
+        action="store_true",
+        default=defaults.auto_batch_size,
+        help="At startup, probe real train steps from batch_size=1 up to the configured --batch-size cap and keep the largest batch that fits.",
+    )
+    parser.add_argument(
+        "--no-auto-batch-size",
+        dest="auto_batch_size",
+        action="store_false",
+        help="Disable startup batch-size autotuning and use --batch-size as-is.",
+    )
     parser.add_argument("--k", type=int, default=defaults.k, help="Chunk-count parameter for latent-time scheduling")
     parser.add_argument(
         "--chunk-schedule-mode",
@@ -342,6 +357,18 @@ def _build_parser(defaults: TrainScriptConfig) -> argparse.ArgumentParser:
         default=defaults.action_token_scale,
         help="Final gain applied to projected action tokens before Wan cross-attention.",
     )
+    parser.add_argument(
+        "--action-output-zero-init",
+        action="store_true",
+        default=defaults.action_output_zero_init,
+        help="Start fresh action conditioning as an exact no-op by zero-initializing the final token projection.",
+    )
+    parser.add_argument(
+        "--no-action-output-zero-init",
+        dest="action_output_zero_init",
+        action="store_false",
+        help="Disable zero-init on the final action-token projection and inject learned action tokens immediately.",
+    )
     parser.add_argument("--frame-height", type=int, default=defaults.frame_height, help="resize frames to this height before VAE encoding (0=no resize)")
     parser.add_argument("--frame-width", type=int, default=defaults.frame_width, help="resize frames to this width before VAE encoding (0=no resize)")
     parser.add_argument("--num-workers", type=int, default=defaults.num_workers)
@@ -410,6 +437,8 @@ def _validate_chunk_schedule(cfg: TrainScriptConfig, prepared_batch: PreparedPac
 
 def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
     """Reject inconsistent blockwise continuation settings before entering the train loop."""
+    if cfg.batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {cfg.batch_size}.")
     if cfg.auto_stop_check_every < 0:
         raise ValueError(f"auto_stop_check_every must be >= 0, got {cfg.auto_stop_check_every}.")
     if cfg.auto_stop_min_relative_improvement < 0.0:
@@ -488,6 +517,260 @@ def _validate_auto_stop_config(cfg: TrainScriptConfig) -> None:
         raise ValueError(f"action_token_scale must be >= 0, got {cfg.action_token_scale}.")
     if cfg.validation_enabled and cfg.video_path:
         raise ValueError("Validation loss is not supported for local-video training in v1.")
+
+
+def _build_train_loader(
+    cfg: TrainScriptConfig,
+    *,
+    train_episode_ids: list[int] | tuple[int, ...],
+    batch_size: int,
+    shuffle: bool | None = None,
+):
+    """Build the training dataloader for a specific startup or runtime batch size."""
+    return build_lerobot_dataloader(
+        repo_id=cfg.repo_id,
+        episodes=train_episode_ids,
+        video_key=cfg.video_key,
+        context_len=cfg.context_len,
+        horizon_len=cfg.horizon_len,
+        dt=cfg.dt,
+        batch_size=batch_size,
+        subset_size=cfg.subset_size,
+        shuffle=(not cfg.overfit_one_batch if shuffle is None else shuffle),
+        num_workers=cfg.num_workers,
+        drop_last=True,
+    )
+
+
+def _build_validation_loader(
+    cfg: TrainScriptConfig,
+    *,
+    validation_episode_ids: list[int] | tuple[int, ...],
+    batch_size: int,
+):
+    """Build the held-out validation dataloader for the selected runtime batch size."""
+    return build_lerobot_dataloader(
+        repo_id=cfg.repo_id,
+        episodes=validation_episode_ids,
+        video_key=cfg.video_key,
+        context_len=cfg.context_len,
+        horizon_len=cfg.horizon_len,
+        dt=cfg.dt,
+        batch_size=batch_size,
+        subset_size=0,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        drop_last=False,
+    )
+
+
+def _is_oom_error(error: BaseException) -> bool:
+    """Return whether one exception matches PyTorch/CUDA out-of-memory failures."""
+    if isinstance(error, torch.cuda.OutOfMemoryError):
+        return True
+    return "out of memory" in str(error).lower()
+
+
+def _clear_runtime_memory(*, device: torch.device) -> None:
+    """Release transient probe allocations after an OOM or completed startup trial."""
+    gc.collect()
+    if device.type != "cuda":
+        return
+    torch.cuda.empty_cache()
+    if hasattr(torch.cuda, "ipc_collect"):
+        torch.cuda.ipc_collect()
+
+
+def _find_largest_batch_size(
+    *,
+    max_batch_size: int,
+    probe_fits: Callable[[int], bool],
+) -> tuple[int, tuple[int, ...]]:
+    """Find the largest fitting batch size using power growth then binary search."""
+    if max_batch_size <= 0:
+        raise ValueError(f"max_batch_size must be positive, got {max_batch_size}.")
+
+    attempted: list[int] = []
+    largest_fit = 0
+    first_fail: int | None = None
+    candidate = 1
+    while True:
+        attempted.append(candidate)
+        if probe_fits(candidate):
+            largest_fit = candidate
+            if candidate >= max_batch_size:
+                return largest_fit, tuple(attempted)
+            next_candidate = min(candidate * 2, max_batch_size)
+            if next_candidate == candidate:
+                return largest_fit, tuple(attempted)
+            candidate = next_candidate
+            continue
+        first_fail = candidate
+        break
+
+    if largest_fit <= 0:
+        raise RuntimeError(
+            "Startup batch-size autotune could not fit batch_size=1; lower memory use or disable auto batching."
+        )
+
+    low = largest_fit
+    high = first_fail
+    while high is not None and low + 1 < high:
+        candidate = (low + high) // 2
+        attempted.append(candidate)
+        if probe_fits(candidate):
+            low = candidate
+        else:
+            high = candidate
+    return low, tuple(attempted)
+
+
+def _run_batch_size_probe(
+    *,
+    cfg: TrainScriptConfig,
+    batch_size: int,
+    train_episode_ids: list[int] | tuple[int, ...],
+    vae: WanVAE,
+    model: nn.Module,
+    action_encoder: nn.Module,
+    device: torch.device,
+    runtime_dtype: torch.dtype,
+) -> bool:
+    """Return whether one real train step fits at the requested batch size."""
+    loader = None
+    optimizer = None
+    batch = None
+    prepared = None
+    try:
+        if cfg.video_path:
+            if batch_size > 1:
+                return False
+            total_frames = cfg.context_len + cfg.horizon_len
+            batch = {
+                cfg.video_key: load_local_video_clip(
+                    cfg.video_path,
+                    start_frame=cfg.start_frame,
+                    total_frames=total_frames,
+                )
+            }
+        else:
+            loader = _build_train_loader(
+                cfg,
+                train_episode_ids=train_episode_ids,
+                batch_size=batch_size,
+                shuffle=False,
+            )
+            batch = next(iter(loader))
+
+        prepared = prepare_packed_batch(
+            batch=batch,
+            encoder=vae,
+            device=device,
+            video_key=cfg.video_key,
+            context_len=cfg.context_len,
+            horizon_len=cfg.horizon_len,
+            frame_height=cfg.frame_height,
+            frame_width=cfg.frame_width,
+            allow_missing_action=(cfg.conditioning_mode == "none"),
+        )
+        _validate_chunk_schedule(cfg, prepared)
+        parameter_groups = _configure_trainable_parameters(cfg, model, action_encoder)
+        optimizer = _build_optimizer(cfg, parameter_groups)
+        grad_scaler = torch.amp.GradScaler(
+            "cuda",
+            enabled=(device.type == "cuda" and not cfg.disable_amp and runtime_dtype == torch.float16),
+        )
+        train_chunkwise_batch(
+            model=model,
+            action_encoder=action_encoder,
+            optimizer=optimizer,
+            z_past_video=prepared.z_past_video,
+            z_future_video=prepared.z_future_video,
+            a_plan=prepared.a_plan,
+            k=cfg.k,
+            action_conditioning_window=cfg.action_conditioning_window,
+            teacher_forcing_observation_mode=cfg.teacher_forcing_observation_mode,
+            teacher_forcing_future_input_mode=cfg.teacher_forcing_future_input_mode,
+            chunk_schedule_mode=cfg.chunk_schedule_mode,
+            action_backbone_added_kv_mode=cfg.action_backbone_added_kv_mode,
+            action_token_latent_aux_loss_scale=cfg.action_token_latent_aux_loss_scale,
+            t_min=cfg.t_min,
+            t_max=cfg.t_max,
+            weight_mode=cfg.weight_mode,
+            motion_loss_alpha=cfg.motion_loss_alpha,
+            motion_loss_max_weight=cfg.motion_loss_max_weight,
+            motion_loss_excess_only=cfg.motion_loss_excess_only,
+            future_latent_residual_mode=cfg.future_latent_residual_mode,
+            future_loss_early_bias=cfg.future_loss_early_bias,
+            future_chunk_early_bias=cfg.future_chunk_early_bias,
+            grad_clip_norm=cfg.grad_clip_norm,
+            amp_dtype=(None if cfg.disable_amp or device.type != "cuda" else runtime_dtype),
+            grad_scaler=grad_scaler,
+        )
+        return True
+    except StopIteration:
+        return False
+    except RuntimeError as error:
+        if not _is_oom_error(error):
+            raise
+        return False
+    except torch.cuda.OutOfMemoryError:
+        return False
+    finally:
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        del loader
+        del batch
+        del prepared
+        del optimizer
+        _clear_runtime_memory(device=device)
+
+
+def _autotune_batch_size(
+    *,
+    cfg: TrainScriptConfig,
+    train_episode_ids: list[int] | tuple[int, ...],
+    vae: WanVAE,
+    prepared: PreparedPackedBatch,
+    device: torch.device,
+    runtime_dtype: torch.dtype,
+) -> tuple[int, tuple[int, ...]]:
+    """Select a startup batch size with a real train-step probe under a fixed cap."""
+    if not cfg.auto_batch_size:
+        return cfg.batch_size, ()
+    if device.type != "cuda":
+        print("Auto batch size disabled on CPU; using configured batch size.", flush=True)
+        return cfg.batch_size, ()
+
+    probe_model = build_model_from_config(cfg, prepared)
+    probe_action_encoder = build_action_encoder_from_config(cfg, prepared, probe_model)
+    probe_model, probe_action_encoder = _move_train_modules_to_runtime(
+        model=probe_model,
+        action_encoder=probe_action_encoder,
+        device=device,
+        runtime_dtype=runtime_dtype,
+    )
+    try:
+        selected_batch_size, attempted = _find_largest_batch_size(
+            max_batch_size=cfg.batch_size,
+            probe_fits=lambda candidate: _run_batch_size_probe(
+                cfg=cfg,
+                batch_size=candidate,
+                train_episode_ids=train_episode_ids,
+                vae=vae,
+                model=probe_model,
+                action_encoder=probe_action_encoder,
+                device=device,
+                runtime_dtype=runtime_dtype,
+            ),
+        )
+    finally:
+        del probe_model
+        del probe_action_encoder
+        _clear_runtime_memory(device=device)
+
+    print(f"Auto batch size selected {selected_batch_size}", flush=True)
+    return selected_batch_size, attempted
 
 
 def _format_episode_preview(episode_ids: list[int]) -> str:
@@ -625,7 +908,10 @@ def _resume_training_state(
         )
     if loaded_partial_action_state:
         return step, False
-    optimizer.load_state_dict(optimizer_state)
+    try:
+        optimizer.load_state_dict(optimizer_state)
+    except ValueError:
+        return step, False
     return step, True
 
 
@@ -648,13 +934,24 @@ def _load_resume_model_state_dict(*, model: nn.Module, model_state: dict[str, ob
         remapped_state[target_key] = value
 
     incompatible = model.load_state_dict(remapped_state, strict=False)
-    missing = [key for key in incompatible.missing_keys if "lora_" not in key]
-    unexpected = [key for key in incompatible.unexpected_keys if "lora_" not in key]
+    missing = [key for key in incompatible.missing_keys if not _is_allowed_resume_topology_delta_key(key)]
+    unexpected = [key for key in incompatible.unexpected_keys if not _is_allowed_resume_topology_delta_key(key)]
     if missing or unexpected:
         raise ValueError(
             "Checkpoint model overlay mismatch: "
             f"missing={missing[:10]} unexpected={unexpected[:10]}"
         )
+
+
+def _is_allowed_resume_topology_delta_key(key: str) -> bool:
+    """Allow resume-time topology deltas for optional LoRA and added-K/V action modules."""
+    return (
+        "lora_" in key
+        or "condition_embedder.image_embedder." in key
+        or ".add_k_proj." in key
+        or ".add_v_proj." in key
+        or ".norm_added_k." in key
+    )
 
 
 def _resume_uses_fresh_action_encoder(
@@ -666,7 +963,7 @@ def _resume_uses_fresh_action_encoder(
     """Detect when a resume should keep a newly initialized action encoder."""
     if isinstance(action_encoder, NullConditioningEncoder):
         return False
-    if action_state:
+    if action_state and not _action_state_is_none_conditioning_token(action_state):
         return False
     extra_state = checkpoint.get("extra_state")
     if not isinstance(extra_state, dict):
@@ -979,11 +1276,6 @@ def main() -> None:
         enabled=(device.type == "cuda" and not cfg.disable_amp and runtime_dtype == torch.float16),
     )
     print(f"Device: {device}", flush=True)
-    print(
-        f"Training config: steps={cfg.max_steps} batch={cfg.batch_size} "
-        f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}",
-        flush=True,
-    )
     print(f"Training dtype: {runtime_dtype}", flush=True)
     if cfg.resume_from:
         print(f"Resume checkpoint: {cfg.resume_from}", flush=True)
@@ -1028,35 +1320,12 @@ def main() -> None:
                 flush=True,
             )
 
-        loader = build_lerobot_dataloader(
-            repo_id=cfg.repo_id,
-            episodes=train_episode_ids,
-            video_key=cfg.video_key,
-            context_len=cfg.context_len,
-            horizon_len=cfg.horizon_len,
-            dt=cfg.dt,
-            batch_size=cfg.batch_size,
-            subset_size=cfg.subset_size,
-            shuffle=not cfg.overfit_one_batch,
-            num_workers=cfg.num_workers,
-            drop_last=True,
+        probe_loader = _build_train_loader(
+            cfg,
+            train_episode_ids=train_episode_ids,
+            batch_size=1 if cfg.auto_batch_size else cfg.batch_size,
         )
-        data_iter = iter(loader)
-        first_batch = next(data_iter)
-        if cfg.validation_enabled:
-            validation_loader = build_lerobot_dataloader(
-                repo_id=cfg.repo_id,
-                episodes=validation_episode_ids,
-                video_key=cfg.video_key,
-                context_len=cfg.context_len,
-                horizon_len=cfg.horizon_len,
-                dt=cfg.dt,
-                batch_size=cfg.batch_size,
-                subset_size=0,
-                shuffle=False,
-                num_workers=cfg.num_workers,
-                drop_last=False,
-            )
+        first_batch = next(iter(probe_loader))
     prepared = prepare_packed_batch(
         batch=first_batch,
         encoder=vae,
@@ -1069,6 +1338,49 @@ def main() -> None:
         allow_missing_action=(cfg.conditioning_mode == "none"),
     )
     _validate_chunk_schedule(cfg, prepared)
+    selected_batch_size, _ = _autotune_batch_size(
+        cfg=cfg,
+        train_episode_ids=train_episode_ids,
+        vae=vae,
+        prepared=prepared,
+        device=device,
+        runtime_dtype=runtime_dtype,
+    )
+    if selected_batch_size != cfg.batch_size:
+        cfg = replace(cfg, batch_size=selected_batch_size)
+    print(
+        f"Training config: steps={cfg.max_steps} batch={cfg.batch_size} "
+        f"k={cfg.k} l={cfg.context_len} H={cfg.horizon_len}",
+        flush=True,
+    )
+
+    if not cfg.video_path:
+        loader = _build_train_loader(
+            cfg,
+            train_episode_ids=train_episode_ids,
+            batch_size=cfg.batch_size,
+        )
+        data_iter = iter(loader)
+        first_batch = next(data_iter)
+        if cfg.validation_enabled:
+            validation_loader = _build_validation_loader(
+                cfg,
+                validation_episode_ids=validation_episode_ids,
+                batch_size=cfg.batch_size,
+            )
+        prepared = prepare_packed_batch(
+            batch=first_batch,
+            encoder=vae,
+            device=device,
+            video_key=cfg.video_key,
+            context_len=cfg.context_len,
+            horizon_len=cfg.horizon_len,
+            frame_height=cfg.frame_height,
+            frame_width=cfg.frame_width,
+            allow_missing_action=(cfg.conditioning_mode == "none"),
+        )
+        _validate_chunk_schedule(cfg, prepared)
+
     print(
         "Latent window: "
         f"context={prepared.context_latent_steps} "
@@ -1127,8 +1439,8 @@ def main() -> None:
         print(f"Resumed training state from step={resumed_step:06d}", flush=True)
         if not restored_optimizer_state:
             print(
-                "Resume note: checkpoint predates one or more optional conditioning modules, "
-                "so optimizer state was not restored.",
+                "Resume note: checkpoint predates one or more optional conditioning modules "
+                "or uses incompatible optimizer parameter groups, so optimizer state was not restored.",
                 flush=True,
             )
         else:

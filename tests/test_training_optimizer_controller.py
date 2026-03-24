@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,29 +12,26 @@ import pytest
 import world_model.optimization.controller as controller_module
 
 
-def test_legacy_training_optimizer_memory_alias_selects_fixed_anchor_workflow(
+def test_custom_investigation_paths_select_a_matching_state_file(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Route the old README command onto the fixed-anchor memory, prompt, and state."""
+    """Use the explicitly provided state path for a custom investigation run."""
     train_config_path = tmp_path / "train.yaml"
     train_config_path.write_text("repo_id: demo\n", encoding="utf-8")
-    legacy_memory_path = Path("docs/training_optimizer.md")
-    default_prompt_path = Path("docs/controller_prompt.md")
-    default_state_path = Path("runs/training_optimizer/controller_state.json")
+    investigation_memory_path = Path("docs/investigation.md")
+    investigation_prompt_path = Path("docs/controller_prompt_investigationsmd")
+    investigation_state_path = Path(
+        "runs/training_optimizer/investigation_controller_state.json"
+    )
 
     (tmp_path / "docs").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "docs" / "training_optimizer.md").write_text("# Legacy Memory\n", encoding="utf-8")
-    (tmp_path / "docs" / "fixed_anchor_investigation.md").write_text(
-        "# Fixed Memory\n",
+    (tmp_path / "docs" / "investigation.md").write_text(
+        "# Investigation Memory\n",
         encoding="utf-8",
     )
-    (tmp_path / "docs" / "controller_prompt.md").write_text(
-        "# Legacy Prompt\n\n## Validation\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "docs" / "controller_prompt_fixed_anchor.md").write_text(
-        "# Fixed Prompt\n\n## Validation\n",
+    (tmp_path / "docs" / "controller_prompt_investigationsmd").write_text(
+        "# Investigation Prompt\n\n## Validation\n",
         encoding="utf-8",
     )
 
@@ -52,18 +50,115 @@ def test_legacy_training_optimizer_memory_alias_selects_fixed_anchor_workflow(
 
     controller_module.run_training_optimization_loop(
         train_config_path=train_config_path,
-        memory_path=legacy_memory_path,
-        prompt_path=default_prompt_path,
-        state_path=default_state_path,
+        memory_path=investigation_memory_path,
+        prompt_path=investigation_prompt_path,
+        state_path=investigation_state_path,
     )
 
-    fixed_state_path = tmp_path / "runs" / "training_optimizer" / "fixed_anchor_controller_state.json"
-    state = controller_module.load_controller_state(fixed_state_path)
+    resolved_state_path = (
+        tmp_path / "runs" / "training_optimizer" / "investigation_controller_state.json"
+    )
+    state = controller_module.load_controller_state(resolved_state_path)
 
-    assert "First read and adopt docs/controller_prompt_fixed_anchor.md before doing any work." in prompts[0]
-    assert "Use docs/fixed_anchor_investigation.md as the mutable optimization memory." in prompts[0]
-    assert fixed_state_path.exists() is True
+    assert (
+        "This is a shared session. Read docs/controller_prompt_investigationsmd. "
+        "The goal is in docs/investigation.md."
+    ) in prompts[0]
+    assert "Prompt rules: docs/controller_prompt_investigationsmd." in prompts[0]
+    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[0]
+    assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[0]
+    assert resolved_state_path.exists() is True
     assert state["last_stop_reason"] == "done"
+
+
+def test_training_optimizer_cli_accepts_controller_prompt_alias() -> None:
+    """Parse the investigation prompt flag using the underscore alias."""
+    training_optimizer_script = _load_training_optimizer_script_module()
+    args = training_optimizer_script.build_parser().parse_args(
+        [
+            "--train-config",
+            "configs/train/aloha_fork_pick_up.yaml",
+            "--memory-path",
+            "docs/investigation.md",
+            "--controller_prompt",
+            "docs/controller_prompt_investigationsmd",
+            "--state-path",
+            "runs/training_optimizer/investigation_controller_state.json",
+            "--iterations",
+            "30",
+        ]
+    )
+
+    assert args.train_config == Path("configs/train/aloha_fork_pick_up.yaml")
+    assert args.memory_path == Path("docs/investigation.md")
+    assert args.prompt_path == Path("docs/controller_prompt_investigationsmd")
+    assert args.state_path == Path(
+        "runs/training_optimizer/investigation_controller_state.json"
+    )
+    assert args.iterations == 30
+
+
+def test_training_optimizer_cli_leaves_state_path_unset_when_omitted() -> None:
+    """Allow the CLI main entrypoint to derive a matching state path from memory."""
+    training_optimizer_script = _load_training_optimizer_script_module()
+    args = training_optimizer_script.build_parser().parse_args(
+        [
+            "--train-config",
+            "configs/train/aloha_fork_pick_up.yaml",
+            "--memory-path",
+            "docs/investigation1.md",
+        ]
+    )
+
+    assert args.memory_path == Path("docs/investigation1.md")
+    assert args.state_path is None
+
+
+def test_derive_state_path_for_custom_memory_path_uses_matching_stem(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Map custom memory markdown files to isolated controller-state JSON paths."""
+    monkeypatch.setattr(controller_module, "REPO_ROOT", tmp_path)
+
+    derived = controller_module.derive_state_path_for_memory_path("docs/investigation1.md")
+
+    assert derived == tmp_path / "runs" / "training_optimizer" / "investigation1_controller_state.json"
+
+
+def test_training_optimizer_main_derives_state_path_from_memory_path(
+    monkeypatch,
+) -> None:
+    """Pass the derived matching state path into the controller loop when omitted on the CLI."""
+    training_optimizer_script = _load_training_optimizer_script_module()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        training_optimizer_script,
+        "run_training_optimization_loop",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        training_optimizer_script,
+        "derive_state_path_for_memory_path",
+        lambda memory_path: Path("runs/training_optimizer/investigation1_controller_state.json"),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "training_optimizer.py",
+            "--train-config",
+            "configs/train/aloha_fork_pick_up.yaml",
+            "--memory-path",
+            "docs/investigation1.md",
+        ],
+    )
+
+    assert training_optimizer_script.main() == 0
+    assert captured["memory_path"] == Path("docs/investigation1.md")
+    assert captured["state_path"] == Path(
+        "runs/training_optimizer/investigation1_controller_state.json"
+    )
 
 
 def test_stopped_state_starts_fresh_session_on_new_invocation(
@@ -140,7 +235,7 @@ def test_controller_logs_state_path_at_run_start(
     )
 
     stdout = capsys.readouterr().out
-    assert "[controller] state: runs/training_optimizer/controller_state.json" in stdout
+    assert "[controller] state: runs/training_optimizer/investigation_controller_state.json" in stdout
 
 
 def test_controller_status_logging_flushes_immediately(monkeypatch) -> None:
@@ -260,27 +355,27 @@ def test_shared_session_loop_runs_one_full_external_command_cycle(
     assert expected_mp4.exists() is True
     assert state["last_stop_reason"] == "validation complete"
     assert any(item["path"] == str(expected_mp4) and item["exists"] for item in state["latest_artifacts"])
-    assert "First read and adopt docs/controller_prompt.md before doing any work." in prompts[0]
-    assert "Read runs/training_optimizer/controller_state.json for the latest controller history" in prompts[0]
-    assert "Read train.yaml for the base training configuration." in prompts[0]
-    assert "Optimize for the best next action under long-run experiment cost" in prompts[0]
-    assert "Ground validation summaries and next-action reasons in concrete video observations" in prompts[0]
     assert (
-        "At the start of a fresh session, after reading the controller state and optimization memory, "
-        "you may delete only clearly dominated checkpoints"
+        "This is a shared session. Read docs/controller_prompt_investigations.md. "
+        "The goal is in docs/investigation.md."
     ) in prompts[0]
-    assert '"state_path": "runs/training_optimizer/controller_state.json"' in prompts[0]
+    assert "Prompt rules: docs/controller_prompt_investigations.md." in prompts[0]
+    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[0]
+    assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[0]
+    assert "Read train.yaml for the base training configuration." in prompts[0]
+    assert (
+        "Your final output should be a JSON object with: action_type, summary, "
+        "session_work_summary, repo_edit_status, long_command, and stop."
+    ) in prompts[0]
+    assert '"state_path": "runs/training_optimizer/investigation_controller_state.json"' in prompts[0]
     assert '"train_config_path": "train.yaml"' in prompts[0]
     assert '"state_summary"' not in prompts[0]
     assert '"latest_artifacts"' not in prompts[0]
-    assert "Check docs/controller_prompt.md before deciding" in prompts[1]
-    assert "Read runs/training_optimizer/controller_state.json for the latest controller history" in prompts[1]
-    assert "- ### Motion-First Ranking" in prompts[1]
-    assert "- ## Decision Rule" in prompts[1]
-    assert "Choose the best next action for the overall long-run budget" in prompts[1]
-    assert "Describe the reviewed videos concretely in your summary and reasoning" in prompts[1]
-    assert "you may delete only clearly dominated checkpoints" not in prompts[1]
-    assert '"state_path": "runs/training_optimizer/controller_state.json"' in prompts[1]
+    assert "Continue the same shared Codex session." in prompts[1]
+    assert "Prompt rules: docs/controller_prompt_investigations.md." in prompts[1]
+    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[1]
+    assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[1]
+    assert '"state_path": "runs/training_optimizer/investigation_controller_state.json"' in prompts[1]
     assert '"latest_result_available": true' in prompts[1]
     assert '"state_summary"' not in prompts[1]
 
@@ -656,7 +751,7 @@ def test_external_command_failure_reopens_session_for_diagnosis(
     assert len(records) == 1
     assert records[0]["long_command_result"]["returncode"] == 3
     assert session_calls == [None, "session-failure"]
-    assert '"state_path": "runs/training_optimizer/controller_state.json"' in prompts[1]
+    assert '"state_path": "runs/training_optimizer/investigation_controller_state.json"' in prompts[1]
     assert '"latest_result_available": true' in prompts[1]
     assert '"last_long_command_result"' not in prompts[1]
     assert state["last_stop_reason"] == "diagnosed failed run"
@@ -766,14 +861,25 @@ def test_rollback_requested_restores_preexisting_dirty_repo_state(
 
 def _make_controller_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Create the memory, prompt, and state paths for one controller test."""
-    memory_path = tmp_path / "docs" / "complexity_ladder_training.md"
+    memory_path = tmp_path / "docs" / "investigation.md"
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text("# Memory\n", encoding="utf-8")
-    prompt_path = tmp_path / "docs" / "controller_prompt.md"
+    prompt_path = tmp_path / "docs" / "controller_prompt_investigations.md"
     prompt_path.write_text("# Prompt\n\n## Validation\n", encoding="utf-8")
-    state_path = tmp_path / "runs" / "training_optimizer" / "controller_state.json"
+    state_path = tmp_path / "runs" / "training_optimizer" / "investigation_controller_state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     return state_path, memory_path, prompt_path
+
+
+def _load_training_optimizer_script_module():
+    """Load the CLI module from disk without requiring `scripts` to be a package."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "train" / "training_optimizer.py"
+    spec = importlib.util.spec_from_file_location("training_optimizer_script", script_path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("Could not load training optimizer script module.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _run_long_command_payload(

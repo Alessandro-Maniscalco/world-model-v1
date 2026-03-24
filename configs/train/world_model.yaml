@@ -6,7 +6,8 @@ output_dir: runs/world_model_train
 context_len: 9
 horizon_len: 8
 dt: 0.1
-batch_size: 2
+batch_size: 16
+auto_batch_size: true
 k: 1
 chunk_schedule_mode: k_chunks
 max_steps: 2000

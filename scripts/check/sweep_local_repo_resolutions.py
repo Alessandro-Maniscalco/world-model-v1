@@ -79,7 +79,7 @@ _ARM_MOTION_MODULE = None
 def _parse_args() -> argparse.Namespace:
     """Parse CLI overrides for the local-resolution sweep."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("base", "checkpoint", "repo_prompt"), default=DEFAULT_MODE)
+    parser.add_argument("--mode", choices=("base", "checkpoint"), default=DEFAULT_MODE)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -499,8 +499,8 @@ def _apply_runtime_overrides(
     runtime_cfg.negative_prompt = negative_prompt
     runtime_cfg.guidance_scale = float(guidance_scale)
     runtime_cfg.max_sequence_length = int(max_sequence_length)
-    runtime_cfg.single_chunk_rollout = True if mode in {"base", "repo_prompt"} else bool(single_chunk_rollout)
-    if mode in {"checkpoint", "repo_prompt"}:
+    runtime_cfg.single_chunk_rollout = True if mode == "base" else bool(single_chunk_rollout)
+    if mode == "checkpoint":
         runtime_cfg.context_len = int(context_len)
         runtime_cfg.horizon_len = int(horizon_len)
     runtime_cfg.action_token_scale = float(action_token_scale)
@@ -1161,7 +1161,7 @@ def _decode_future_latents(
     device: torch.device,
     runtime_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Decode future latents with their past context so Wan reconstructs all horizon frames."""
+    """Decode the full latent window so checkpoint exports include context and future frames."""
     if context_len <= 0:
         raise ValueError(f"context_len must be positive, got {context_len}")
     if future_frame_count <= 0:
@@ -1181,15 +1181,14 @@ def _decode_future_latents(
         decode_target = target_full_latents
     pred_video = vae.decode(decode_pred, output_layout="BTCHW", output_range="zero_to_one")
     target_video = vae.decode(decode_target, output_layout="BTCHW", output_range="zero_to_one")
-    future_start = context_len
-    future_end = context_len + future_frame_count
-    if pred_video.shape[1] < future_end or target_video.shape[1] < future_end:
+    full_frame_count = context_len + future_frame_count
+    if pred_video.shape[1] < full_frame_count or target_video.shape[1] < full_frame_count:
         raise ValueError(
             "Decoded full video is shorter than the requested future slice: "
             f"pred_frames={int(pred_video.shape[1])}, target_frames={int(target_video.shape[1])}, "
-            f"future_end={future_end}."
+            f"full_frame_count={full_frame_count}."
         )
-    return pred_video[:, future_start:future_end], target_video[:, future_start:future_end]
+    return pred_video[:, :full_frame_count], target_video[:, :full_frame_count]
 
 
 @torch.no_grad()
@@ -1213,15 +1212,12 @@ def _run_checkpoint_world_model(
     """Run checkpoint-mode inference with the repo world-model path used during training eval."""
     vae = WanVAE.from_pretrained(device=device, deterministic=True, torch_dtype=runtime_dtype)
     conditioning_mode = str(getattr(runtime_cfg, "conditioning_mode", "action"))
-    if checkpoint is None and conditioning_mode in {"none", "prompt"}:
-        action_tensor = action_seq
-    else:
-        expected_action_dim = _infer_checkpoint_action_dim(checkpoint)
-        action_tensor = _select_action_tensor(
-            action_seq=action_seq,
-            action_source=action_source,
-            expected_action_dim=expected_action_dim,
-        )
+    expected_action_dim = _infer_checkpoint_action_dim(checkpoint) if checkpoint is not None else None
+    action_tensor = _select_action_tensor(
+        action_seq=action_seq,
+        action_source=action_source,
+        expected_action_dim=expected_action_dim,
+    )
     batch = {
         video_key: video,
         "action": action_tensor,
@@ -1303,7 +1299,7 @@ def _run_checkpoint_world_model(
             scheduler=scheduler,
             generator=generator,
         )
-    pred_video, target_video = _decode_future_latents(
+    pred_full_video, _ = _decode_future_latents(
         vae=vae,
         past_video_latents=prepared.z_past_video,
         pred_future_video=pred_future_video,
@@ -1320,8 +1316,7 @@ def _run_checkpoint_world_model(
     )
     return _build_rollout_video(
         target_full_video=target_full_video,
-        pred_future_video=pred_video,
-        context_len=int(getattr(runtime_cfg, "context_len", DEFAULT_CONTEXT_LEN)),
+        pred_full_video=pred_full_video,
     )
 
 
@@ -1379,18 +1374,13 @@ def _sample_local_base_full_video(
 def _build_rollout_video(
     *,
     target_full_video: torch.Tensor,
-    pred_future_video: torch.Tensor,
-    context_len: int,
+    pred_full_video: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build full target and generated rollout videos with a shared context prefix."""
+    """Build aligned full target and generated videos for comparison/export."""
     target_full = _normalize_video_for_export(target_full_video)
-    pred_future = _normalize_video_for_export(pred_future_video)
-    context_video = target_full[:, :context_len]
-    target_future = target_full[:, context_len:]
-    aligned_future_steps = min(int(target_future.shape[1]), int(pred_future.shape[1]))
-    target_rollout = torch.cat([context_video, target_future[:, :aligned_future_steps]], dim=1)
-    pred_rollout = torch.cat([context_video, pred_future[:, :aligned_future_steps]], dim=1)
-    return target_rollout, pred_rollout
+    pred_full = _normalize_video_for_export(pred_full_video)
+    aligned_steps = min(int(target_full.shape[1]), int(pred_full.shape[1]))
+    return target_full[:, :aligned_steps], pred_full[:, :aligned_steps]
 
 
 def _run_one_checkpoint_resolution(
@@ -1458,10 +1448,6 @@ def _run_one_checkpoint_resolution(
                 runtime_notes.append(
                     "Checkpoint filename marks this artifact as wrong_architecture; treat failures as expected."
                 )
-        elif mode == "repo_prompt":
-            checkpoint = None
-            runtime_cfg = _load_base_runtime_config(config_path)
-            runtime_cfg.conditioning_mode = "prompt"
         else:
             runtime_cfg = _load_base_runtime_config(config_path)
         runtime_notes.extend(
@@ -1486,11 +1472,6 @@ def _run_one_checkpoint_resolution(
             runtime_notes.append(
                 "Base mode uses the canonical Wan VACE pipeline with dense-prefix mask conditioning."
             )
-        elif mode == "repo_prompt":
-            runtime_notes.append(
-                "Repo prompt mode uses the repo chunkwise world-model inference path with prompt tokens "
-                "and no checkpoint overlay."
-            )
         else:
             runtime_notes.append(
                 "Checkpoint mode uses the repo's direct chunkwise world-model inference path to match training."
@@ -1514,7 +1495,7 @@ def _run_one_checkpoint_resolution(
         )
         total_frames = (
             context_len + horizon_len
-            if mode in {"checkpoint", "repo_prompt"}
+            if mode == "checkpoint"
             else DEFAULT_BASE_TOTAL_FRAMES
         )
         torch.manual_seed(seed)

@@ -139,7 +139,7 @@ def prepare_packed_batch(
         encoder=encoder,
         video=video,
         cache_key_suffix="black",
-        zero_to_one_value=0.0,
+        zero_to_one_value=0.5,
     )
     control_gray_latents = _get_constant_control_latents(
         encoder=encoder,

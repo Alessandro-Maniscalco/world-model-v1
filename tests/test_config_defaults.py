@@ -17,6 +17,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.wan_vace_model_id == "Wan-AI/Wan2.1-VACE-1.3B-diffusers"
     assert cfg.wan_vace_subfolder == "transformer"
     assert cfg.trainable_backbone == "full"
+    assert cfg.auto_batch_size is True
     assert cfg.conditioning_mode == "none"
     assert cfg.action_conditioning_window == "chunk"
     assert cfg.chunk_schedule_mode == "k_chunks"
@@ -24,6 +25,7 @@ def test_train_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_backbone_added_kv_mode == "none"
     assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
+    assert cfg.action_output_zero_init is True
     assert cfg.future_latent_residual_mode == "none"
     assert cfg.future_control_fill_mode == "gray"
     assert cfg.future_chunk_early_bias == 0.0
@@ -66,6 +68,7 @@ def test_infer_config_defaults_load_from_canonical_yaml() -> None:
     assert cfg.action_backbone_added_kv_mode == "none"
     assert cfg.action_token_latent_aux_loss_scale == 0.0
     assert cfg.action_token_scale == 1.0
+    assert cfg.action_output_zero_init is True
     assert cfg.future_latent_residual_mode == "none"
     assert cfg.future_control_fill_mode == "gray"
     assert cfg.lora_rank == 8

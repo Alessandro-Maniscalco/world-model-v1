@@ -14,7 +14,7 @@ class PreparedPackedBatch:
     Attributes:
     - z_past_video: Latent context video `[B, C, T_ctx, H, W]`.
     - z_future_video: Latent future video `[B, C, T_hor, H, W]`.
-    - control_black_latents: Constant black-frame control latents `[B, C, T, H, W]`.
+    - control_black_latents: Legacy-named neutral-fill control latents `[B, C, T, H, W]`.
     - control_gray_latents: Constant gray-frame control latents `[B, C, T, H, W]`.
     - a_plan: Conditioning placeholder aligned to the future latent window `[B, T_hor, A]`.
     - latent_shape: `(C_lat, H_lat, W_lat)` for the latent-video layout.

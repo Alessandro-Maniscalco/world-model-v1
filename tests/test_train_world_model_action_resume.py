@@ -87,6 +87,59 @@ def test_resume_training_state_skips_empty_null_action_state_for_action_encoder(
     assert torch.equal(action_encoder.net[1].weight, original_weight)
 
 
+def test_resume_training_state_skips_none_checkpoint_base_token_for_action_encoder() -> None:
+    """Treat a saved none-conditioning base token as fresh-action state on resume."""
+    train_script = _load_train_script_module()
+    prepared = _build_prepared_batch()
+    common = dict(
+        load_pretrained_backbone=False,
+        wan_num_attention_heads=2,
+        wan_attention_head_dim=8,
+        wan_text_dim=16,
+        wan_freq_dim=8,
+        wan_ffn_dim=32,
+        wan_num_layers=2,
+        vace_layers=(0, 1),
+        mask_channels=4,
+    )
+
+    none_cfg = TrainScriptConfig(trainable_backbone="full", conditioning_mode="none", **common)
+    none_model = train_script.build_model_from_config(none_cfg, prepared)
+    none_params = train_script._configure_trainable_parameters(
+        none_cfg,
+        none_model,
+        train_script.build_action_encoder_from_config(none_cfg, prepared, none_model),
+    )
+    none_optimizer = train_script._build_optimizer(none_cfg, none_params)
+    checkpoint = {
+        "model_state_dict": none_model.state_dict(),
+        "action_encoder_state_dict": {
+            "base_token": torch.linspace(0.0, 1.0, steps=16 * 5).view(5, 16),
+        },
+        "optimizer_state_dict": none_optimizer.state_dict(),
+        "step": 350,
+        "extra_state": {"config": {"conditioning_mode": "none"}},
+    }
+
+    action_cfg = TrainScriptConfig(trainable_backbone="none", conditioning_mode="action", **common)
+    action_model = train_script.build_model_from_config(action_cfg, prepared)
+    action_encoder = train_script.build_action_encoder_from_config(action_cfg, prepared, action_model)
+    original_weight = action_encoder.net[1].weight.detach().clone()
+    action_params = train_script._configure_trainable_parameters(action_cfg, action_model, action_encoder)
+    action_optimizer = train_script._build_optimizer(action_cfg, action_params)
+
+    resumed_step, restored_optimizer_state = train_script._resume_training_state(
+        checkpoint=checkpoint,
+        model=action_model,
+        action_encoder=action_encoder,
+        optimizer=action_optimizer,
+    )
+
+    assert resumed_step == 350
+    assert restored_optimizer_state is False
+    assert torch.equal(action_encoder.net[1].weight, original_weight)
+
+
 def _build_prepared_batch() -> PreparedPackedBatch:
     """Create a tiny packed batch for train-script wiring tests."""
     return PreparedPackedBatch(
