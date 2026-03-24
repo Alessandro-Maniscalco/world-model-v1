@@ -95,22 +95,41 @@ visually acceptable first.
   command does not currently look like a deterministic model-path or
   configuration bug; the highest-probability explanation is a transient
   runner-side interruption during startup or early model load.
+- The clean rerun of the same continuation did answer the checkpoint question.
+  `step_0000350` is still plausible on all `17` frames and stays out of the
+  blue/purple collapse family, but it regresses on motion-first ranking
+  relative to `step_0000300`. It still copies `f0-f8` and visible future motion
+  begins at `f9`, yet `f9-f16` stall earlier: the fork/gripper remains
+  recognizable and slightly cleaner than `step_0000300`, but late motion drops
+  enough that the arm report falls back to `undercommitted`
+  (`late_motion_ratio≈0.539`, `profile_correlation≈0.452`). There were no
+  held-out clips. `step_0000350` is closer to `step_0000300` than to the older
+  `step_0000400` freeze (`overall MAE≈3.45` vs `step_0000300`, `≈8.16` vs
+  `step_0000400` future tail), but the plain continuation family has now
+  visibly peaked at `step_0000300`.
 
 ## Active Question
-- Is there a better checkpoint between the current best `step_0000300` and the
-  older, more frozen `step_0000400`, or has this branch already peaked at
-  `300`?
+- With `step_0000300` now fixed as the best prompt-free base checkpoint in this
+  branch, does the action path stay neutral when attached to that checkpoint,
+  or does it immediately perturb the rollout before any action training?
 
 ## Current Decision
-- The active question is unchanged, but the first `step_0000350` attempt did
-  not answer it. The next controller pass should spend the long-run budget on
-  one clean rerun of the same `step_0000300 -> step_0000350` continuation in a
-  fresh output root, then evaluate `step_0000350` on the fixed operator slice.
-- Rank `step_0000350` by:
+- The checkpoint-selection question is answered: `step_0000350` is cleaner but
+  more frozen, so `step_0000300` remains the best base-only checkpoint and this
+  plain continuation neighborhood is exhausted.
+- The next controller pass should spend the long-run budget on a bounded
+  action-path invariant check on top of `step_0000300`: run the current
+  zero-step `conditioning_mode=action` override with the fresh zero-initialized
+  action encoder on the same fixed operator slice and compare it directly
+  against the validated `step_0000300` none-conditioned rollout. The branch is
+  ready for that check because the base clip is now plausibly stable and
+  structurally coherent even though it still misses contact.
+- Rank that result by:
   visual inspection first,
-  whether the future horizon stays out of the blue/purple collapse family,
-  whether the fork/gripper motion stays at least as committed as `step_0000300`,
-  whether the mild late bloom/ghosting shrinks relative to `step_0000300`,
+  whether the action-conditioned rollout stays visually indistinguishable or
+  very close to the `step_0000300` none baseline,
+  whether the fork/gripper region keeps the same late-horizon commitment and
+  avoids reopening blue wash, heavy ghosting, or early stop,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -119,6 +138,9 @@ visually acceptable first.
 - Do not spend long-run budget on prompt-conditioned branches.
 - Do not spend more budget reranking `step_0000250` versus `step_0000300`; that
   comparison is already resolved in favor of `step_0000300`.
+- Do not spend more long-run budget on plain `step_0000300 -> step_0000x` full
+  backbone continuations without changing a major lever; `step_0000350`
+  already showed the branch freezing again.
 - Do not revisit the exhausted zero-token, summary-token, control-fill-only, or
   residual-only zero-step neighborhoods unless a later contradiction appears.
 - Do not treat the trained `fullft_subset8_spread_resume200_lr5e5_step400`
