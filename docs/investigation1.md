@@ -136,23 +136,32 @@ visually acceptable first.
   full-window diff against the none baseline is still small
   (`overall MAE≈1.20` on the `0-255` RGB scale), so the current action path is
   close enough to neutral to justify the first bounded action-training run.
+- The first bounded action-conditioned continuation from `step_0000300` did
+  not start training and produced no checkpoints, generated videos, arm-crop
+  videos, or held-out clips. The first failing stage was the shell wrapper
+  itself: the controller command ended with a malformed here-document
+  (`warning: here-document at line 1 delimited by end-of-file (wanted 'PY')`
+  followed by `syntax error: unexpected end of file`), so none of the training
+  or eval stages executed. This is a command-construction failure, not a model
+  or runtime regression in the action branch.
 
 ## Active Question
 - Starting from the repaired `step_0000300` base checkpoint and a nearly
   neutral zero-init action path, can a first bounded action-conditioned
   continuation improve task-relevant fork/gripper motion without reopening blue
-  wash, heavy ghosting, or collapse?
+  wash, heavy ghosting, or collapse once the broken shell wrapper is removed?
 
 ## Current Decision
 - The checkpoint-selection question is answered: `step_0000350` is cleaner but
   more frozen, so `step_0000300` remains the best base-only checkpoint and this
   plain continuation neighborhood is exhausted.
 - The action no-op question is answered well enough to move on. The next
-  controller pass should spend the long-run budget on the first bounded
-  action-conditioned continuation from `step_0000300` under the same repaired
-  dual-anchor contract: keep the fresh zero-init action path, use
-  `trainable_backbone=none` so the backbone stays frozen, and evaluate the
-  branch at small checkpoints before `400` total steps.
+  controller pass should spend the long-run budget on the same first bounded
+  action-conditioned continuation from `step_0000300`, but rerun it with a
+  corrected shell chain. Keep the same repaired dual-anchor contract, keep the
+  fresh zero-init action path, use `trainable_backbone=none` so the backbone
+  stays frozen, and evaluate the branch at small checkpoints before `400` total
+  steps.
 - Rank that result by:
   visual inspection first,
   whether task-relevant fork/gripper motion becomes more committed than the
@@ -173,6 +182,9 @@ visually acceptable first.
 - Do not spend more long-run budget on additional zero-step action no-op probes
   unless a later contradiction appears; the current rerun is already close
   enough to the none baseline to justify the first action-training branch.
+- Do not treat the failed `step300_dualanchor_actionfreeze_zeroinit_...`
+  launch as evidence for or against the action-training hypothesis; it never
+  reached model execution.
 - Do not revisit the exhausted zero-token, summary-token, control-fill-only, or
   residual-only zero-step neighborhoods unless a later contradiction appears.
 - Do not treat the trained `fullft_subset8_spread_resume200_lr5e5_step400`
