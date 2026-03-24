@@ -9,6 +9,9 @@ training.
 - Review only `episode_index=1`, `start_frame=60` unless the operator changes
   it.
 - Do not use a text prompt.
+- Do not use action-conditioned branches until the prompt-free base path is
+  visibly acceptable on the operator slice. Actions are off-policy for the
+  current question.
 - Keep the same geometry unless there is a strong reason to change it:
   `224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`.
 - Start every new architecture branch from the same untouched pretrained
@@ -27,10 +30,10 @@ training.
   action encoder stays plausible and close to the matching none-conditioned
   reference (`overall MAE≈2.54`, `late-frame MAE≈4.06`) with no new artifact
   family.
-- The latest bounded training branch
-  `fullft_subset8_spread_resume200_lr5e5_step400_actionfreeze_zeroinit_subset8_step450`
-  is promising but not fully ranked yet because only the `step_0000400`
-  operator eval completed before the shell failed.
+- The latest bounded action-training branch is off-policy under the current
+  operator override. Keep its validated `step_0000400` result only as evidence
+  that the branch did not immediately collapse; do not spend the next run on
+  action evaluation.
 
 ## Canonical Baselines
 - Untouched pretrained zero-step `conditioning_mode=none` on the operator slice
@@ -48,12 +51,10 @@ training.
   earn another architecture branch because it preserves a bad base model.
 
 ## Active Question
-- Which first bounded prompt-free action-conditioned training continuation best
-  preserves the `step_0000350` base while starting to learn from actions on
-  `episode_index=1`, `start_frame=60`?
-- Keep the action path minimal:
-  fresh zero-init output projection, no prompt, no added-K/V routing, and no
-  extra action-temporal modules unless a bounded run proves they are needed.
+- Which prompt-free no-action base path gives a visibly decent continuation on
+  the fixed operator slice before any action-conditioning work begins?
+- Prefer architecture or inference-contract changes that preserve context
+  continuity without relying on prompts or actions.
 
 ## Proven Outcomes
 - Prompt-conditioned and inference-anchor explorations answered earlier
@@ -80,24 +81,30 @@ training.
   checkpoint evaluation. The completed `step_0000400` eval artifacts decode
   cleanly, and the failing comparison script only assumed a `17`-frame output
   when the current checkpoint-mode action eval artifact is future-only.
+- The old untouched-parent none dual-anchor result is no longer decisive,
+  because it was gathered before checkpoint-mode runtime overrides were fixed
+  by `0456e04`. The corrected prompt-checkpoint rerun proved those overrides
+  were previously being dropped, so the no-prompt none dual-anchor base path
+  still needs a real post-fix test.
 
 ## Current Decision
-- Retire further zero-step architecture sweeps from the untouched pretrained
-  parent.
-- Use the minimal fresh zero-init action path already validated on
-  `step_0000350` as the training architecture.
+- Pause action-conditioned follow-ups until the prompt-free base is acceptable.
 - Next run:
-  finish the interrupted frozen-backbone branch by evaluating
-  `step_0000450` on the fixed operator slice and comparing both completed eval
-  clips as future-only horizons against the `step_0000350` none baseline.
-- Do not spend another training run until `step_0000450` is reviewed video-
-  first. The current branch may already be good enough to continue or may have
-  regressed after `step_0000400`; the missing evidence is only the final eval.
-- Rank new training runs by:
+  rerun the untouched zero-step `conditioning_mode=none` base probe on the
+  fixed operator slice with true checkpoint overrides for
+  `future_control_fill_mode=last_context_frame` and
+  `future_latent_residual_mode=last_context_frame`.
+- Distinct hypothesis:
+  the earlier none dual-anchor verdict may have been a false negative caused
+  by the old checkpoint-override bug, and the corrected no-action dual-anchor
+  base path may now remove the blue collapse without any prompt or action
+  tokens.
+- Rank new base runs by:
   visual inspection first,
   whether `f0-f8` remain copied and `f9-f16` stay coherent without a new
   artifact family,
-  whether the arm shows more committed late motion without blur/ghosting,
+  whether the future horizon stays sharp and non-blue with the fork still
+  visible,
   and only then scalar closeness to the matching none-conditioned reference.
 
 ## Kept Code Changes
