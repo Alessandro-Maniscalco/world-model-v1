@@ -27,6 +27,10 @@ training.
   action encoder stays plausible and close to the matching none-conditioned
   reference (`overall MAE≈2.54`, `late-frame MAE≈4.06`) with no new artifact
   family.
+- The latest bounded training branch
+  `fullft_subset8_spread_resume200_lr5e5_step400_actionfreeze_zeroinit_subset8_step450`
+  is promising but not fully ranked yet because only the `step_0000400`
+  operator eval completed before the shell failed.
 
 ## Canonical Baselines
 - Untouched pretrained zero-step `conditioning_mode=none` on the operator slice
@@ -65,6 +69,17 @@ training.
 - The `step_0000350` zero-step action override proves the same minimal action
   path can stay plausible on a good prompt-free base, so the base checkpoint
   rather than the action architecture is now the dominant lever.
+- The first frozen-backbone action-training continuation does not reopen the
+  blue failure family at `step_0000400`. The completed operator eval is
+  future-only (`8` frames), but all `f0-f7` stay coherent and non-blue with
+  only mild arm blur/ghosting and a missed-contact near-miss. Motion remains
+  undercommitted (`late_motion_ratio≈0.64`), and future-only comparison
+  against the `step_0000350` none baseline is still close enough to keep
+  (`overall MAE≈4.15`).
+- The latest shell failure was in the ad-hoc equivalence step, not training or
+  checkpoint evaluation. The completed `step_0000400` eval artifacts decode
+  cleanly, and the failing comparison script only assumed a `17`-frame output
+  when the current checkpoint-mode action eval artifact is future-only.
 
 ## Current Decision
 - Retire further zero-step architecture sweeps from the untouched pretrained
@@ -72,10 +87,12 @@ training.
 - Use the minimal fresh zero-init action path already validated on
   `step_0000350` as the training architecture.
 - Next run:
-  a short prompt-free `conditioning_mode=action` continuation from
-  `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`
-  with a frozen backbone first, so the base continuation remains intact while
-  the action path starts learning.
+  finish the interrupted frozen-backbone branch by evaluating
+  `step_0000450` on the fixed operator slice and comparing both completed eval
+  clips as future-only horizons against the `step_0000350` none baseline.
+- Do not spend another training run until `step_0000450` is reviewed video-
+  first. The current branch may already be good enough to continue or may have
+  regressed after `step_0000400`; the missing evidence is only the final eval.
 - Rank new training runs by:
   visual inspection first,
   whether `f0-f8` remain copied and `f9-f16` stay coherent without a new
