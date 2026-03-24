@@ -85,6 +85,16 @@ visually acceptable first.
   the earlier good-motion `step_0000200` future tail than `step_0000250` is
   (`overall MAE≈4.96` vs `≈10.49`). The older saved `step_0000400` remains the
   more frozen endpoint of this same training family.
+- The first `step_0000300 -> step_0000350` continuation attempt did not reach a
+  checkpoint or any eval artifacts, so there were no new videos or held-out
+  clips to review from that long command. The recorded `train_stdout.log`
+  stopped after the initial device/dtype/resume lines, but an exact local
+  reproduction from the same `step_0000300` checkpoint with the same training
+  flags and `max_steps=301` completed successfully through
+  `final_checkpoint=...step_0000301.pt`. That means the failed `step_0000350`
+  command does not currently look like a deterministic model-path or
+  configuration bug; the highest-probability explanation is a transient
+  runner-side interruption during startup or early model load.
 
 ## Active Question
 - Is there a better checkpoint between the current best `step_0000300` and the
@@ -92,11 +102,10 @@ visually acceptable first.
   `300`?
 
 ## Current Decision
-- The active long command is the right next spend. Keep the same repaired none
-  contract and same fit-proven Adafactor / `batch_size=1` /
-  gradient-checkpointed settings, resume from `step_0000300`, cap at
-  `max_steps=350`, save `step_0000350`, and evaluate that checkpoint on the
-  fixed operator slice.
+- The active question is unchanged, but the first `step_0000350` attempt did
+  not answer it. The next controller pass should spend the long-run budget on
+  one clean rerun of the same `step_0000300 -> step_0000350` continuation in a
+  fresh output root, then evaluate `step_0000350` on the fixed operator slice.
 - Rank `step_0000350` by:
   visual inspection first,
   whether the future horizon stays out of the blue/purple collapse family,
