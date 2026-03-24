@@ -67,12 +67,29 @@ acceptable.
   validated dual-anchor branch. There were no held-out clips. The saved summary
   metadata still reports the legacy `gray` / `none` values, but that is now
   only a reporting mismatch, not a model-path mismatch.
+- The first bounded no-action training continuation attempt from the untouched
+  parent never reached checkpointing or video export. The first failure stage
+  was startup train-step preparation: training still treated the repaired
+  prompt-free none tokens as if they were horizon-aligned action tokens and
+  raised `ValueError: action_tokens time length must match z_future_video latent
+  horizon`. That training-path mismatch is now fixed, so global empty-prompt
+  token sequences are kept intact across teacher-forced chunks instead of being
+  sliced like actions.
+- After the training-path token fix, the next blocker was startup plumbing, not
+  model behavior: the original command still failed in auto batch-size probing
+  and then on resume optimizer-state mismatch. A cheap local reproduction now
+  shows the repaired training entrypoint can complete a real `max_steps=0`
+  startup pass from the untouched checkpoint when run with `batch_size=1`,
+  `--no-auto-batch-size`, and `--gradient-checkpointing`, while allowing a
+  fresh optimizer fallback when the saved optimizer parameter groups no longer
+  match the current module layout.
 
 ## Active Question
 - With the prompt-free none contract now repaired and reaching the real
-  untouched-parent eval path, does a short no-action training continuation from
-  the untouched pretrained parent improve motion and scene fidelity without
-  reopening the blue-collapse family?
+  untouched-parent eval path and the startup training blockers now removed,
+  does a short no-action training continuation from the untouched pretrained
+  parent improve motion and scene fidelity without reopening the blue-collapse
+  family?
 
 ## Current Decision
 - Keep the validated code change that upgrades only untouched pretrained none
@@ -91,9 +108,13 @@ acceptable.
   (`224x128`, `context_len=9`, `horizon_len=8`, `k=1`, `subset_size=8`), keep
   `conditioning_mode=none`, keep actions out of the run, cap the continuation
   at `400` steps, and then evaluate the resulting checkpoints on the fixed
-  operator slice. The question is whether the repaired prompt-free base
-  contract can now learn useful future motion without reopening the blue/purple
-  failure family.
+  operator slice. Use the repaired none contract explicitly
+  (`future_control_fill_mode=last_context_frame`,
+  `future_latent_residual_mode=last_context_frame`) together with the
+  startup-safe settings that now pass local validation:
+  `batch_size=1`, `--no-auto-batch-size`, and `--gradient-checkpointing`. The
+  question is whether the repaired prompt-free base contract can now learn
+  useful future motion without reopening the blue/purple failure family.
 - Rank the result by:
   visual inspection first,
   whether the future horizon stays out of the catastrophic blue/purple collapse
@@ -119,6 +140,9 @@ acceptable.
 - Do not spend time fixing the saved summary metadata mismatch before the first
   bounded no-action training continuation is answered; the model-path question
   is already resolved.
+- Do not spend time shrinking or redesigning the 512-token empty-prompt
+  sequence before the startup-safe training continuation is answered; that is
+  only needed if the bounded run still fails or regresses.
 - Do not do broader repository exploration before the first bounded untouched-
   parent training continuation is answered; the unresolved question is already
   concrete.
@@ -134,3 +158,11 @@ acceptable.
 - `7896373`: untouched pretrained none checkpoints (`max_steps == 0`) now
   default to the validated dual-anchor contract in the runtime factory, while
   trained none checkpoints keep their saved contract.
+- `validated in worktree`: training-side chunkwise flow matching now accepts
+  global prompt-free none-conditioning token sequences instead of forcing them
+  to match the latent future horizon, and `_resume_training_state` now falls
+  back to a fresh optimizer when saved optimizer parameter groups do not match
+  the current module layout. Targeted pytest passes (`97 passed`) and the exact
+  `max_steps=0` startup reproduction now completes with the startup-safe
+  settings (`batch_size=1`, `--no-auto-batch-size`,
+  `--gradient-checkpointing`).
