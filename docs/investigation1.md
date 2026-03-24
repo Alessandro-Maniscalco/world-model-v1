@@ -24,87 +24,66 @@ acceptable.
   It stays coherent through `f16` with mild late soft blur/ghosting and still
   misses contact. Use it only as a reference for what a decent prompt-free base
   looks like, not as the active parent for base-architecture diagnosis.
-- The old untouched-parent no-action probes are only diagnosis evidence now.
-  They proved the blue collapse is already in the base continuation path; they
-  are not current candidate solutions.
 
 ## Proven Outcomes
-- The current prompt-free `conditioning_mode=none` contract is not neutral:
-  it still routes the untouched backbone through null conditioning plus future
-  control defaults that are off-distribution for pretrained Wan/VACE.
+- The legacy prompt-free `conditioning_mode=none` contract is not neutral:
+  literal/summary null tokens plus gray future control and no latent residual
+  are off-distribution for pretrained Wan/VACE, which is why the untouched
+  parent collapses into the blue/purple failure family.
 - Correct checkpoint runtime overrides now apply after checkpoint metadata load
   (`0456e04`), so zero-step checkpoint probes are trustworthy.
-- Replacing literal zero tokens with a pretrained empty-prompt summary token
-  helped but did not fix the base path. In the validated
-  `untouched_base_none_pretrainednull_dualanchor_...` run, prediction starts
-  immediately at generated `f0` because the artifact is future-only; `f0-f2`
-  keep the plate and fork recognizable with less catastrophic wash than the old
-  zero-token dual-anchor probe, but `f3-f7` still pick up strong blue/yellow
-  color shift, arm-crop ghosting, and missed contact. There were no held-out
-  clips. Plausibility fails on `f3-f7`, and the generated video still sits far
-  from the original none floor (`overall MAE≈41.1`) even though it is closer to
-  the earlier zero-token dual-anchor probe (`overall MAE≈13.45`).
-- The remaining architectural mismatch after that run was concrete: the repo
-  was still treating `conditioning_mode=none` as chunk-conditioned
-  per-future-step tokens, so the empty prompt was collapsed into one repeated
-  token instead of a global text-token sequence like the pretrained Wan prompt
-  path.
-- The repo now uses Wan's full empty-prompt token sequence for
-  `conditioning_mode=none` in the local checkpoint-eval path instead of a
-  repeated summary token. A real-model smoke check confirms the
-  null-conditioning tensor shape is `512x4096`, and the runtime encoder emits
-  `1x512x4096` tokens for an 8-step future horizon.
-- That full empty-prompt token sequence materially improves the untouched-parent
-  base path on the dual-anchor contract. In the validated
-  `untouched_base_none_pretrainedseq_dualanchor_...` run, prediction still
-  starts immediately at generated `f0` because the artifact is future-only, but
-  `f0-f7` keep the plate, fork, and gripper recognizable and stay out of the
-  catastrophic blue/purple collapse family. The remaining defect is milder:
-  the prediction is darker and cooler than the reference from `f0`, soft late
+- `872de58` fixed the none-token path so checkpoint evals use Wan's full
+  empty-prompt token sequence as global conditioning instead of chunked repeated
+  summary tokens.
+- With that token fix plus both anchors
+  (`future_control_fill_mode=last_context_frame` and
+  `future_latent_residual_mode=last_context_frame`), the untouched-parent base
+  path becomes the first none-conditioned branch that stays out of the
+  catastrophic blue/purple collapse family. In the validated
+  `untouched_base_none_pretrainedseq_dualanchor_...` run, prediction is
+  future-only and starts immediately at generated `f0`, but `f0-f7` keep the
+  plate, fork, and gripper recognizable. The remaining defect is milder: the
+  prediction is darker and cooler than the reference from `f0`, soft late
   ghosting appears by the end of the horizon, and the fork still never reaches
-  contact. There were no held-out clips. Plausibility passes on all 8 frames,
-  the generated video differs from the old original none floor by
-  `overall MAE≈39.64`, differs from the older zero-token dual-anchor probe by
-  `≈8.31`, and differs from the summary-token dual-anchor probe by `≈17.55`.
-- Removing the future latent residual anchor while keeping only
-  `future_control_fill_mode=last_context_frame` regresses the same
-  untouched-parent branch. In the validated
-  `untouched_base_none_pretrainedseq_controlfilllastctx_...` run, prediction is
-  future-only and starts immediately at generated `f0`; `f0` is still
-  recognizable, but by `f1-f7` the arm/fork region turns into a bright blue
-  overexposed blob with a blown-out plate edge and obvious arm-crop haloing.
-  The fork remains barely recognizable, motion stops early, and contact is
-  still missed. There were no held-out clips. Plausibility fails on `f1-f7`,
-  `overall MAE≈18.18` versus the validated dual-anchor run, and the branch is
-  visibly worse despite staying on the same token sequence.
-- The older eval root
-  `runs/training_optimizer/eval/untouched_base_none_nulltokenfix_224x128_ep1_start60_step0000_operator`
-  still contains only `eval_stdout.log`. Treat it as unfinished and
-  unvalidated.
+  contact. There were no held-out clips. Plausibility passes on all 8 frames.
+- Both single-anchor simplifications regress visibly on the same untouched
+  parent and fixed slice:
+  `untouched_base_none_pretrainedseq_controlfilllastctx_...` keeps only
+  last-context control fill and by `f1-f7` turns the arm/fork region into a
+  bright blue overexposed blob with a blown-out plate edge and arm-crop haloing;
+  `untouched_base_none_pretrainedseq_residuallastctx_...` keeps only the latent
+  residual anchor and is even worse, failing from `f0` with full-frame
+  blue/purple smear, extreme color shift, and unreadable arm-crop blobs. There
+  were no held-out clips in either run. This exhausts the single-anchor
+  neighborhood.
 
 ## Active Question
-- Can the prompt-free no-action base path keep the recovered quality with
-  `future_latent_residual_mode=last_context_frame` alone, or does the
-  untouched parent really need both anchors together?
+- Does the new factory-side default keep untouched pretrained none checkpoints
+  on the validated dual-anchor contract without manual overrides, so the plain
+  zero-step base eval now stays on the recovered prompt-free path?
 
 ## Current Decision
-- Keep the validated code change that makes prompt-free none conditioning use
-  Wan's full empty-prompt token sequence as global conditioning instead of
-  chunk-conditioned repeated tokens.
-- Control-fill-only is no longer an open candidate: it visibly regressed.
-- The next controller pass should do one final bounded simplification test on
-  the same untouched parent and fixed operator slice: rerun the zero-step none
-  eval with `future_latent_residual_mode=last_context_frame` but without
-  `future_control_fill_mode=last_context_frame`, then compare that result
-  directly against the validated
-  `untouched_base_none_pretrainedseq_dualanchor_...` clip. The goal is to find
-  out whether the residual anchor alone is enough or whether the dual-anchor
-  contract is the minimal stable prompt-free base path.
+- Keep the validated code change that upgrades only untouched pretrained none
+  checkpoints (`max_steps == 0` in checkpoint metadata) from the legacy
+  `gray`/`none` contract to the validated dual-anchor contract while leaving
+  trained none checkpoints alone. The implementation lives in
+  `src/world_model/models/wan_vace_factory.py`, and targeted validation passed
+  with `76` tests across `tests/test_wan_vace_factory.py`,
+  `tests/test_sweep_local_repo_resolutions.py`, and
+  `tests/test_infer_world_model_wan_vace.py`.
+- The next controller pass should do one bounded validation run only: rerun the
+  untouched zero-step none checkpoint on the fixed operator slice with no
+  future-control or future-latent overrides, then compare that plain no-override
+  result directly against the validated
+  `untouched_base_none_pretrainedseq_dualanchor_...` clip. The question is
+  whether the code-level default now makes the base path work without manual
+  per-run patching.
 - Rank the result by:
   visual inspection first,
+  whether `f0-f7` stay out of the catastrophic blue/purple collapse family,
   whether the fork/gripper region stays recognizable through `f7`,
-  whether the blue overexposed arm/fork blob returns,
-  whether late ghosting and the cool tint get better or worse,
+  whether the darker cool tint and late ghosting remain at the milder
+  dual-anchor level,
   and only then scalar MAE.
 
 ## Not Needed Now
@@ -115,12 +94,12 @@ acceptable.
 - Do not expand beyond `episode_index=1`, `start_frame=60`.
 - Do not treat the trained `step_0000350` checkpoint as the active parent for
   this stage; it is only the quality reference.
-- Do not rerun the older zero-token or summary-token none branches unless a new
-  regression makes the comparison necessary again.
-- Do not rerun the control-fill-only branch unless the residual-only result
-  creates a contradiction that needs a direct three-way visual comparison.
-- Do not do broader repository exploration before the single-anchor none
-  ablation is answered; the unresolved question is already concrete.
+- Do not rerun the older zero-token, summary-token, control-fill-only, or
+  residual-only none branches unless the plain no-override validation creates a
+  contradiction that needs a direct comparison.
+- Do not do broader repository exploration before the plain no-override
+  untouched-parent eval is answered; the unresolved question is already
+  concrete.
 
 ## Kept Code Changes
 - `0456e04`: checkpoint-path local sweeps apply runtime overrides after loading
@@ -130,3 +109,6 @@ acceptable.
 - `872de58`: prompt-free none conditioning now uses Wan's full empty-prompt
   token sequence in the local checkpoint-eval path, and none-mode rollout
   treats that sequence as global conditioning instead of chunk slicing.
+- `7896373`: untouched pretrained none checkpoints (`max_steps == 0`) now
+  default to the validated dual-anchor contract in the runtime factory, while
+  trained none checkpoints keep their saved contract.
