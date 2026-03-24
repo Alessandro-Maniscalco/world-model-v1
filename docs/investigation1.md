@@ -138,11 +138,14 @@ same slice. Only then should action-conditioned training continue.
   fork at the same boundary. The generated MP4 is bitwise identical to the
   original baseline export (`overall MAE=0.0`, `late-frame MAE=0.0`).
 - After `0456e04` fixed checkpoint-mode runtime overrides, the corrected
-  checkpoint-path prompt+dual-anchor rerun still changed nothing. It again
-  copies `f0-f8`, then collapses into the same blue future wash at `f9-f16`;
-  the arm crop loses the fork at the same boundary, and the generated MP4 is
-  again bitwise identical to the original zero-step none baseline
-  (`overall MAE=0.0`, `late-frame MAE=0.0`).
+  checkpoint-path prompt+dual-anchor rerun no longer behaves like the blue
+  none floor. It stays static through `f8`, then keeps `f9-f16` non-blue and
+  structurally coherent with the same mild dark-blue tint and soft blur seen in
+  the best dual-anchor `repo_prompt` result; the arm crop keeps the fork and
+  gripper visible through `f16`, but the rollout remains undercommitted and
+  never reaches contact. The generated MP4 is bitwise identical to the
+  stabilized dual-anchor `repo_prompt` export (`overall MAE=0.0`,
+  `late-frame MAE=0.0`) rather than to the original zero-step none baseline.
 - These two base-path controls reject the simple wrapper-only explanation. The
   pretrained no-prompt base family is now non-improving on this slice even
   when the frame contract is moved closer to native VACE usage.
@@ -173,10 +176,12 @@ same slice. Only then should action-conditioned training continue.
 - Keep the dual-anchor none-checkpoint transfer as a failed local neighbor. It
   changed nothing at all, so inference-only control/residual anchoring is not
   enough to rescue the literal zero-token none path.
-- Retire checkpoint-path prompt reruns as a target branch. Even the corrected
-  prompt+dual-anchor checkpoint probe stayed bitwise identical to the blue
-  none-conditioned floor, and the operator does not want prompt conditioning
-  in the intended training path.
+- Retire checkpoint-path prompt reruns as a target branch. The corrected
+  prompt+dual-anchor checkpoint probe now matches the stabilized dual-anchor
+  `repo_prompt` path instead of the blue none-conditioned floor, so checkpoint
+  loading is not the blocker there. But it is still prompt-conditioned and
+  undercommitted, and the operator does not want prompt conditioning in the
+  intended training path.
 - The next bounded major lever is prompt-free and checkpoint-local: rerun the
   best trained none-conditioned checkpoint
   `fullft_subset8_spread_resume200_lr5e5_step400/checkpoints/step_0000350.pt`
