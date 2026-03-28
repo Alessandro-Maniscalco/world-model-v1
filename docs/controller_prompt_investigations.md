@@ -2,39 +2,19 @@
 
 - Broad architecture changes are encouraged.
 - Before editing, create a session-start git checkpoint commit.
-- Keep only validated edits. After any kept validated code change, create a
-  commit containing only your files.
-- Use `repo_edit_status=validated` only for kept validated edits,
-  `rollback_requested` when the controller should undo all edits from this turn,
-  otherwise `none`.
-- Use rollback freely for speculative edits that fail validation or do not earn
-  a better next decision.
+- Keep only validated edits. After any kept validated code change, create a commit containing only your files.
+- Use `repo_edit_status=validated` only for kept validated edits, `rollback_requested` when the controller should undo all edits from this turn, otherwise `none`.
+- Use rollback freely for speculative edits that fail validation or do not earn a better next decision.
 - Rollback affects repo files only, not `runs/`.
-- Record kept code-changing commits in `docs/investigation.md` under
-  `## Kept Code Changes`. Put detailed chronology in
-  `runs/training_optimizer/investigation_ledger.md`.
-- Delete `runs/` artifacts only when they are clearly dominated and no longer
-  needed. When unsure, keep them.
+- Delete `runs/` artifacts only when they are clearly dominated and no longer needed. When unsure, keep them.
 
 ## Long Experiment Commands
 
-- Never start long-running work inside the shared session. If needed, return
-  exactly one shell command via `run_long_command`.
+- Never start long-running work inside the shared session. If needed, return exactly one shell command via `run_long_command`.
 - Run Python and pytest inside `.venv`.
-- Prefer one bounded shell chain that directly answers the current question in
-  `docs/investigation.md`. 
 - If `scripts/check/sweep_local_repo_resolutions.py` only see `episode_index=1`, `start_frame=60`.
-- The command must produce the concrete artifacts needed for review.
-- Include the concrete checkpoint path, output directory, dataset slice, and
-  any key config overrides in experiment commands.
-- `long_command.reason` should say why this is the highest-value bounded action
-  for the current investigation.
-- In-session code edits are effectively free relative to another training or
-  evaluation run.
-- `long_command.expected_artifacts` should list the concrete artifact paths to
-  review.
-- Cap new exploratory runs at `400` steps first. Continue only if the result is
-  clearly answering the current question.
+- In-session code edits are effectively free relative to another training or evaluation run.
+- Cap new exploratory runs at `100` steps first. Continue only if the result is clearly answering the current question.
 
 ## Validation
 
@@ -57,8 +37,7 @@
 - Use this order:
   - `1. visual inspection`
   - `2. arm/tool movement and commitment`
-  - `3. overall scene fidelity and sharpness`
-  - `4. aggregate metrics such as MAE`
+  - `3. aggregate metrics such as MAE`
 - Treat plausibility as a safety gate and tie-break input.
 - When visual quality and metrics disagree, trust the video for keep/drop decisions.
 - Analyze only `episode_index=1`, `start_frame=60`.
@@ -80,9 +59,7 @@
 - After validation, do exactly one of:
   - make a validated repo edit,
   - return one `run_long_command`,
-  - return `stop` only for explicit operator stop, exhausted long-command
-    budget, or a truly unfixable blocker.
-- `stop` is exceptional. One exhausted family is not enough.
+  - return `stop` only for explicit operator stop, exhausted long-command budget, or a truly unfixable blocker. `stop` is exceptional. One exhausted family is not enough.
 
 ## Operator Control
 

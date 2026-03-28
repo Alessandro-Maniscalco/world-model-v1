@@ -91,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ignore any persisted session id and start a fresh shared Codex session.",
     )
     parser.add_argument(
+        "--codex-reuse-persisted-session",
+        action="store_true",
+        help="Reuse the last persisted shared Codex session from the state file.",
+    )
+    parser.add_argument(
         "--iterations",
         type=int,
         default=1,
@@ -125,6 +130,7 @@ def main() -> int:
         codex_timeout_seconds=args.codex_timeout_seconds,
         codex_session_id=args.codex_session_id,
         codex_force_fresh_session=args.codex_force_fresh_session,
+        codex_reuse_persisted_session=args.codex_reuse_persisted_session,
         iterations=args.iterations,
         dry_run=args.dry_run,
     )

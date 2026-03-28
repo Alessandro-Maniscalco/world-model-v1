@@ -66,6 +66,7 @@ def run_training_optimization_loop(
     codex_timeout_seconds: int = DEFAULT_CONTROLLER_CODEX_TIMEOUT_SECONDS,
     codex_session_id: str | None = None,
     codex_force_fresh_session: bool = False,
+    codex_reuse_persisted_session: bool = False,
     iterations: int = 1,
     dry_run: bool = False,
 ) -> list[dict[str, Any]]:
@@ -94,6 +95,7 @@ def run_training_optimization_loop(
         state=state,
         codex_session_id=codex_session_id,
         codex_force_fresh_session=codex_force_fresh_session,
+        codex_reuse_persisted_session=codex_reuse_persisted_session,
     )
     state["status"] = "running"
     state["phase"] = "in_session"
@@ -263,9 +265,17 @@ def _initialize_controller_state(
     state: dict[str, Any],
     codex_session_id: str | None,
     codex_force_fresh_session: bool,
+    codex_reuse_persisted_session: bool,
 ) -> dict[str, Any]:
     """Apply session overrides for one controller invocation."""
-    updated = _normalize_controller_state(state)
+    if _should_reset_for_fresh_controller_start(
+        codex_session_id=codex_session_id,
+        codex_force_fresh_session=codex_force_fresh_session,
+        codex_reuse_persisted_session=codex_reuse_persisted_session,
+    ):
+        updated = _normalize_controller_state({})
+    else:
+        updated = _normalize_controller_state(state)
     should_reset_invocation = codex_force_fresh_session or not _should_reuse_persisted_session(
         updated
     )
@@ -280,6 +290,20 @@ def _initialize_controller_state(
     if _should_reuse_persisted_session(updated):
         updated = _recover_deleted_latest_result_state(updated)
     return updated
+
+
+def _should_reset_for_fresh_controller_start(
+    *,
+    codex_session_id: str | None,
+    codex_force_fresh_session: bool,
+    codex_reuse_persisted_session: bool,
+) -> bool:
+    """Return whether this invocation should discard persisted controller state."""
+    if isinstance(codex_session_id, str) and codex_session_id.strip():
+        return False
+    if codex_force_fresh_session:
+        return True
+    return not codex_reuse_persisted_session
 
 
 def _run_shared_session_turn(
@@ -487,7 +511,8 @@ def _build_continuation_prompt(
     memory_path_text = _display_path(memory_path)
     state_path_text = _display_path(state_path)
     train_config_path_text = _display_path(train_config_path)
-    return f"""Continue the same shared Codex session.
+    return f"""Continue the same shared Codex session. Make sure you are working 
+    towards the goal in {memory_path_text}.
 
 Context JSON:
 {context_json}""".strip()

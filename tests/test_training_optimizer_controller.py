@@ -62,11 +62,10 @@ def test_custom_investigation_paths_select_a_matching_state_file(
 
     assert (
         "This is a shared session. Read docs/controller_prompt_investigationsmd. "
-        "The goal is in docs/investigation.md."
+        "The ##Goal is in docs/investigation.md."
     ) in prompts[0]
-    assert "Prompt rules: docs/controller_prompt_investigationsmd." in prompts[0]
-    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[0]
     assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[0]
+    assert "Read train.yaml for the base training configuration." in prompts[0]
     assert resolved_state_path.exists() is True
     assert state["last_stop_reason"] == "done"
 
@@ -112,6 +111,18 @@ def test_training_optimizer_cli_leaves_state_path_unset_when_omitted() -> None:
 
     assert args.memory_path == Path("docs/investigation1.md")
     assert args.state_path is None
+
+
+def test_training_optimizer_cli_can_opt_into_persisted_session_reuse() -> None:
+    """Expose an explicit flag for reusing the last persisted shared session."""
+    training_optimizer_script = _load_training_optimizer_script_module()
+    args = training_optimizer_script.build_parser().parse_args(
+        [
+            "--codex-reuse-persisted-session",
+        ]
+    )
+
+    assert args.codex_reuse_persisted_session is True
 
 
 def test_derive_state_path_for_custom_memory_path_uses_matching_stem(
@@ -357,24 +368,18 @@ def test_shared_session_loop_runs_one_full_external_command_cycle(
     assert any(item["path"] == str(expected_mp4) and item["exists"] for item in state["latest_artifacts"])
     assert (
         "This is a shared session. Read docs/controller_prompt_investigations.md. "
-        "The goal is in docs/investigation.md."
+        "The ##Goal is in docs/investigation.md."
     ) in prompts[0]
-    assert "Prompt rules: docs/controller_prompt_investigations.md." in prompts[0]
-    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[0]
     assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[0]
     assert "Read train.yaml for the base training configuration." in prompts[0]
-    assert (
-        "Your final output should be a JSON object with: action_type, summary, "
-        "session_work_summary, repo_edit_status, long_command, and stop."
-    ) in prompts[0]
+    assert "Your final output should be a JSON object." in prompts[0]
     assert '"state_path": "runs/training_optimizer/investigation_controller_state.json"' in prompts[0]
     assert '"train_config_path": "train.yaml"' in prompts[0]
     assert '"state_summary"' not in prompts[0]
     assert '"latest_artifacts"' not in prompts[0]
     assert "Continue the same shared Codex session." in prompts[1]
-    assert "Prompt rules: docs/controller_prompt_investigations.md." in prompts[1]
-    assert "Goal and mutable investigation memory: docs/investigation.md." in prompts[1]
-    assert "Latest controller state: runs/training_optimizer/investigation_controller_state.json." in prompts[1]
+    assert "Make sure you are working " in prompts[1]
+    assert "towards the goal in docs/investigation.md." in prompts[1]
     assert '"state_path": "runs/training_optimizer/investigation_controller_state.json"' in prompts[1]
     assert '"latest_result_available": true' in prompts[1]
     assert '"state_summary"' not in prompts[1]
@@ -504,6 +509,7 @@ def test_initialize_controller_state_resets_or_preserves_run_summaries() -> None
         },
         codex_session_id=None,
         codex_force_fresh_session=False,
+        codex_reuse_persisted_session=False,
     )
     preserved_state = controller_module._initialize_controller_state(
         state={
@@ -514,6 +520,7 @@ def test_initialize_controller_state_resets_or_preserves_run_summaries() -> None
         },
         codex_session_id=None,
         codex_force_fresh_session=False,
+        codex_reuse_persisted_session=True,
     )
 
     assert reset_state["current_invocation_run_summaries"] == []
@@ -553,6 +560,7 @@ def test_initialize_controller_state_drops_deleted_successful_latest_result(
         },
         codex_session_id=None,
         codex_force_fresh_session=False,
+        codex_reuse_persisted_session=True,
     )
     assert recovered_state["phase"] == "post_run_validation"
     assert recovered_state["last_long_command_result"]["returncode"] == 0
@@ -563,6 +571,7 @@ def test_initialize_controller_state_drops_deleted_successful_latest_result(
         state=recovered_state,
         codex_session_id=None,
         codex_force_fresh_session=False,
+        codex_reuse_persisted_session=True,
     )
 
     assert recovered_state["session_id"] == "session-mid-loop"
@@ -574,11 +583,35 @@ def test_initialize_controller_state_drops_deleted_successful_latest_result(
     assert recovered_state["history"][-1]["reason"] == "deleted_latest_result_artifacts"
 
 
-def test_running_state_reuses_persisted_session_on_new_invocation(
+def test_initialize_controller_state_clears_stale_state_without_explicit_resume() -> None:
+    """Drop stale session and history when a fresh controller launch is not resuming."""
+    cleared_state = controller_module._initialize_controller_state(
+        state={
+            "status": "running",
+            "phase": "post_run_validation",
+            "session_id": "session-mid-loop",
+            "resume_command": "codex resume session-mid-loop",
+            "last_stop_reason": "old reason",
+            "last_stop_summary_path": "runs/training_optimizer/old.md",
+            "active_long_command": {"command": "echo stale"},
+            "last_long_command_result": {"returncode": 0},
+            "latest_artifacts": [{"path": "runs/demo/out.mp4", "exists": True}],
+            "current_invocation_run_summaries": ["keep summary"],
+            "history": [{"entry_type": "long_command", "command": "echo stale"}],
+        },
+        codex_session_id=None,
+        codex_force_fresh_session=False,
+        codex_reuse_persisted_session=False,
+    )
+
+    assert cleared_state == controller_module._normalize_controller_state({})
+
+
+def test_running_state_reuses_persisted_session_on_new_invocation_when_requested(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Resume the persisted shared session when the controller is still mid-loop."""
+    """Resume the persisted shared session only when the operator opts in."""
     state_path, memory_path, prompt_path = _make_controller_paths(tmp_path)
     train_config_path = tmp_path / "train.yaml"
     train_config_path.write_text("repo_id: demo\n", encoding="utf-8")
@@ -611,9 +644,75 @@ def test_running_state_reuses_persisted_session_on_new_invocation(
         memory_path=memory_path,
         prompt_path=prompt_path,
         state_path=state_path,
+        codex_reuse_persisted_session=True,
     )
 
     assert session_calls == ["session-mid-loop"]
+
+
+def test_fresh_invocation_starts_new_session_without_reusing_stale_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Ignore stale persisted session state by default on a fresh controller launch."""
+    state_path, memory_path, prompt_path = _make_controller_paths(tmp_path)
+    train_config_path = tmp_path / "train.yaml"
+    train_config_path.write_text("repo_id: demo\n", encoding="utf-8")
+    memory_path.write_text(
+        "\n".join(
+            [
+                "## Goal",
+                "Goal text.",
+                "",
+                "## Verified numbered process",
+                "- stale verification",
+                "",
+                "## Kept Code Changes",
+                "- stale change",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    controller_module.save_controller_state(
+        state_path,
+        {
+            "session_id": "session-mid-loop",
+            "status": "running",
+            "phase": "post_run_validation",
+            "history": [{"entry_type": "long_command", "command": "echo stale"}],
+        },
+    )
+
+    session_calls: list[str | None] = []
+    prompts: list[str] = []
+
+    monkeypatch.setattr(controller_module, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(controller_module, "ensure_codex_chatgpt_login", lambda: None)
+
+    def fake_run_codex_exec(*, prompt: str, session_id: str | None = None, **_: object) -> SimpleNamespace:
+        prompts.append(prompt)
+        session_calls.append(session_id)
+        return SimpleNamespace(
+            payload=_stop_payload("done"),
+            session_id="session-fresh",
+        )
+
+    monkeypatch.setattr(controller_module, "run_codex_exec", fake_run_codex_exec)
+
+    controller_module.run_training_optimization_loop(
+        train_config_path=train_config_path,
+        memory_path=memory_path,
+        prompt_path=prompt_path,
+        state_path=state_path,
+    )
+    state = controller_module.load_controller_state(state_path)
+
+    assert session_calls == [None]
+    assert "This is a shared session." in prompts[0]
+    assert "Continue the same shared Codex session." not in prompts[0]
+    assert state["session_id"] == "session-fresh"
+    assert state["history"][-1]["summary"] == "done"
 
 
 def test_render_controller_status_hides_last_stop_fields_while_running(
